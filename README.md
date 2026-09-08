@@ -9,7 +9,7 @@
 - 可执行入口支持 `--help` 和 `--version`
 - 尚未实现 SQL、执行器、Catalog 或页式存储
 - 编译器层、存储层、core 层均为占位静态库
-- 跨模块消息契约的主体方向与边界细节已记录在 docs；尚未编写公共接口头文件
+- 跨模块契约头文件已落地在 `include/tinydbms/`，模块 API 尚未实现
 
 ## 已确认的技术基线
 
@@ -39,6 +39,7 @@ src/app/        可执行入口（当前仅 --help / --version）
 src/compiler/   SQL 编译器层占位
 src/core/       Database Core 占位
 src/storage/    页式存储层占位
+include/        公共契约头文件（common / compiler / storage / core）
 tests/          CTest 测试
 docs/           设计文档（技术决策、模块契约、字段级契约）
 ```
