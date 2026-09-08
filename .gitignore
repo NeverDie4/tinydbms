@@ -1,0 +1,40 @@
+# Build output
+/build/
+/out/
+cmake-build-*/
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# CMake / tooling
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+.clangd/
+
+# Editors
+.vscode/
+.idea/
+*.code-workspace
+*~
+*.swp
+*.swo
+
+# AI IDEs
+.cursor/
+.windsurf/
+.trae/
+
+# OS
+.DS_Store
+Thumbs.db
