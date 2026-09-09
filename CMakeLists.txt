@@ -17,6 +17,14 @@ option(
     OFF
 )
 
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wconversion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wsign-conversion>
+)
+
 add_subdirectory(src/compiler)
 add_subdirectory(src/storage)
 add_subdirectory(src/core)
