@@ -198,6 +198,27 @@ bool test_open_recovery_failure_cleans_up() {
     return true;
 }
 
+bool test_invalid_catalog_metadata_is_rejected() {
+    fake::reset();
+    fake::set_tables({
+        TableMeta{
+            1,
+            "broken",
+            {{"value", static_cast<Type>(99)}}}});
+
+    Database database;
+    const auto failed = database.open(tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(failed.error.has_value());
+    CHECK(failed.error->kind == ErrorKind::kInternal);
+    CHECK(fake::state().close_calls == 1);
+    CHECK(!fake::state().opened);
+
+    fake::set_tables({});
+    CHECK(open_database(database));
+    CHECK(!database.close().error.has_value());
+    return true;
+}
+
 bool test_moved_from_is_safe_and_returns_error() {
     fake::reset();
     Database source;
@@ -374,6 +395,7 @@ int main() {
         test_process_guard_and_close_failure_release() &&
         test_repeated_lifecycle_calls_are_rejected() &&
         test_open_recovery_failure_cleans_up() &&
+        test_invalid_catalog_metadata_is_rejected() &&
         test_moved_from_is_safe_and_returns_error() &&
         test_move_assignment_transfers_open_state() &&
         test_destructor_releases_process_guard() &&

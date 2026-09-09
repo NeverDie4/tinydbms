@@ -1,9 +1,15 @@
 add_library(tinydbms_core STATIC
     database.cpp
     executor.cpp
+    expression.cpp
     script.cpp
 )
 
 target_include_directories(tinydbms_core PUBLIC
     ${PROJECT_SOURCE_DIR}/include
+)
+
+target_link_libraries(tinydbms_core PUBLIC
+    tinydbms_compiler
+    tinydbms_storage
 )

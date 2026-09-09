@@ -126,6 +126,10 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
 
         std::uint64_t next_table_id = 0;
         for (TableMeta& table : listed.tables) {
+            if (auto metadata_error = internal::validate_table_metadata(table);
+                metadata_error.has_value()) {
+                return abort_open(std::move(*metadata_error));
+            }
             if (internal::has_duplicate_table(restored, table)) {
                 return abort_open(internal::make_error(
                     ErrorKind::kInternal,

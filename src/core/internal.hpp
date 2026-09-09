@@ -6,6 +6,7 @@
 #include "tinydbms/storage.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +19,10 @@ struct Database::Impl {
     bool open = false;
 
     void clear() noexcept;
+    ExecuteResult execute_create_table(const compiler::CreateTablePlan& plan);
+    ExecuteResult execute_insert(const compiler::InsertPlan& plan);
+    ExecuteResult execute_delete(const compiler::DeletePlan& plan);
+    ExecuteResult execute_query(const compiler::QueryPlan& plan);
     ExecuteResult execute_plan_impl(compiler::Plan plan);
 };
 
@@ -44,6 +49,22 @@ inline bool has_duplicate_table(
         }
     }
     return false;
+}
+
+inline bool is_supported_type(Type type) noexcept {
+    return type == Type::kInt || type == Type::kVarchar;
+}
+
+inline std::optional<Error> validate_table_metadata(const TableMeta& table) {
+    if (table.columns.empty()) {
+        return make_error(ErrorKind::kInternal, "table schema must contain at least one column");
+    }
+    for (const ColumnMeta& column : table.columns) {
+        if (!is_supported_type(column.type)) {
+            return make_error(ErrorKind::kInternal, "table schema contains an unsupported column type");
+        }
+    }
+    return std::nullopt;
 }
 
 inline bool is_execution_failure(const ExecuteResult& result) {
