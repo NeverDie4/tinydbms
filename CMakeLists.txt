@@ -11,6 +11,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TINYDBMS_BUILD_TESTS "Build tinydbms tests" ON)
+option(
+    TINYDBMS_ENABLE_REAL_MODULES
+    "Connect the product CLI to the delivered compiler and storage implementations"
+    OFF
+)
 
 add_subdirectory(src/compiler)
 add_subdirectory(src/storage)

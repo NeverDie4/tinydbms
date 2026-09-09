@@ -4,11 +4,14 @@
 #include "tinydbms/compiler.hpp"
 #include "tinydbms/core.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <variant>
 
 namespace tinydbms::core::internal::expression {
+
+inline constexpr std::size_t kMaxExpressionDepth = 256;
 
 enum class ExprType {
     kInt,

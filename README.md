@@ -6,9 +6,10 @@
 
 当前仓库处于分层实现阶段：
 
-- 可执行入口支持 `--help` 和 `--version`
-- core 已实现 `Database` 生命周期、Catalog 恢复、TableId 分配、CREATE TABLE 执行和脚本主循环
-- compiler、storage 仍为占位静态库；Insert/Delete/Query 和完整 CLI 尚未实现
+- 可执行入口已实现 `--help`、`--version`、`--data-dir`、REPL/批处理、结果展示和退出码策略
+- core 已实现 `Database` 生命周期、Catalog 恢复、TableId 分配、CREATE TABLE、INSERT、DELETE、SELECT
+  执行和脚本主循环
+- compiler、storage 仍为占位静态库；默认构建的 CLI 使用不可用模块适配器，完整 SQL 链路尚未接通
 - 跨模块契约头文件已落地在 `include/tinydbms/`，真实模块 API 仍待实现
 
 ## 已确认的技术基线
@@ -23,6 +24,12 @@
 
 技术决策见 [docs/技术决策.md](docs/技术决策.md)，模块交互契约见 [docs/模块交互契约.md](docs/模块交互契约.md)，字段级消息契约见 [docs/消息契约详细设计.md](docs/消息契约详细设计.md)。
 
+当前实现阶段的设计入口：
+
+- [core 与 CLI 实现设计](docs/core-cli/实现设计.md)
+- [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
+- [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
+
 ## 构建与测试
 
 ```bash
@@ -32,14 +39,17 @@ ctest --preset debug
 ./build/debug/src/app/tinydbms --help
 ```
 
+compiler/storage 交付后，使用 `-DTINYDBMS_ENABLE_REAL_MODULES=ON` 重新配置构建，才会启用真实
+`CoreSession` 和完整 SQL 链路；占位构建仍可独立验证 CLI 参数、输入输出和生命周期测试。
+
 ## 目录结构
 
 ```text
-src/app/        可执行入口（当前仅 --help / --version）
+src/app/        可执行入口与 CLI 逻辑（真实模块交付后接通 SQL）
 src/compiler/   SQL 编译器层占位
-src/core/       Database Core（按 database / script / executor 拆分）
-src/storage/    页式存储层占位
+src/core/       Database Core（按 database / script / executor / expression 拆分）
+src/storage/    物理存储层占位
 include/        公共契约头文件（common / compiler / storage / core）
 tests/          CTest 测试
-docs/           设计文档（技术决策、模块契约、字段级契约）
+docs/           设计文档（技术决策、模块契约、字段级契约和阶段实现规格）
 ```

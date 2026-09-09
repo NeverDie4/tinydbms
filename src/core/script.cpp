@@ -86,8 +86,14 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             }
         }
     } catch (const std::exception& exception) {
+        if (impl_->open) {
+            impl_->abort_after_storage_exception();
+        }
         result.outcomes.push_back(internal::make_execute_error(ErrorKind::kInternal, exception.what()));
     } catch (...) {
+        if (impl_->open) {
+            impl_->abort_after_storage_exception();
+        }
         result.outcomes.push_back(internal::make_execute_error(
             ErrorKind::kInternal,
             "unknown exception while executing script"));

@@ -85,9 +85,15 @@ bool compare_strings(
     return false;
 }
 
-ValidationResult validate_impl(const compiler::Expr& expr, const TableMeta& table) {
+ValidationResult validate_impl(
+    const compiler::Expr& expr,
+    const TableMeta& table,
+    std::size_t depth) {
+    if (depth >= kMaxExpressionDepth) {
+        return make_error("expression depth exceeds core limit");
+    }
     return std::visit(
-        [&table](const auto& node) -> ValidationResult {
+        [&table, depth](const auto& node) -> ValidationResult {
             using NodeType = std::decay_t<decltype(node)>;
 
             if constexpr (std::is_same_v<NodeType, compiler::ColumnRef>) {
@@ -102,11 +108,11 @@ ValidationResult validate_impl(const compiler::Expr& expr, const TableMeta& tabl
                     return make_error("binary expression has a null child");
                 }
 
-                ValidationResult lhs = validate_impl(*node.lhs, table);
+                ValidationResult lhs = validate_impl(*node.lhs, table, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&lhs)) {
                     return *error;
                 }
-                ValidationResult rhs = validate_impl(*node.rhs, table);
+                ValidationResult rhs = validate_impl(*node.rhs, table, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&rhs)) {
                     return *error;
                 }
@@ -146,7 +152,7 @@ ValidationResult validate_impl(const compiler::Expr& expr, const TableMeta& tabl
                 if (!node.operand) {
                     return make_error("unary expression has a null operand");
                 }
-                ValidationResult operand = validate_impl(*node.operand, table);
+                ValidationResult operand = validate_impl(*node.operand, table, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&operand)) {
                     return *error;
                 }
@@ -162,9 +168,13 @@ ValidationResult validate_impl(const compiler::Expr& expr, const TableMeta& tabl
 EvaluationResult evaluate_impl(
     const compiler::Expr& expr,
     const TableMeta& table,
-    const Row& row) {
+    const Row& row,
+    std::size_t depth) {
+    if (depth >= kMaxExpressionDepth) {
+        return make_error("expression depth exceeds core limit");
+    }
     return std::visit(
-        [&table, &row](const auto& node) -> EvaluationResult {
+        [&table, &row, depth](const auto& node) -> EvaluationResult {
             using NodeType = std::decay_t<decltype(node)>;
 
             if constexpr (std::is_same_v<NodeType, compiler::ColumnRef>) {
@@ -181,11 +191,11 @@ EvaluationResult evaluate_impl(
 
                 // Both operands are evaluated deliberately. Expressions have no side effects;
                 // eager evaluation gives malformed runtime data a deterministic failure path.
-                EvaluationResult lhs = evaluate_impl(*node.lhs, table, row);
+                EvaluationResult lhs = evaluate_impl(*node.lhs, table, row, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&lhs)) {
                     return *error;
                 }
-                EvaluationResult rhs = evaluate_impl(*node.rhs, table, row);
+                EvaluationResult rhs = evaluate_impl(*node.rhs, table, row, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&rhs)) {
                     return *error;
                 }
@@ -253,7 +263,7 @@ EvaluationResult evaluate_impl(
                 if (!node.operand) {
                     return make_error("unary expression has a null operand");
                 }
-                EvaluationResult operand = evaluate_impl(*node.operand, table, row);
+                EvaluationResult operand = evaluate_impl(*node.operand, table, row, depth + 1U);
                 if (const Error* error = std::get_if<Error>(&operand)) {
                     return *error;
                 }
@@ -285,13 +295,13 @@ std::optional<Error> validate_row(const TableMeta& table, const Row& row) {
 }
 
 ValidationResult validate(const compiler::Expr& expr, const TableMeta& table) {
-    return validate_impl(expr, table);
+    return validate_impl(expr, table, 0);
 }
 
 std::optional<Error> validate_predicate(
     const compiler::Expr& expr,
     const TableMeta& table) {
-    ValidationResult result = validate_impl(expr, table);
+    ValidationResult result = validate_impl(expr, table, 0);
     if (const Error* error = std::get_if<Error>(&result)) {
         return *error;
     }
@@ -305,14 +315,14 @@ EvaluationResult evaluate(
     const compiler::Expr& expr,
     const TableMeta& table,
     const Row& row) {
-    return evaluate_impl(expr, table, row);
+    return evaluate_impl(expr, table, row, 0);
 }
 
 std::variant<bool, Error> evaluate_predicate(
     const compiler::Expr& expr,
     const TableMeta& table,
     const Row& row) {
-    EvaluationResult result = evaluate_impl(expr, table, row);
+    EvaluationResult result = evaluate_impl(expr, table, row, 0);
     if (const Error* error = std::get_if<Error>(&result)) {
         return *error;
     }

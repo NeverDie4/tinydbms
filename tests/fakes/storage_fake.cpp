@@ -87,6 +87,10 @@ void set_throw_after_open(bool enabled) {
     fake_state.throw_after_open = enabled;
 }
 
+void set_throw_before_close(bool enabled) {
+    fake_state.throw_before_close = enabled;
+}
+
 void set_throw_on_close(bool enabled) {
     fake_state.throw_on_close = enabled;
 }
@@ -97,6 +101,10 @@ void set_throw_on_list_tables(bool enabled) {
 
 void set_throw_on_create_table(bool enabled) {
     fake_state.throw_on_create_table = enabled;
+}
+
+void set_throw_after_create_table(bool enabled) {
+    fake_state.throw_after_create_table = enabled;
 }
 
 void set_throw_on_open_table(bool enabled) {
@@ -119,8 +127,16 @@ void set_throw_on_insert(bool enabled) {
     fake_state.throw_on_insert = enabled;
 }
 
+void set_throw_after_insert(bool enabled) {
+    fake_state.throw_after_insert = enabled;
+}
+
 void set_throw_on_delete(bool enabled) {
     fake_state.throw_on_delete = enabled;
+}
+
+void set_throw_after_delete(bool enabled) {
+    fake_state.throw_after_delete = enabled;
 }
 
 void clear_close_error() {
@@ -189,6 +205,9 @@ CloseStorageResult close_storage(const CloseStorageRequest&) {
         return CloseStorageResult{invalid_request("storage is not open")};
     }
 
+    if (fake.throw_before_close) {
+        throw std::runtime_error("injected pre-close exception");
+    }
     fake.opened = false;
     fake.cursor_opened = false;
     fake.active_cursor = 0;
@@ -235,6 +254,9 @@ CreateTableResult create_table(const CreateTableRequest& request) {
     }
 
     fake.tables.push_back(TableMeta{request.table_id, request.table_name, request.columns});
+    if (fake.throw_after_create_table) {
+        throw std::runtime_error("injected post-create_table exception");
+    }
     return CreateTableResult{std::nullopt};
 }
 
@@ -368,6 +390,9 @@ InsertResult insert(const InsertRequest& request) {
         fake.records.push_back(Record{rid, row});
         rids.push_back(rid);
     }
+    if (fake.throw_after_insert) {
+        throw std::runtime_error("injected post-insert exception");
+    }
     return InsertResult{std::move(rids), std::nullopt};
 }
 
@@ -405,6 +430,9 @@ DeleteResult delete_records(const DeleteRequest& request) {
             fake.records.erase(record);
             ++deleted_count;
         }
+    }
+    if (fake.throw_after_delete) {
+        throw std::runtime_error("injected post-delete exception");
     }
     return DeleteResult{deleted_count, std::nullopt};
 }

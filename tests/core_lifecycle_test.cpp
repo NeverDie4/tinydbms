@@ -213,6 +213,27 @@ bool test_invalid_catalog_metadata_is_rejected() {
     CHECK(fake::state().close_calls == 1);
     CHECK(!fake::state().opened);
 
+    fake::set_tables({
+        TableMeta{1, "Users", {{"id", Type::kInt}}}});
+    Database invalid_name;
+    const auto invalid_name_result = invalid_name.open(
+        tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(invalid_name_result.error.has_value());
+    CHECK(invalid_name_result.error->kind == ErrorKind::kInternal);
+    CHECK(!fake::state().opened);
+
+    fake::set_tables({
+        TableMeta{
+            1,
+            "users",
+            {ColumnMeta{"id", Type::kInt}, ColumnMeta{"id", Type::kInt}}}});
+    Database duplicate_columns;
+    const auto duplicate_columns_result = duplicate_columns.open(
+        tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(duplicate_columns_result.error.has_value());
+    CHECK(duplicate_columns_result.error->kind == ErrorKind::kInternal);
+    CHECK(!fake::state().opened);
+
     fake::set_tables({});
     CHECK(open_database(database));
     CHECK(!database.close().error.has_value());
@@ -255,6 +276,25 @@ bool test_move_assignment_transfers_open_state() {
 
     CHECK(!destination.close().error.has_value());
     CHECK(!fake::state().opened);
+    return true;
+}
+
+bool test_move_assignment_preserves_cleanup_handle_on_exception() {
+    fake::reset();
+    Database destination;
+    CHECK(open_database(destination));
+
+    fake::set_throw_before_close(true);
+    const auto close_exception = destination.close();
+    CHECK(close_exception.error.has_value());
+    CHECK(close_exception.error->kind == ErrorKind::kInternal);
+
+    Database source;
+    destination = std::move(source);
+    fake::set_throw_before_close(false);
+    CHECK(!destination.close().error.has_value());
+    CHECK(open_database(source));
+    CHECK(!source.close().error.has_value());
     return true;
 }
 
@@ -317,6 +357,8 @@ bool test_unexpected_storage_exceptions_are_contained() {
     const ExecuteResult& create_exception = create_exception_script.outcomes.front();
     CHECK(is_error(create_exception, ErrorKind::kInternal));
     fake::set_throw_on_create_table(false);
+    CHECK(!database.close().error.has_value());
+    CHECK(open_database(database));
     const auto retry_script = execute_one_plan(database, create_table_plan("events"));
     CHECK(retry_script.outcomes.size() == 1);
     const ExecuteResult& retry = retry_script.outcomes.front();
@@ -329,6 +371,88 @@ bool test_unexpected_storage_exceptions_are_contained() {
     CHECK(!fake::state().opened);
     fake::set_throw_on_close(false);
 
+    CHECK(!database.close().error.has_value());
+    CHECK(open_database(database));
+    CHECK(!database.close().error.has_value());
+    return true;
+}
+
+bool test_storage_cleanup_is_retryable_after_pre_close_exception() {
+    fake::reset();
+    Database database;
+    CHECK(open_database(database));
+
+    fake::set_throw_before_close(true);
+    const auto close_exception = database.close();
+    CHECK(close_exception.error.has_value());
+    CHECK(close_exception.error->kind == ErrorKind::kInternal);
+    CHECK(fake::state().opened);
+
+    fake::set_throw_before_close(false);
+    Database competing_database;
+    const std::size_t open_calls = fake::state().open_calls;
+    const auto competing_open = competing_database.open(
+        tinydbms::core::OpenDatabaseRequest{"other-data"});
+    CHECK(competing_open.error.has_value());
+    CHECK(competing_open.error->kind == ErrorKind::kExecute);
+    CHECK(fake::state().open_calls == open_calls);
+
+    const auto reopen_before_cleanup = database.open(
+        tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(reopen_before_cleanup.error.has_value());
+    CHECK(reopen_before_cleanup.error->kind == ErrorKind::kExecute);
+
+    CHECK(!database.close().error.has_value());
+    CHECK(!fake::state().opened);
+    CHECK(open_database(database));
+    CHECK(!database.close().error.has_value());
+    return true;
+}
+
+bool test_destructor_releases_guard_after_cleanup_retry_failure() {
+    fake::reset();
+    {
+        Database database;
+        CHECK(open_database(database));
+        fake::set_throw_before_close(true);
+        const auto close_exception = database.close();
+        CHECK(close_exception.error.has_value());
+        CHECK(close_exception.error->kind == ErrorKind::kInternal);
+    }
+
+    fake::set_throw_before_close(false);
+    CHECK(!tinydbms::storage::close_storage(tinydbms::storage::CloseStorageRequest{}).error.has_value());
+    Database next;
+    CHECK(open_database(next));
+    CHECK(!next.close().error.has_value());
+    return true;
+}
+
+bool test_open_cleanup_is_retryable_after_pre_close_exception() {
+    fake::reset();
+    fake::set_throw_on_list_tables(true);
+    fake::set_throw_before_close(true);
+    Database database;
+
+    const auto open_exception = database.open(
+        tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(open_exception.error.has_value());
+    CHECK(open_exception.error->kind == ErrorKind::kInternal);
+    CHECK(fake::state().opened);
+
+    Database competing_database;
+    const std::size_t open_calls = fake::state().open_calls;
+    const auto competing_open = competing_database.open(
+        tinydbms::core::OpenDatabaseRequest{"other-data"});
+    CHECK(competing_open.error.has_value());
+    CHECK(competing_open.error->kind == ErrorKind::kExecute);
+    CHECK(fake::state().open_calls == open_calls);
+
+    fake::set_throw_on_list_tables(false);
+    fake::set_throw_before_close(false);
+    CHECK(database.open(tinydbms::core::OpenDatabaseRequest{"test-data"}).error.has_value());
+    CHECK(!database.close().error.has_value());
+    CHECK(!fake::state().opened);
     CHECK(open_database(database));
     CHECK(!database.close().error.has_value());
     return true;
@@ -398,9 +522,13 @@ int main() {
         test_invalid_catalog_metadata_is_rejected() &&
         test_moved_from_is_safe_and_returns_error() &&
         test_move_assignment_transfers_open_state() &&
+        test_move_assignment_preserves_cleanup_handle_on_exception() &&
         test_destructor_releases_process_guard() &&
         test_invalid_open_and_unopened_plan_do_not_touch_storage() &&
         test_unexpected_storage_exceptions_are_contained() &&
+        test_storage_cleanup_is_retryable_after_pre_close_exception() &&
+        test_destructor_releases_guard_after_cleanup_retry_failure() &&
+        test_open_cleanup_is_retryable_after_pre_close_exception() &&
         test_list_tables_exception_cleans_up() &&
         test_execute_script_compiles_in_order_and_stops_on_error();
 

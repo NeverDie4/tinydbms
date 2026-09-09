@@ -2,6 +2,7 @@
 #include "fakes/storage_fake.hpp"
 #include "tinydbms/core.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <iostream>
@@ -104,6 +105,14 @@ Expr logic(LogicOp op, Expr lhs, Expr rhs) {
 Expr logical_not(Expr operand) {
     return Expr{tinydbms::compiler::Unary{
         std::make_unique<Expr>(std::move(operand))}};
+}
+
+Expr deeply_nested_predicate(std::size_t depth) {
+    Expr predicate = compare(CmpOp::kEq, column(0), literal(int_value(1)));
+    for (std::size_t index = 0; index < depth; ++index) {
+        predicate = logical_not(std::move(predicate));
+    }
+    return predicate;
 }
 
 std::unique_ptr<PlanNode> scan(TableId table_id = 1) {
@@ -474,6 +483,21 @@ bool test_invalid_predicate_is_rejected_before_open_table() {
     return true;
 }
 
+bool test_expression_depth_is_bounded() {
+    Database database;
+    CHECK(start_database(database));
+
+    auto deeply_nested_filter = std::make_unique<PlanNode>(tinydbms::compiler::FilterNode{
+        deeply_nested_predicate(300),
+        scan()});
+    const auto result = execute_plan(database, query(std::move(deeply_nested_filter)));
+    CHECK(result.outcomes.size() == 1);
+    CHECK(is_error(result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().open_table_calls == 0);
+    CHECK(close_database(database));
+    return true;
+}
+
 bool test_invalid_query_plans_have_no_storage_side_effect() {
     Database null_root;
     CHECK(start_database(null_root));
@@ -677,6 +701,35 @@ bool test_storage_errors_and_exceptions_are_contained() {
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(scan_exception));
 
+    Database post_open_table_exception;
+    CHECK(start_database(post_open_table_exception));
+    fake::set_throw_after_open_table(true);
+    const auto post_open_table_result = execute_plan(
+        post_open_table_exception,
+        query(scan()));
+    CHECK(post_open_table_result.outcomes.size() == 1);
+    CHECK(is_error(post_open_table_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().close_cursor_calls == 0);
+    CHECK(fake::state().close_calls == 1);
+    CHECK(!fake::state().cursor_opened);
+    const auto reopen_before_close = post_open_table_exception.open(
+        tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(reopen_before_close.error.has_value());
+    CHECK(reopen_before_close.error->kind == ErrorKind::kExecute);
+    CHECK(close_database(post_open_table_exception));
+
+    Database post_open_delete_exception;
+    CHECK(start_database(post_open_delete_exception));
+    fake::set_throw_after_open_table(true);
+    const auto post_open_delete_result = execute_plan(
+        post_open_delete_exception,
+        delete_plan(1));
+    CHECK(post_open_delete_result.outcomes.size() == 1);
+    CHECK(is_error(post_open_delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().close_cursor_calls == 0);
+    CHECK(fake::state().close_calls == 1);
+    CHECK(close_database(post_open_delete_exception));
+
     Database insert_exception;
     CHECK(start_database(insert_exception));
     fake::set_throw_on_insert(true);
@@ -721,6 +774,53 @@ bool test_storage_errors_and_exceptions_are_contained() {
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(fake::state().delete_calls == 1);
     CHECK(close_database(delete_exception));
+
+    Database post_create_exception;
+    CHECK(start_database(post_create_exception));
+    fake::set_throw_after_create_table(true);
+    const auto post_create_result = execute_plan(
+        post_create_exception,
+        Plan{tinydbms::compiler::CreateTablePlan{
+            "events",
+            {ColumnMeta{"id", Type::kInt}}}});
+    CHECK(post_create_result.outcomes.size() == 1);
+    CHECK(is_error(post_create_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().tables.size() == 2);
+    CHECK(fake::state().close_calls == 1);
+    CHECK(close_database(post_create_exception));
+    fake::set_throw_after_create_table(false);
+    CHECK(open_database(post_create_exception));
+    CHECK(close_database(post_create_exception));
+
+    Database post_insert_exception;
+    CHECK(start_database(post_insert_exception));
+    fake::set_throw_after_insert(true);
+    const auto post_insert_result = execute_plan(
+        post_insert_exception,
+        insert_plan({}, {{int_value(1), text_value("alice"), int_value(20)}}));
+    CHECK(post_insert_result.outcomes.size() == 1);
+    CHECK(is_error(post_insert_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().records.size() == 1);
+    CHECK(fake::state().close_calls == 1);
+    CHECK(close_database(post_insert_exception));
+    fake::set_throw_after_insert(false);
+    CHECK(open_database(post_insert_exception));
+    CHECK(close_database(post_insert_exception));
+
+    Database post_delete_exception;
+    CHECK(start_database(post_delete_exception, {
+        record(1, {int_value(1), text_value("alice"), int_value(20)}),
+        record(2, {int_value(2), text_value("bob"), int_value(30)})}));
+    fake::set_throw_after_delete(true);
+    const auto post_delete_result = execute_plan(post_delete_exception, delete_plan(1));
+    CHECK(post_delete_result.outcomes.size() == 1);
+    CHECK(is_error(post_delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(fake::state().records.empty());
+    CHECK(fake::state().close_calls == 1);
+    CHECK(close_database(post_delete_exception));
+    fake::set_throw_after_delete(false);
+    CHECK(open_database(post_delete_exception));
+    CHECK(close_database(post_delete_exception));
 
     Database partial_delete;
     CHECK(start_database(partial_delete, {
@@ -773,6 +873,7 @@ int main() {
         test_query_topologies_projection_and_expression() &&
         test_delete_collects_ids_and_allows_empty_delete() &&
         test_invalid_predicate_is_rejected_before_open_table() &&
+        test_expression_depth_is_bounded() &&
         test_invalid_query_plans_have_no_storage_side_effect() &&
         test_open_and_scan_result_invariants_close_cursor_once() &&
         test_scan_row_and_close_failures_discard_query_and_delete() &&

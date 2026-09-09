@@ -61,13 +61,19 @@ public:
                 close_error_ = internal::map_storage_error(*closed.error);
             }
         } catch (const std::exception& exception) {
+            close_threw_ = true;
             close_error_ = internal::make_error(ErrorKind::kInternal, exception.what());
         } catch (...) {
+            close_threw_ = true;
             close_error_ = internal::make_error(
                 ErrorKind::kInternal,
                 "unknown exception while closing cursor");
         }
         return close_error_;
+    }
+
+    bool close_threw() const noexcept {
+        return close_threw_;
     }
 
 private:
@@ -85,6 +91,7 @@ private:
 
     storage::CursorId cursor_;
     bool close_attempted_ = false;
+    bool close_threw_ = false;
     std::optional<Error> close_error_;
 };
 
@@ -96,10 +103,11 @@ void close_ignoring_errors(CursorGuard& cursor) noexcept {
     }
 }
 
-template <typename Handler>
+template <typename Abort, typename Handler>
 std::optional<Error> scan_records(
     CursorGuard& cursor,
     storage::CursorId cursor_id,
+    Abort&& abort,
     Handler&& handler) {
     while (true) {
         storage::ScanNextResult next;
@@ -107,9 +115,11 @@ std::optional<Error> scan_records(
             next = storage::scan_next(storage::ScanNextRequest{cursor_id});
         } catch (const std::exception& exception) {
             close_ignoring_errors(cursor);
+            abort();
             return internal::make_error(ErrorKind::kInternal, exception.what());
         } catch (...) {
             close_ignoring_errors(cursor);
+            abort();
             return internal::make_error(
                 ErrorKind::kInternal,
                 "unknown exception while scanning records");
@@ -117,6 +127,9 @@ std::optional<Error> scan_records(
 
         if (next.error.has_value() && next.record.has_value()) {
             close_ignoring_errors(cursor);
+            if (cursor.close_threw()) {
+                abort();
+            }
             return internal::make_error(
                 ErrorKind::kInternal,
                 "scan_next returned both error and record");
@@ -124,6 +137,9 @@ std::optional<Error> scan_records(
         if (next.error.has_value()) {
             Error error = internal::map_storage_error(*next.error);
             close_ignoring_errors(cursor);
+            if (cursor.close_threw()) {
+                abort();
+            }
             return std::optional<Error>{std::move(error)};
         }
         if (!next.record.has_value()) {
@@ -134,13 +150,22 @@ std::optional<Error> scan_records(
             std::optional<Error> handler_error = handler(*next.record);
             if (handler_error.has_value()) {
                 close_ignoring_errors(cursor);
+                if (cursor.close_threw()) {
+                    abort();
+                }
                 return handler_error;
             }
         } catch (const std::exception& exception) {
             close_ignoring_errors(cursor);
+            if (cursor.close_threw()) {
+                abort();
+            }
             return internal::make_error(ErrorKind::kInternal, exception.what());
         } catch (...) {
             close_ignoring_errors(cursor);
+            if (cursor.close_threw()) {
+                abort();
+            }
             return internal::make_error(
                 ErrorKind::kInternal,
                 "unknown exception while processing a scanned record");
@@ -191,8 +216,10 @@ ExecuteResult Database::Impl::execute_create_table(
             plan.table_name,
             plan.columns});
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return internal::make_execute_error(ErrorKind::kInternal, exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return internal::make_execute_error(
             ErrorKind::kInternal,
             "unknown exception while creating table");
@@ -266,12 +293,15 @@ ExecuteResult Database::Impl::execute_insert(
             plan.table_id,
             std::move(physical_rows)});
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return make_internal_error(exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return make_internal_error("unknown exception while inserting rows");
     }
 
     if (inserted.rids.size() > plan.rows.size()) {
+        abort_after_storage_exception();
         return make_internal_error("storage returned too many inserted record ids");
     }
     if (inserted.error.has_value()) {
@@ -284,6 +314,7 @@ ExecuteResult Database::Impl::execute_insert(
             std::optional<Error>{std::move(error)}}};
     }
     if (inserted.rids.size() != plan.rows.size()) {
+        abort_after_storage_exception();
         return make_internal_error("storage returned an incomplete successful insert result");
     }
     return ExecuteResult{CommandResult{
@@ -313,8 +344,10 @@ ExecuteResult Database::Impl::execute_delete(
     try {
         opened = storage::open_table(storage::OpenTableRequest{plan.table_id});
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return make_internal_error(exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return make_internal_error("unknown exception while opening table for delete");
     }
 
@@ -322,6 +355,9 @@ ExecuteResult Database::Impl::execute_delete(
         if (opened.cursor.has_value()) {
             CursorGuard invalid_result_cursor{*opened.cursor};
             close_ignoring_errors(invalid_result_cursor);
+            if (invalid_result_cursor.close_threw()) {
+                abort_after_storage_exception();
+            }
             return make_internal_error("open_table returned both error and cursor");
         }
         return ExecuteResult{internal::map_storage_error(*opened.error)};
@@ -336,6 +372,7 @@ ExecuteResult Database::Impl::execute_delete(
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
+        [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             const Row& row = record.values;
             if (const std::optional<ExpressionError> row_error =
@@ -363,6 +400,9 @@ ExecuteResult Database::Impl::execute_delete(
     }
 
     if (const std::optional<Error> close_error = cursor.close(); close_error.has_value()) {
+        if (cursor.close_threw()) {
+            abort_after_storage_exception();
+        }
         return ExecuteResult{std::move(*close_error)};
     }
 
@@ -372,13 +412,16 @@ ExecuteResult Database::Impl::execute_delete(
             plan.table_id,
             record_ids});
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return make_internal_error(exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return make_internal_error("unknown exception while deleting rows");
     }
 
     const std::uint64_t requested_count = static_cast<std::uint64_t>(record_ids.size());
     if (deleted.deleted_count > requested_count) {
+        abort_after_storage_exception();
         return make_internal_error("storage returned too many deleted rows");
     }
     if (deleted.error.has_value()) {
@@ -391,6 +434,7 @@ ExecuteResult Database::Impl::execute_delete(
             std::optional<Error>{std::move(error)}}};
     }
     if (deleted.deleted_count != requested_count) {
+        abort_after_storage_exception();
         return make_internal_error("storage returned an incomplete successful delete result");
     }
     return ExecuteResult{CommandResult{deleted.deleted_count, std::nullopt}};
@@ -438,8 +482,8 @@ QueryValidationResult validate_query_plan(
             return internal::make_error(ErrorKind::kInternal, "project node has a null child");
         }
         current = project->child.get();
-        if (const auto* filter_node = std::get_if<compiler::FilterNode>(&current->kind)) {
-            filter = filter_node;
+        if (const auto* child_filter_node = std::get_if<compiler::FilterNode>(&current->kind)) {
+            filter = child_filter_node;
             if (!filter->child) {
                 return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
             }
@@ -518,8 +562,10 @@ ExecuteResult Database::Impl::execute_query(
     try {
         opened = storage::open_table(storage::OpenTableRequest{query.table->table_id});
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return make_internal_error(exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return make_internal_error("unknown exception while opening table for query");
     }
 
@@ -527,6 +573,9 @@ ExecuteResult Database::Impl::execute_query(
         if (opened.cursor.has_value()) {
             CursorGuard invalid_result_cursor{*opened.cursor};
             close_ignoring_errors(invalid_result_cursor);
+            if (invalid_result_cursor.close_threw()) {
+                abort_after_storage_exception();
+            }
             return make_internal_error("open_table returned both error and cursor");
         }
         return ExecuteResult{internal::map_storage_error(*opened.error)};
@@ -539,6 +588,7 @@ ExecuteResult Database::Impl::execute_query(
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
+        [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             const Row& row = record.values;
             if (const std::optional<ExpressionError> row_error =
@@ -571,6 +621,9 @@ ExecuteResult Database::Impl::execute_query(
     }
 
     if (const std::optional<Error> close_error = cursor.close(); close_error.has_value()) {
+        if (cursor.close_threw()) {
+            abort_after_storage_exception();
+        }
         return ExecuteResult{std::move(*close_error)};
     }
     return ExecuteResult{std::move(result)};
@@ -598,8 +651,10 @@ ExecuteResult Database::Impl::execute_plan_impl(compiler::Plan plan) {
             },
             std::move(plan.kind));
     } catch (const std::exception& exception) {
+        abort_after_storage_exception();
         return make_internal_error(exception.what());
     } catch (...) {
+        abort_after_storage_exception();
         return make_internal_error("unknown exception while executing plan");
     }
 }

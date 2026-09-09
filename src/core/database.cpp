@@ -37,23 +37,54 @@ void Database::Impl::clear() noexcept {
     open = false;
     catalog.clear();
     next_table_id = 0;
+    cleanup_retry_needed = false;
+}
+
+void Database::Impl::abort_after_storage_exception() noexcept {
+    if (!open && forced_close_pending) {
+        return;
+    }
+
+    bool retry_cleanup = false;
+    try {
+        (void)storage::close_storage(storage::CloseStorageRequest{});
+    } catch (...) {
+        // close_storage is the only available best-effort recovery for an unknown
+        // cursor or partially applied storage operation.
+        retry_cleanup = true;
+    }
+
+    const bool owned_database_slot = open;
+    clear();
+    forced_close_pending = true;
+    cleanup_retry_needed = retry_cleanup;
+    if (owned_database_slot && !retry_cleanup) {
+        release_database_slot();
+    }
 }
 
 Database::Database() : impl_{std::make_unique<Impl>()} {}
 
 Database::~Database() noexcept {
-    if (impl_ == nullptr || !impl_->open) {
+    if (impl_ == nullptr) {
         return;
     }
 
-    try {
-        (void)storage::close_storage(storage::CloseStorageRequest{});
-    } catch (...) {
-        // Destruction is best-effort. The process-level slot must still be released.
+    const bool owns_database_slot = impl_->open || impl_->cleanup_retry_needed;
+    if (owns_database_slot) {
+        try {
+            (void)storage::close_storage(storage::CloseStorageRequest{});
+        } catch (...) {
+            // Destruction is best-effort. The process-level slot must still be released.
+        }
     }
 
     impl_->clear();
-    release_database_slot();
+    impl_->forced_close_pending = false;
+    impl_->cleanup_retry_needed = false;
+    if (owns_database_slot) {
+        release_database_slot();
+    }
 }
 
 Database::Database(Database&& other) noexcept = default;
@@ -63,15 +94,25 @@ Database& Database::operator=(Database&& other) noexcept {
         return *this;
     }
 
-    if (impl_ != nullptr && impl_->open) {
+    if (impl_ != nullptr && (impl_->open || impl_->cleanup_retry_needed)) {
         try {
             (void)storage::close_storage(storage::CloseStorageRequest{});
         } catch (...) {
-            // Move assignment cannot report cleanup failure.
+            // Preserve the current Impl and its retry handle. Replacing it would
+            // leave a possibly open storage lifecycle without an owner.
+            impl_->clear();
+            impl_->forced_close_pending = true;
+            impl_->cleanup_retry_needed = true;
+            return *this;
         }
 
+        const bool owned_database_slot = impl_->open || impl_->cleanup_retry_needed;
         impl_->clear();
-        release_database_slot();
+        impl_->forced_close_pending = false;
+        impl_->cleanup_retry_needed = false;
+        if (owned_database_slot) {
+            release_database_slot();
+        }
     }
 
     impl_ = std::move(other.impl_);
@@ -85,6 +126,11 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
     if (impl_->open) {
         return make_open_error(ErrorKind::kExecute, "database is already open");
     }
+    if (impl_->forced_close_pending) {
+        return make_open_error(
+            ErrorKind::kExecute,
+            "database requires close after a storage exception");
+    }
     if (request.data_dir.empty()) {
         return make_open_error(ErrorKind::kExecute, "data_dir must not be empty");
     }
@@ -94,15 +140,21 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
 
     bool storage_open = false;
     auto abort_open = [&](Error error, bool storage_state_unknown = false) -> OpenDatabaseResult {
+        bool retry_cleanup = false;
         if (storage_open || storage_state_unknown) {
             try {
                 (void)storage::close_storage(storage::CloseStorageRequest{});
             } catch (...) {
                 // The primary open/recovery error is more useful than cleanup failure.
+                retry_cleanup = true;
             }
         }
         impl_->clear();
-        release_database_slot();
+        impl_->forced_close_pending = retry_cleanup;
+        impl_->cleanup_retry_needed = retry_cleanup;
+        if (!retry_cleanup) {
+            release_database_slot();
+        }
         return OpenDatabaseResult{std::optional<Error>{std::move(error)}};
     };
 
@@ -144,6 +196,8 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
         impl_->catalog = std::move(restored);
         impl_->next_table_id = next_table_id;
         impl_->open = true;
+        impl_->forced_close_pending = false;
+        impl_->cleanup_retry_needed = false;
         return OpenDatabaseResult{std::nullopt};
     } catch (const std::exception& exception) {
         // open_storage may have changed storage state before an unexpected throw.
@@ -162,6 +216,31 @@ CloseDatabaseResult Database::close() {
         return make_close_error(ErrorKind::kExecute, "database object is moved-from");
     }
     if (!impl_->open) {
+        if (impl_->forced_close_pending) {
+            if (impl_->cleanup_retry_needed) {
+                try {
+                    const storage::CloseStorageResult retried =
+                        storage::close_storage(storage::CloseStorageRequest{});
+                    std::optional<Error> retry_error;
+                    if (retried.error.has_value() &&
+                        retried.error->kind != storage::StorageErrorKind::kInvalidRequest) {
+                        retry_error = internal::map_storage_error(*retried.error);
+                    }
+                    impl_->cleanup_retry_needed = false;
+                    impl_->forced_close_pending = false;
+                    release_database_slot();
+                    return CloseDatabaseResult{std::move(retry_error)};
+                } catch (const std::exception& exception) {
+                    return make_close_error(ErrorKind::kInternal, exception.what());
+                } catch (...) {
+                    return make_close_error(
+                        ErrorKind::kInternal,
+                        "unknown exception while retrying storage cleanup");
+                }
+            }
+            impl_->forced_close_pending = false;
+            return CloseDatabaseResult{std::nullopt};
+        }
         return make_close_error(ErrorKind::kExecute, "database is not open");
     }
 
@@ -174,11 +253,21 @@ CloseDatabaseResult Database::close() {
         }
     } catch (const std::exception& exception) {
         error = internal::make_error(ErrorKind::kInternal, exception.what());
+        impl_->clear();
+        impl_->forced_close_pending = true;
+        impl_->cleanup_retry_needed = true;
+        return CloseDatabaseResult{std::move(error)};
     } catch (...) {
         error = internal::make_error(ErrorKind::kInternal, "unknown exception while closing database");
+        impl_->clear();
+        impl_->forced_close_pending = true;
+        impl_->cleanup_retry_needed = true;
+        return CloseDatabaseResult{std::move(error)};
     }
 
     impl_->clear();
+    impl_->forced_close_pending = false;
+    impl_->cleanup_retry_needed = false;
     release_database_slot();
     return CloseDatabaseResult{std::move(error)};
 }
