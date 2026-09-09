@@ -19,3 +19,23 @@ add_test(
     NAME tinydbms.contracts_compile
     COMMAND $<TARGET_FILE:tinydbms_contracts_compile_test>
 )
+
+add_executable(tinydbms_core_lifecycle_test
+    core_lifecycle_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+)
+
+target_include_directories(tinydbms_core_lifecycle_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+target_link_libraries(tinydbms_core_lifecycle_test PRIVATE
+    tinydbms_core
+)
+
+add_test(
+    NAME tinydbms.core_lifecycle
+    COMMAND $<TARGET_FILE:tinydbms_core_lifecycle_test>
+)

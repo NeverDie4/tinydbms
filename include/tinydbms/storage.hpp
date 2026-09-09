@@ -31,7 +31,7 @@ struct StorageError {
 };
 
 struct OpenStorageRequest {
-    std::string data_dir;  // 数据库目录，UTF-8 编码；来自入口 --data-dir 或缺省 ./tinydbms-data
+    std::string data_dir;  // 非空数据库目录，UTF-8 编码；由 core 传入
 };
 
 struct OpenStorageResult {

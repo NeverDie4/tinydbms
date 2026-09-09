@@ -4,12 +4,12 @@
 
 ## 当前状态
 
-当前仓库只是可编译的开发骨架：
+当前仓库处于分层实现阶段：
 
 - 可执行入口支持 `--help` 和 `--version`
-- 尚未实现 SQL、执行器、Catalog 或页式存储
-- 编译器层、存储层、core 层均为占位静态库
-- 跨模块契约头文件已落地在 `include/tinydbms/`，模块 API 尚未实现
+- core 已实现 `Database` 生命周期、Catalog 恢复、TableId 分配、CREATE TABLE 执行和脚本主循环
+- compiler、storage 仍为占位静态库；Insert/Delete/Query 和完整 CLI 尚未实现
+- 跨模块契约头文件已落地在 `include/tinydbms/`，真实模块 API 仍待实现
 
 ## 已确认的技术基线
 
@@ -37,7 +37,7 @@ ctest --preset debug
 ```text
 src/app/        可执行入口（当前仅 --help / --version）
 src/compiler/   SQL 编译器层占位
-src/core/       Database Core 占位
+src/core/       Database Core（按 database / script / executor 拆分）
 src/storage/    页式存储层占位
 include/        公共契约头文件（common / compiler / storage / core）
 tests/          CTest 测试

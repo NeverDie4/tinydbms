@@ -50,7 +50,7 @@ struct ExecuteResult {
 };
 
 struct OpenDatabaseRequest {
-    std::string data_dir;  // 数据库目录，UTF-8 编码；缺省 ./tinydbms-data
+    std::string data_dir;  // 已由入口补全的非空数据库目录，UTF-8 编码
 };
 
 struct OpenDatabaseResult {
