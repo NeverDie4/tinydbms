@@ -47,7 +47,10 @@ void Database::Impl::abort_after_storage_exception() noexcept {
 
     bool retry_cleanup = false;
     try {
-        (void)storage::close_storage(storage::CloseStorageRequest{});
+        const storage::CloseStorageResult closed =
+            storage::close_storage(storage::CloseStorageRequest{});
+        retry_cleanup = closed.error.has_value() &&
+            closed.error->kind != storage::StorageErrorKind::kInvalidRequest;
     } catch (...) {
         // close_storage is the only available best-effort recovery for an unknown
         // cursor or partially applied storage operation.
@@ -95,9 +98,18 @@ Database& Database::operator=(Database&& other) noexcept {
     }
 
     if (impl_ != nullptr && (impl_->open || impl_->cleanup_retry_needed)) {
+        const bool owned_database_slot = impl_->open || impl_->cleanup_retry_needed;
+        bool retry_cleanup = false;
         try {
-            (void)storage::close_storage(storage::CloseStorageRequest{});
+            const storage::CloseStorageResult closed =
+                storage::close_storage(storage::CloseStorageRequest{});
+            retry_cleanup = closed.error.has_value() &&
+                closed.error->kind != storage::StorageErrorKind::kInvalidRequest;
         } catch (...) {
+            retry_cleanup = true;
+        }
+
+        if (retry_cleanup) {
             // Preserve the current Impl and its retry handle. Replacing it would
             // leave a possibly open storage lifecycle without an owner.
             impl_->clear();
@@ -106,7 +118,6 @@ Database& Database::operator=(Database&& other) noexcept {
             return *this;
         }
 
-        const bool owned_database_slot = impl_->open || impl_->cleanup_retry_needed;
         impl_->clear();
         impl_->forced_close_pending = false;
         impl_->cleanup_retry_needed = false;
@@ -143,7 +154,10 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
         bool retry_cleanup = false;
         if (storage_open || storage_state_unknown) {
             try {
-                (void)storage::close_storage(storage::CloseStorageRequest{});
+                const storage::CloseStorageResult closed =
+                    storage::close_storage(storage::CloseStorageRequest{});
+                retry_cleanup = closed.error.has_value() &&
+                    closed.error->kind != storage::StorageErrorKind::kInvalidRequest;
             } catch (...) {
                 // The primary open/recovery error is more useful than cleanup failure.
                 retry_cleanup = true;
@@ -221,15 +235,16 @@ CloseDatabaseResult Database::close() {
                 try {
                     const storage::CloseStorageResult retried =
                         storage::close_storage(storage::CloseStorageRequest{});
-                    std::optional<Error> retry_error;
                     if (retried.error.has_value() &&
                         retried.error->kind != storage::StorageErrorKind::kInvalidRequest) {
-                        retry_error = internal::map_storage_error(*retried.error);
+                        return make_close_error(
+                            ErrorKind::kStorage,
+                            retried.error->message);
                     }
                     impl_->cleanup_retry_needed = false;
                     impl_->forced_close_pending = false;
                     release_database_slot();
-                    return CloseDatabaseResult{std::move(retry_error)};
+                    return CloseDatabaseResult{std::nullopt};
                 } catch (const std::exception& exception) {
                     return make_close_error(ErrorKind::kInternal, exception.what());
                 } catch (...) {
@@ -244,21 +259,27 @@ CloseDatabaseResult Database::close() {
         return make_close_error(ErrorKind::kExecute, "database is not open");
     }
 
-    std::optional<Error> error;
     try {
         const storage::CloseStorageResult closed =
             storage::close_storage(storage::CloseStorageRequest{});
-        if (closed.error.has_value()) {
-            error = internal::map_storage_error(*closed.error);
+        if (closed.error.has_value() &&
+            closed.error->kind != storage::StorageErrorKind::kInvalidRequest) {
+            const Error error = internal::map_storage_error(*closed.error);
+            impl_->clear();
+            impl_->forced_close_pending = true;
+            impl_->cleanup_retry_needed = true;
+            return CloseDatabaseResult{error};
         }
     } catch (const std::exception& exception) {
-        error = internal::make_error(ErrorKind::kInternal, exception.what());
+        const Error error = internal::make_error(ErrorKind::kInternal, exception.what());
         impl_->clear();
         impl_->forced_close_pending = true;
         impl_->cleanup_retry_needed = true;
         return CloseDatabaseResult{std::move(error)};
     } catch (...) {
-        error = internal::make_error(ErrorKind::kInternal, "unknown exception while closing database");
+        const Error error = internal::make_error(
+            ErrorKind::kInternal,
+            "unknown exception while closing database");
         impl_->clear();
         impl_->forced_close_pending = true;
         impl_->cleanup_retry_needed = true;
@@ -269,7 +290,7 @@ CloseDatabaseResult Database::close() {
     impl_->forced_close_pending = false;
     impl_->cleanup_retry_needed = false;
     release_database_slot();
-    return CloseDatabaseResult{std::move(error)};
+    return CloseDatabaseResult{std::nullopt};
 }
 
 }  // namespace tinydbms::core

@@ -16,8 +16,8 @@ Database API 工作。
 - 正确管理 Database 的 open、execute_script、close 生命周期；
 - 展示 core 返回的 QueryResult、CommandResult 和 Error；
 - 固定参数错误、SQL 错误、输入输出错误和 close 错误的退出码；
-- compiler 已提供可链接实现后，先通过真实 compiler + fake storage 的集成测试验证 core/CLI 连接；storage 交付后，
-  再通过产品级测试完成真实链路联调。
+- compiler 与 storage 均已提供可链接实现；保留真实 compiler + fake storage 的窄联调，
+  并通过产品级测试完成真实链路联调。
 
 ### 1.2 不属于本阶段
 
@@ -41,7 +41,7 @@ app 只负责四件事：解析参数、读取输入、调用 core、展示结�
 - output.cpp 与内部头文件：结果与错误展示；
 - terminal.cpp 与内部头文件：平台相关的 stdin 终端检测；
 - session.hpp/session_core.cpp：app 私有的 `Session` 抽象和 `core::Database` 适配器；
-- session_unavailable.cpp：真实 storage 尚未交付或真实链路尚未启用时的明确不可用适配器；
+- session_unavailable.cpp：真实链路尚未启用时的明确不可用适配器；
 - runner.cpp 与内部头文件：串联参数、输入、Session、展示和最终退出码；
 - tests/app_cli_test.cpp：参数、输入模式、格式化和生命周期策略测试。
 
@@ -50,9 +50,9 @@ app 只负责四件事：解析参数、读取输入、调用 core、展示结�
 
 app 只包含 tinydbms/core.hpp 和 app 自己的内部头文件，不包含 compiler.hpp 或 storage.hpp。
 产品 `tinydbms` target 显式链接 `tinydbms_core`、compiler 和 storage。由于本分支的
-compiler 已有可链接实现，storage 仍是占位库；默认构建使用 `UnavailableSession`，在真正执行数据库操作时
+compiler 与 storage 均已有可链接实现；默认构建仍使用 `UnavailableSession`，在真正执行数据库操作时
 返回 `internal` 错误。这只用于保持入口、参数和退出码可以独立构建和验证，不伪装成可用的 SQL 实现。
-storage 交付后，以 `-DTINYDBMS_ENABLE_REAL_MODULES=ON` 构建，入口才使用 `CoreSession` 并接通真实
+以 `-DTINYDBMS_ENABLE_REAL_MODULES=ON` 构建时，入口使用 `CoreSession` 并接通真实
 core/compiler/storage 链路。CLI 测试只链接 app 私有实现、core
 公共类型和测试 Session，不把 fake/real 模块同时带入同一测试目标。
 
@@ -236,7 +236,7 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 
 ### 8.1 不依赖真实 compiler/storage 的测试
 
-以下测试可以在外部模块尚未交付时完成：
+以下测试不依赖真实 compiler/storage：
 
 - help/version 参数的成功路径；
 - 未知参数、缺少值、重复 data_dir、空值和参数混用；
@@ -251,7 +251,7 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 这类测试使用注入的输入流、输出流、交互模式和 FakeSession，不构造真实数据库文件，也不链接
 真实 compiler/storage。
 
-### 8.2 compiler 可链接实现已提供、storage 尚未交付时的联调测试
+### 8.2 真实 compiler + fake storage 窄联调测试
 
 此阶段使用真实 compiler、真实 core、真实 `CoreSession` 和 fake storage，测试目标不得链接真实
 storage，也不得链接 fake compiler。至少覆盖：
@@ -264,9 +264,9 @@ storage，也不得链接 fake compiler。至少覆盖：
 对应测试目标为 `tinydbms_compiler_core_cli_integration_test`，构建和验收命令见
 [联调准备与验收清单](../联调准备与验收清单.md)。
 
-### 8.3 需要真实 storage 交付后的测试
+### 8.3 真实 storage 产品级联调测试
 
-storage 交付后，再增加产品级测试：
+真实 storage 构建下需要增加产品级测试：
 
 - --data-dir 临时目录下的 CREATE、INSERT、SELECT、DELETE；
 - 批处理遇错停止，REPL 遇错继续；
@@ -288,7 +288,7 @@ storage 交付后，再增加产品级测试：
 4. 接入 Database 生命周期及退出码累计；
 5. 完成结构化结果展示；
 6. 先运行不依赖外部模块的 CLI 测试；
-7. compiler 已提供可链接实现后，补真实 compiler + fake storage 的 core/CLI 联调测试；storage 交付后，再补真实产品级联调测试；
+7. 保留真实 compiler + fake storage 的 core/CLI 联调测试，并补齐真实 compiler/storage 产品级联调测试；
 8. 执行完整构建、CTest 和工作区差异审查。
 
 本阶段验收必须满足：

@@ -1,61 +1,93 @@
 # tinydbms
 
-一个用于学习与课程项目的轻量级 DBMS。参考 MiniOB 的分层思路实现，不复用其代码。
+`tinydbms` 是一个单进程、单线程的教学数据库。当前已经具备从 SQL 文本到页式持久化存储的完整模块边界和最小执行路径。
 
 ## 当前状态
 
-当前仓库处于分层实现阶段：
+- `app` 提供 `--help`、`--version`、`--data-dir`、REPL 和 stdin 批处理入口。
+- `compiler` 提供分句、词法、语法、语义、优化和 Plan 生成。
+- `core` 提供 `Database` 生命周期、Catalog 恢复、TableId 分配和脚本顺序执行，源码按 lifecycle、script、executor、expression 拆分。
+- `storage` 提供 typed heap storage、buffer pool、record/page 编解码、cursor 和持久化 metadata。
+- 默认构建仍通过不可用 Session 适配器验证 CLI 边界；完整 SQL 链路需要启用 `TINYDBMS_ENABLE_REAL_MODULES=ON`。
 
-- 可执行入口已实现 `--help`、`--version`、`--data-dir`、REPL/批处理、结果展示和退出码策略
-- core 已实现 `Database` 生命周期、Catalog 恢复、TableId 分配、CREATE TABLE、INSERT、DELETE、SELECT
-  执行和脚本主循环
-- compiler 的词法、语法、语义分析、优化和 Plan 生成已有可链接实现，并已接入独立 CTest；契约硬化项仍按
-  [联调准备与验收清单](docs/联调准备与验收清单.md)跟踪
-- storage 仍为占位实现；默认构建的 CLI 使用不可用模块适配器，完整 SQL 链路尚未接通
-- 跨模块契约头文件已落地在 `include/tinydbms/`，当前已完成真实 compiler + fake storage 的 core/CLI 窄联调；
-  等待 storage 完成后再进行完整真实模块联调
+## 当前架构
 
-## 已确认的技术基线
+```text
+App
+  |
+Core Database / Executor
+  |- Compiler
+  |   |- Lexer
+  |   |- Parser
+  |   |- Semantic
+  |   |- Planner
+  |   `- Optimizer
+  `- Storage
+      |- HeapTable
+      |- BufferPool
+      |- RecordPage
+      |- SlottedPage
+      |- RecordCodec
+      `- PageFile
+```
 
-1. C++20（保守子集，不碰 ranges / coroutines / modules）
-2. Linux 使用 g++，Windows 使用 MSVC
-3. CMake + Ninja
-4. 单进程，三层静态库：`tinydbms_compiler`、`tinydbms_storage`、`tinydbms_core`
-5. 测试先使用 CTest + 自写断言；GoogleTest 以后需要时再引入
-6. REPL 以 EOF 退出（Unix 通常 Ctrl-D；Windows 通常 Ctrl-Z 后回车），初版不提供额外元命令；stdin 非交互时按整段批处理执行
-7. 数据目录缺省为当前目录下的 `tinydbms-data/`，可用 `--data-dir` 覆盖
+`core::Database` 持有运行时 Catalog 快照并执行 Compiler 生成的 Plan。Core 只调用 `include/tinydbms/storage.hpp` 的公共 API。Storage 负责 metadata、表文件、页面、BufferPool 和 cursor，既不知道 SQL，也不计算 WHERE 或 projection。
 
-技术决策见 [docs/技术决策.md](docs/技术决策.md)，模块交互契约见 [docs/模块交互契约.md](docs/模块交互契约.md)，字段级消息契约见 [docs/消息契约详细设计.md](docs/消息契约详细设计.md)。
+## 当前 SQL 范围
 
-当前实现阶段的设计入口：
+已支持：
+
+- `CREATE TABLE`
+- `INSERT`，包括完整的显式列重排
+- `SELECT`、列投影与简单 WHERE，包括比较、`AND`、`OR`、`NOT`
+- `DELETE`，采用扫描、收集 RID、关闭 cursor、批量删除流程
+- 正常 close/reopen 后的 schema 和记录持久化
+
+初版 public type 只有 `INT` 和 `VARCHAR`。`INT` 是有符号 `int32_t`，物理编码为 4-byte little-endian；`VARCHAR` 是 UTF-8，物理编码为 `uint32_t` little-endian 字节长度加内容。
+
+当前未实现 System Catalog 特殊表、FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
+
+## 公共契约
+
+正式公共入口是：
+
+```text
+include/tinydbms/common.hpp
+include/tinydbms/compiler.hpp
+include/tinydbms/core.hpp
+include/tinydbms/storage.hpp
+```
+
+`src/include/tinydbms/*.h` 只是兼容转发头文件，不是并行 API。
+
+字段级契约见 [docs/消息契约详细设计.md](docs/消息契约详细设计.md)，模块边界见 [docs/模块交互契约.md](docs/模块交互契约.md)，当前冻结决策见 [docs/技术决策.md](docs/技术决策.md)。
+
+core/CLI 的阶段设计入口：
 
 - [core 与 CLI 实现设计](docs/core-cli/实现设计.md)
 - [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
 
-## 构建与测试
+## 构建与验证
+
+本项目必须使用 g++。默认构建：
 
 ```bash
 cmake --preset debug
 cmake --build --preset debug
-ctest --preset debug
+ctest --preset debug --output-on-failure
 ./build/debug/src/app/tinydbms --help
 ```
 
-storage 交付并通过联调门禁后，使用 `-DTINYDBMS_ENABLE_REAL_MODULES=ON` 重新配置构建，才会启用真实
-`CoreSession` 和完整 SQL 链路；在此之前，默认构建用于独立验证 CLI 参数、输入输出、core fake
-行为测试、compiler 测试，以及真实 compiler + fake storage 的 core/CLI 窄联调。联调顺序与验收条件见
-[联调准备与验收清单](docs/联调准备与验收清单.md)。
+真实 compiler + core + storage 构建：
 
-## 目录结构
-
-```text
-src/app/        可执行入口与 CLI 逻辑（真实模块交付后接通 SQL）
-src/compiler/   SQL 编译器层（词法、语法、语义、优化与 Plan 生成）
-src/core/       Database Core（按 database / script / executor / expression 拆分）
-src/storage/    物理存储层占位
-include/        公共契约头文件（common / compiler / storage / core）
-tests/          CTest 测试
-docs/           设计文档（技术决策、模块契约、字段级契约和阶段实现规格）
+```bash
+cmake -S . -B build/real-debug -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DTINYDBMS_ENABLE_REAL_MODULES=ON
+cmake --build build/real-debug
+ctest --test-dir build/real-debug --output-on-failure
 ```
+
+开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/) 的分层与调用链，不复制其事务、日志或多引擎范围。

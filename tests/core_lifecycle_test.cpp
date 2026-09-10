@@ -135,7 +135,7 @@ bool test_table_id_exhaustion_does_not_call_storage() {
     return true;
 }
 
-bool test_process_guard_and_close_failure_release() {
+bool test_process_guard_and_close_failure_retry() {
     fake::reset();
     Database first;
     Database second;
@@ -155,7 +155,15 @@ bool test_process_guard_and_close_failure_release() {
     CHECK(close_result.error->kind == ErrorKind::kStorage);
     CHECK(!fake::state().opened);
 
+    const std::size_t open_calls_after_failure = fake::state().open_calls;
+    const auto blocked_while_cleaning = second.open(
+        tinydbms::core::OpenDatabaseRequest{"other-data"});
+    CHECK(blocked_while_cleaning.error.has_value());
+    CHECK(blocked_while_cleaning.error->kind == ErrorKind::kExecute);
+    CHECK(fake::state().open_calls == open_calls_after_failure);
+
     fake::clear_close_error();
+    CHECK(!first.close().error.has_value());
     CHECK(open_database(second));
     CHECK(!second.close().error.has_value());
     return true;
@@ -516,7 +524,7 @@ int main() {
         test_open_recovers_catalog_and_allocates_next_id() &&
         test_create_failure_does_not_consume_id() &&
         test_table_id_exhaustion_does_not_call_storage() &&
-        test_process_guard_and_close_failure_release() &&
+        test_process_guard_and_close_failure_retry() &&
         test_repeated_lifecycle_calls_are_rejected() &&
         test_open_recovery_failure_cleans_up() &&
         test_invalid_catalog_metadata_is_rejected() &&
