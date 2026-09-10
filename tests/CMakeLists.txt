@@ -68,6 +68,29 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms_app_cli_test>
 )
 
+add_executable(tinydbms_compiler_core_cli_integration_test
+    compiler_core_cli_integration_test.cpp
+    fakes/storage_fake.cpp
+    ${PROJECT_SOURCE_DIR}/src/app/session_core.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_compiler_core_cli_integration_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src/app
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+target_link_libraries(tinydbms_compiler_core_cli_integration_test PRIVATE
+    tinydbms_cli_logic
+    tinydbms_compiler
+)
+
+add_test(
+    NAME tinydbms.compiler_core_cli_integration
+    COMMAND $<TARGET_FILE:tinydbms_compiler_core_cli_integration_test>
+)
+
 add_executable(tinydbms_compiler_splitter_test compiler_splitter_test.cpp)
 
 target_link_libraries(tinydbms_compiler_splitter_test PRIVATE

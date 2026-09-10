@@ -149,7 +149,7 @@ bool start_database(
     fake::reset();
     fake_compiler::reset();
     fake::set_tables({users_table()});
-    fake::set_records(std::move(records));
+    fake::set_records_for_table(users_table().table_id, std::move(records));
     return open_database(database);
 }
 

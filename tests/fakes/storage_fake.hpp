@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -25,7 +26,10 @@ struct State {
 
     std::vector<std::string> call_order;
     std::vector<TableMeta> tables;
+    // `records` is a compatibility view used by existing single-table tests.
+    // Storage operations use `records_by_table` so scans never cross table boundaries.
     std::vector<storage::Record> records;
+    std::map<TableId, std::vector<storage::Record>> records_by_table;
     std::optional<storage::CreateTableRequest> last_create_request;
     std::optional<storage::OpenTableRequest> last_open_table_request;
     std::optional<storage::CloseCursorRequest> last_close_cursor_request;
@@ -45,6 +49,7 @@ struct State {
     std::optional<storage::InsertResult> insert_result;
     std::optional<storage::DeleteResult> delete_result;
     storage::CursorId active_cursor = 0;
+    std::optional<TableId> active_table_id;
     storage::CursorId next_cursor_id = 1;
     storage::RecordId next_record_id{1};
     std::size_t scan_index = 0;
@@ -79,6 +84,7 @@ void set_close_cursor_error(storage::StorageError error);
 void set_insert_error(storage::StorageError error);
 void set_delete_error(storage::StorageError error);
 void set_records(std::vector<storage::Record> records);
+void set_records_for_table(TableId table_id, std::vector<storage::Record> records);
 void set_open_table_result(storage::OpenTableResult result);
 void set_scan_results(std::deque<storage::ScanNextResult> results);
 void set_close_cursor_result(storage::CloseCursorResult result);
