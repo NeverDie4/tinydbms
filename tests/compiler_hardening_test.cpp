@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -250,7 +251,31 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
     test.begin_case("integer boundaries");
     plan_of(test, compile_sql("SELECT id FROM numbers WHERE 0 <= 2147483647;", catalog));
 
-    test.begin_case("very long integer is stable lex error");
+    test.begin_case("negative integer and INT32_MIN");
+    plan_of(test, compile_sql("SELECT id FROM numbers WHERE id >= -2147483648;", catalog));
+    plan_of(test, compile_sql("INSERT INTO numbers VALUES (-1),(-2147483648);", catalog));
+
+    test.begin_case("positive integer overflow is semantic error");
+    expect_location(
+        test,
+        error_of(
+            test,
+            compile_sql("SELECT id FROM numbers WHERE id = 2147483648;", catalog),
+            CompileErrorKind::kSemantic),
+        1,
+        35);
+
+    test.begin_case("negative integer overflow is semantic error");
+    expect_location(
+        test,
+        error_of(
+            test,
+            compile_sql("SELECT id FROM numbers WHERE id = -2147483649;", catalog),
+            CompileErrorKind::kSemantic),
+        1,
+        35);
+
+    test.begin_case("very long integer is stable semantic error");
     expect_location(
         test,
         error_of(
@@ -258,7 +283,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
             compile_sql(
                 "SELECT id FROM numbers WHERE id = 999999999999999999999999999999;",
                 catalog),
-            CompileErrorKind::kLex),
+            CompileErrorKind::kSemantic),
         1,
         35);
 
@@ -725,6 +750,95 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
     }
     query += ';';
     plan_of(test, compile_sql(std::move(query), catalog));
+
+    test.begin_case("bounded NOT nesting remains valid");
+    std::string bounded_not = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 64; ++index) {
+        bounded_not += "NOT ";
+    }
+    bounded_not += "id = 1;";
+    plan_of(test, compile_sql(std::move(bounded_not), catalog));
+
+    test.begin_case("expression complexity exact NOT boundary is accepted");
+    std::string maximum_not = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 253; ++index) {
+        maximum_not += "NOT ";
+    }
+    maximum_not += "id = 1;";
+    plan_of(test, compile_sql(std::move(maximum_not), catalog));
+
+    test.begin_case("expression complexity beyond NOT boundary is rejected");
+    std::string excessive_not = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 254; ++index) {
+        excessive_not += "NOT ";
+    }
+    excessive_not += "id = 1;";
+    error_of(test, compile_sql(std::move(excessive_not), catalog), CompileErrorKind::kSyntax);
+
+    test.begin_case("deep NOT nesting is rejected");
+    std::string deep_not = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 1024; ++index) {
+        deep_not += "NOT ";
+    }
+    deep_not += "id = 1;";
+    error_of(test, compile_sql(std::move(deep_not), catalog), CompileErrorKind::kSyntax);
+
+    test.begin_case("deep left-associated expression is rejected");
+    std::string deep_and = "SELECT id FROM numbers WHERE id = 1";
+    for (int index = 0; index < 1024; ++index) {
+        deep_and += " AND id = 1";
+    }
+    deep_and += ';';
+    error_of(test, compile_sql(std::move(deep_and), catalog), CompileErrorKind::kSyntax);
+
+    test.begin_case("expression complexity exact AND boundary is accepted");
+    std::string maximum_and = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 64; ++index) {
+        if (index != 0) {
+            maximum_and += " AND ";
+        }
+        maximum_and += "id = 1";
+    }
+    maximum_and += ';';
+    plan_of(test, compile_sql(std::move(maximum_and), catalog));
+
+    test.begin_case("expression complexity beyond AND boundary is rejected");
+    std::string excessive_and = "SELECT id FROM numbers WHERE ";
+    for (int index = 0; index < 65; ++index) {
+        if (index != 0) {
+            excessive_and += " AND ";
+        }
+        excessive_and += "id = 1";
+    }
+    excessive_and += ';';
+    error_of(test, compile_sql(std::move(excessive_and), catalog), CompileErrorKind::kSyntax);
+
+    test.begin_case("SQL text length boundary");
+    std::string maximum_sql = "SELECT * FROM student";
+    maximum_sql.resize(kMaxSqlBytes - 1, ' ');
+    maximum_sql.push_back(';');
+    plan_of(test, compile_sql(maximum_sql, catalog));
+    test.expect(split_statements(maximum_sql).size() == 1, "maximum SQL text splits");
+
+    test.begin_case("oversized compile input is rejected");
+    std::string oversized_sql = maximum_sql + ' ';
+    expect_location(
+        test,
+        error_of(
+            test,
+            compile_sql(oversized_sql, catalog),
+            CompileErrorKind::kLex),
+        1,
+        1);
+
+    test.begin_case("oversized splitter input throws length error");
+    bool length_error = false;
+    try {
+        static_cast<void>(split_statements(oversized_sql));
+    } catch (const std::length_error&) {
+        length_error = true;
+    }
+    test.expect(length_error, "oversized splitter input rejected before copy");
 }
 
 }  // namespace

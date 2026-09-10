@@ -1,6 +1,7 @@
 #include "parser.hpp"
 
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -11,6 +12,8 @@
 
 namespace tinydbms::compiler::internal {
 namespace {
+
+constexpr std::size_t kMaxExpressionComplexity = 256;
 
 class Parser {
 public:
@@ -303,6 +306,9 @@ private:
         }
 
         while (check(TokenKind::kOr)) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
             const SourceLocation location = peek().location;
             advance();
             AstExprPtr rhs = parse_and();
@@ -326,6 +332,9 @@ private:
         }
 
         while (check(TokenKind::kAnd)) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
             const SourceLocation location = peek().location;
             advance();
             AstExprPtr rhs = parse_not();
@@ -345,6 +354,9 @@ private:
     AstExprPtr parse_not() {
         if (!check(TokenKind::kNot)) {
             return parse_comparison();
+        }
+        if (!consume_expression_budget()) {
+            return nullptr;
         }
 
         const SourceLocation location = peek().location;
@@ -366,6 +378,9 @@ private:
         if (!op.has_value()) {
             return lhs;
         }
+        if (!consume_expression_budget()) {
+            return nullptr;
+        }
 
         const SourceLocation location = peek().location;
         advance();
@@ -384,6 +399,9 @@ private:
     AstExprPtr parse_primary() {
         const Token& token = peek();
         if (token.kind == TokenKind::kIdentifier) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
             auto expression = std::make_unique<AstExpr>(AstIdentifierExpr{
                 token.lexeme,
                 token.location
@@ -393,6 +411,9 @@ private:
         }
 
         if (token.kind == TokenKind::kIntegerLiteral) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
             std::int32_t value = 0;
             const char* const begin = token.lexeme.data();
             const char* const end = begin + token.lexeme.size();
@@ -409,6 +430,9 @@ private:
         }
 
         if (token.kind == TokenKind::kStringLiteral) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 Value{token.lexeme},
                 token.location
@@ -417,7 +441,11 @@ private:
             return expression;
         }
 
-        if (match(TokenKind::kLeftParen)) {
+        if (check(TokenKind::kLeftParen)) {
+            if (!consume_expression_budget()) {
+                return nullptr;
+            }
+            advance();
             AstExprPtr expression = parse_expression();
             if (expression == nullptr) {
                 return nullptr;
@@ -429,6 +457,15 @@ private:
         }
 
         return expression_error("expected expression");
+    }
+
+    bool consume_expression_budget() {
+        if (expression_complexity_ >= kMaxExpressionComplexity) {
+            expression_error("expression exceeds maximum supported complexity");
+            return false;
+        }
+        ++expression_complexity_;
+        return true;
     }
 
     static std::optional<AstCompareOp> comparison_operator(TokenKind kind) {
@@ -510,6 +547,7 @@ private:
     const std::vector<Token>& tokens_;
     Token fallback_end_;
     std::size_t index_{0};
+    std::size_t expression_complexity_{0};
     std::optional<CompileError> expression_error_;
 };
 

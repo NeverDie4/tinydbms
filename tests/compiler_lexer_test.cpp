@@ -105,7 +105,8 @@ void expect_lex_error(
     std::string_view case_name,
     std::string_view input,
     SourceLocation expected,
-    std::string_view message_part) {
+    std::string_view message_part,
+    CompileErrorKind expected_kind = CompileErrorKind::kLex) {
     const auto result = tokenize(input);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{case_name};
@@ -114,7 +115,7 @@ void expect_lex_error(
         return;
     }
 
-    test.expect(error->kind == CompileErrorKind::kLex, prefix + ": error kind");
+    test.expect(error->kind == expected_kind, prefix + ": error kind");
     test.expect(error->location.line == expected.line, prefix + ": error line");
     test.expect(error->location.column == expected.column, prefix + ": error column");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
@@ -185,8 +186,28 @@ int main() {
             {TokenKind::kIntegerLiteral, "123"},
             {TokenKind::kIntegerLiteral, "2147483647"},
         });
-    expect_lex_error(test, "integer overflow", "2147483648", {1, 1}, "integer");
-    expect_lex_error(test, "negative integer unsupported", "-1", {1, 1}, "character");
+    expect_tokens(
+        test,
+        "negative integers",
+        "-1 -2147483648",
+        {
+            {TokenKind::kIntegerLiteral, "-1"},
+            {TokenKind::kIntegerLiteral, "-2147483648"},
+        });
+    expect_lex_error(
+        test,
+        "positive integer overflow",
+        "2147483648",
+        {1, 1},
+        "integer",
+        CompileErrorKind::kSemantic);
+    expect_lex_error(
+        test,
+        "negative integer overflow",
+        "-2147483649",
+        {1, 1},
+        "integer",
+        CompileErrorKind::kSemantic);
 
     expect_tokens(test, "string", "'Alice'", {{TokenKind::kStringLiteral, "Alice"}});
     expect_tokens(test, "empty string", "''", {{TokenKind::kStringLiteral, ""}});
