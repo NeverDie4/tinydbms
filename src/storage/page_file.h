@@ -12,6 +12,9 @@
 
 namespace tinydbms::storage::internal {
 
+struct StorageTestAccess;
+class FileManager;
+
 inline constexpr std::array<char, 8> kPageFileMagic{
     'T', 'D', 'B', 'P', 'A', 'G', 'E', '1'};
 inline constexpr std::uint32_t kPageFileFormatVersion = 1;
@@ -61,6 +64,8 @@ public:
 
 private:
     friend class HeapTable; // Reuse existing volatile poison latch on failed bootstrap compensation.
+    friend class FileManager;
+    friend struct StorageTestAccess;
     explicit PageFile(std::filesystem::path path);
 
     PageFileResult<RawPage> read_raw_page(PageId page_id);
@@ -69,9 +74,11 @@ private:
     PageFileResult<bool> is_free_page(PageId page_id);
     PageFileResult<PageId> read_free_next(PageId page_id);
     std::optional<PageFileError> require_open() const;
+    static bool take_close_failure_for_testing() noexcept;
 
     std::filesystem::path path_;
     std::fstream stream_;
+    static bool fail_next_close_for_testing_;
     bool open_{false};
     bool poisoned_{false};
     std::uint64_t page_count_{1};
