@@ -150,16 +150,15 @@ public:
             }
 
             if (is_ascii_letter(current())) {
-                scan_word();
-                if (tokens_.back().lexeme.size() > 64) {
-                    const SourceLocation start = tokens_.back().location;
-                    tokens_.pop_back();
-                    return error(start, "identifier exceeds 64 bytes");
+                const auto word_error = scan_word();
+                if (word_error.has_value()) {
+                    return LexResult{std::move(*word_error)};
                 }
                 continue;
             }
 
-            if (is_ascii_digit(current())) {
+            if (is_ascii_digit(current()) ||
+                (current() == '-' && is_ascii_digit(peek()))) {
                 const auto integer_error = scan_integer();
                 if (integer_error.has_value()) {
                     return LexResult{std::move(*integer_error)};
@@ -300,22 +299,35 @@ private:
         return false;
     }
 
-    void scan_word() {
+    std::optional<CompileError> scan_word() {
         const SourceLocation start = location();
         std::string value;
         while (!at_end() && is_identifier_continue(current())) {
+            if (value.size() >= 64) {
+                return CompileError{
+                    CompileErrorKind::kLex,
+                    start,
+                    "identifier exceeds 64 bytes"
+                };
+            }
             value.push_back(ascii_lower(advance()));
         }
 
         const auto keyword = keyword_kind(value);
         tokens_.push_back(Token{keyword.value_or(TokenKind::kIdentifier), std::move(value), start});
+        return std::nullopt;
     }
 
     std::optional<CompileError> scan_integer() {
         const SourceLocation start = location();
         const std::size_t begin = index_;
-        constexpr std::uint32_t maximum =
-            static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+        const bool negative = current() == '-';
+        if (negative) {
+            advance();
+        }
+        const std::uint32_t maximum = negative
+            ? static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) + 1U
+            : static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
         std::uint32_t value = 0;
         bool overflow = false;
 
@@ -331,7 +343,7 @@ private:
 
         if (overflow) {
             return CompileError{
-                CompileErrorKind::kLex,
+                CompileErrorKind::kSemantic,
                 start,
                 "integer literal exceeds int32 range"
             };
@@ -352,11 +364,25 @@ private:
 
         while (!at_end()) {
             if (current() != '\'') {
+                if (value.size() >= kMaxVarcharBytes) {
+                    return CompileError{
+                        CompileErrorKind::kLex,
+                        start,
+                        "string literal exceeds maximum VARCHAR length"
+                    };
+                }
                 value.push_back(advance());
                 continue;
             }
 
             if (peek() == '\'') {
+                if (value.size() >= kMaxVarcharBytes) {
+                    return CompileError{
+                        CompileErrorKind::kLex,
+                        start,
+                        "string literal exceeds maximum VARCHAR length"
+                    };
+                }
                 advance();
                 advance();
                 value.push_back('\'');

@@ -1,5 +1,6 @@
 #include "tinydbms/compiler.hpp"
 
+#include <stdexcept>
 #include <utility>
 #include <variant>
 
@@ -28,6 +29,10 @@ constexpr bool is_whitespace(char value) {
 namespace tinydbms::compiler {
 
 std::vector<SplitStatement> split_statements(std::string_view text) {
+    if (text.size() > kMaxSqlBytes) {
+        throw std::length_error{"SQL text exceeds maximum length"};
+    }
+
     std::vector<SplitStatement> statements;
     SplitState state = SplitState::kNormal;
     std::size_t segment_start = 0;
@@ -141,6 +146,14 @@ std::vector<SplitStatement> split_statements(std::string_view text) {
 }
 
 CompileResult compile(const CompileRequest& request) {
+    if (request.sql.size() > kMaxSqlBytes) {
+        return CompileResult{CompileError{
+            CompileErrorKind::kLex,
+            SourceLocation{1, 1},
+            "SQL text exceeds maximum length"
+        }};
+    }
+
     internal::LexResult lexed = internal::tokenize(request.sql);
     if (auto* error = std::get_if<CompileError>(&lexed.outcome)) {
         return CompileResult{std::move(*error)};
