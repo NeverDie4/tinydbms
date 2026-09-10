@@ -12,8 +12,9 @@ CursorRegistry、进程级单调 ID、owned Record 和无长期 pin 的扫描，
 
 ## 2. 公共 INSERT / DELETE
 
-严格顺序：Open → 表存在 → 空批次成功 → 同表未 close cursor 检查 → 临时 HeapTable batch。
-空批次仍校验 lifecycle 和表存在，不算 mutation，即使 cursor 存在也成功。
+严格顺序：Open → 表存在 → 空 INSERT 批次拒绝 → 同表未 close cursor 检查 → 临时 HeapTable batch。
+空 `InsertRequest.rows` 返回 `kInvalidRequest`，不触发 mutation；空 `DeleteRequest.rids` 仍校验
+lifecycle 和表存在，不算 mutation，即使 cursor 存在也成功。
 非空批次不提前整体校验；逐项遇错停止，返回成功 RID 前缀或 uint64 deleted_count，
 不回滚。不创建长期 HeapTable registry，PageFile poison 不因临时对象重建而失效。
 
@@ -33,8 +34,8 @@ kInvalidRequest（exhausted），没有 wrap。没有新的公共物理 ID 或 s
 
 ## 4. Cursor mutation restriction
 
-只要同表 registry 尚有 Active、Eof 或 Failed cursor，就拒绝非空 INSERT/DELETE，
-返回 kInvalidRequest。空批次允许；其他表 mutation 允许。检查只在 storage.cpp，
+只要同表 registry 尚有 Active、Eof 或 Failed cursor，就拒绝 INSERT 和非空 DELETE，
+返回 kInvalidRequest；空 INSERT 已在 cursor 检查前按请求非法拒绝，空 DELETE 允许。其他表 mutation 允许。检查只在 storage.cpp，
 HeapTable 不依赖 registry。所有 cursor close 后恢复该表 mutation 能力。
 
 ## 5. 错误

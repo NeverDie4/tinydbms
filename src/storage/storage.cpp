@@ -35,7 +35,6 @@ struct BufferConfig {
     std::size_t capacity = 64;
     internal::ReplacementPolicy policy = internal::ReplacementPolicy::kFifo;
     internal::BufferPool::WritePage write;
-    bool fail_file_close = false;
     internal::BufferPool::ReadPage read;
 } buffer_config;
 
@@ -48,6 +47,9 @@ void reset_state() {
 
 StorageError error(StorageErrorKind kind, std::string message) {
     return StorageError{kind, std::move(message)};
+}
+StorageError unexpected_exception_error() {
+    return error(StorageErrorKind::kIoError, "unexpected exception in storage API");
 }
 StorageError buffer_error(const internal::BufferPoolError& source) {
     switch (source.kind) {
@@ -425,6 +427,9 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
     } catch (const std::length_error&) {
         reset_state();
         return {error(StorageErrorKind::kInvalidRequest, "BufferPool capacity is too large")};
+    } catch (...) {
+        reset_state();
+        return {unexpected_exception_error()};
     }
 }
 
@@ -440,28 +445,34 @@ CloseStorageResult close_storage(const CloseStorageRequest&) {
         } catch (const std::filesystem::filesystem_error&) {
             state.lifecycle = Lifecycle::kOpen;
             return {error(StorageErrorKind::kIoError, "filesystem operation failed while closing BufferPool")};
+        } catch (...) {
+            return {unexpected_exception_error()};
         }
     }
-    // Closing retry skips the already closed pool. FileManager close_all is
-    // idempotent even after an error; never advertise Open after files are released.
+    // Closing retry skips the already closed pool. FileManager retains failed
+    // PageFile owners, so each retry continues outstanding file cleanup.
     try {
         auto close_error = state.file_manager->close_all();
-        if (std::exchange(buffer_config.fail_file_close, false))
-            close_error = internal::PageFileError{internal::PageFileErrorKind::kIo, "injected file close failure"};
         if (close_error) return {file_error(*close_error)};
         if (auto write_error = write_metadata()) return {write_error};
         reset_state();
         return {};
     } catch (const std::filesystem::filesystem_error&) {
         return {error(StorageErrorKind::kIoError, "filesystem operation failed during storage cleanup")};
+    } catch (...) {
+        return {unexpected_exception_error()};
     }
 }
 
 ListTablesResult list_tables(const ListTablesRequest&) {
-    if (state.lifecycle != Lifecycle::kOpen) {
-        return {{}, error(StorageErrorKind::kInvalidRequest, "storage is not open")};
+    try {
+        if (state.lifecycle != Lifecycle::kOpen) {
+            return {{}, error(StorageErrorKind::kInvalidRequest, "storage is not open")};
+        }
+        return {state.tables, std::nullopt};
+    } catch (...) {
+        return {{}, unexpected_exception_error()};
     }
-    return {state.tables, std::nullopt};
 }
 
 CreateTableResult create_table(const CreateTableRequest& request) {
@@ -496,67 +507,90 @@ CreateTableResult create_table(const CreateTableRequest& request) {
     } catch (const std::filesystem::filesystem_error&) {
         return {error(StorageErrorKind::kIoError,
                       "filesystem operation failed while creating table")};
+    } catch (...) {
+        return {unexpected_exception_error()};
     }
 }
 
 OpenTableResult open_table(const OpenTableRequest& request) {
-    if(auto e=require_data_open())return {std::nullopt,std::move(e)};
-    const auto* table=find_table(request.table_id);
-    if (table == nullptr) {
-        return {std::nullopt, error(StorageErrorKind::kTableNotFound, "table does not exist")};
+    try {
+        if(auto e=require_data_open())return {std::nullopt,std::move(e)};
+        const auto* table=find_table(request.table_id);
+        if (table == nullptr) {
+            return {std::nullopt, error(StorageErrorKind::kTableNotFound, "table does not exist")};
+        }
+        auto result=state.cursors->create(*table);
+        return {result.value,data_error(result.error)};
+    } catch (...) {
+        return {std::nullopt, unexpected_exception_error()};
     }
-    auto result=state.cursors->create(*table);
-    return {result.value,data_error(result.error)};
 }
 
 ScanNextResult scan_next(const ScanNextRequest& request) {
-    if(auto e=require_data_open(true))return {std::nullopt,std::move(e)};
-    // Registry owns the immutable schema copy and constructs its temporary HeapTable.
-    auto result=state.cursors->next_record(request.cursor);
-    return {std::move(result.value),data_error(result.error)};
+    try {
+        if(auto e=require_data_open(true))return {std::nullopt,std::move(e)};
+        // Registry owns the immutable schema copy and constructs its temporary HeapTable.
+        auto result=state.cursors->next_record(request.cursor);
+        return {std::move(result.value),data_error(result.error)};
+    } catch (...) {
+        return {std::nullopt, unexpected_exception_error()};
+    }
 }
 
 CloseCursorResult close_cursor(const CloseCursorRequest& request) {
-    if(auto e=require_data_open(true))return {std::move(e)};
-    return {data_error(state.cursors->close(request.cursor))};
+    try {
+        if(auto e=require_data_open(true))return {std::move(e)};
+        return {data_error(state.cursors->close(request.cursor))};
+    } catch (...) {
+        return {unexpected_exception_error()};
+    }
 }
 
 InsertResult insert(const InsertRequest& request) {
-    if(auto e=require_data_open())return {{},std::move(e)};
-    const auto* table=find_table(request.table_id);
-    if(!table)return {{},error(StorageErrorKind::kTableNotFound,"table does not exist")};
-    if(request.rows.empty())return {};
-    if(state.cursors->has_cursor(request.table_id))
-        return {{},error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-    internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
-    auto result=heap.insert_batch(request.rows);
-    return {std::move(result.record_ids),data_error(result.error)};
+    try {
+        if(auto e=require_data_open())return {{},std::move(e)};
+        const auto* table=find_table(request.table_id);
+        if(!table)return {{},error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(request.rows.empty())
+            return {{}, error(StorageErrorKind::kInvalidRequest, "insert batch is empty")};
+        if(state.cursors->has_cursor(request.table_id))
+            return {{},error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
+        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        auto result=heap.insert_batch(request.rows);
+        return {std::move(result.record_ids),data_error(result.error)};
+    } catch (...) {
+        return {{}, unexpected_exception_error()};
+    }
 }
 
 DeleteResult delete_records(const DeleteRequest& request) {
-    if(auto e=require_data_open())return {0,std::move(e)};
-    const auto* table=find_table(request.table_id);
-    if(!table)return {0,error(StorageErrorKind::kTableNotFound,"table does not exist")};
-    if(request.rids.empty())return {};
-    if(state.cursors->has_cursor(request.table_id))
-        return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-    internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
-    auto result=heap.delete_batch(request.rids);
-    return {result.deleted_count,data_error(result.error)};
+    try {
+        if(auto e=require_data_open())return {0,std::move(e)};
+        const auto* table=find_table(request.table_id);
+        if(!table)return {0,error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(request.rids.empty())return {};
+        if(state.cursors->has_cursor(request.table_id))
+            return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
+        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        auto result=heap.delete_batch(request.rids);
+        return {result.deleted_count,data_error(result.error)};
+    } catch (...) {
+        return {0, unexpected_exception_error()};
+    }
 }
 
 internal::BufferPool* internal::StorageTestAccess::buffer_pool() noexcept {
     return state.lifecycle == Lifecycle::kOpen ? state.buffer_pool.get() : nullptr;
 }
 internal::FileManager* internal::StorageTestAccess::file_manager() noexcept {
-    return state.lifecycle == Lifecycle::kOpen ? state.file_manager.get() : nullptr;
+    return state.lifecycle == Lifecycle::kClosed ? nullptr : state.file_manager.get();
 }
 bool internal::StorageTestAccess::configure(std::size_t capacity, ReplacementPolicy policy,
                                            BufferPool::WritePage write, BufferPool::ReadPage read) {
     if (state.lifecycle != Lifecycle::kClosed) return false;
-    buffer_config = BufferConfig{capacity, policy, std::move(write), false, std::move(read)};
+    buffer_config = BufferConfig{capacity, policy, std::move(write), std::move(read)};
     return true;
 }
-void internal::StorageTestAccess::fail_next_file_close() { buffer_config.fail_file_close = true; }
+void internal::StorageTestAccess::fail_next_file_close() { PageFile::fail_next_close_for_testing_ = true; }
 
 }  // namespace tinydbms::storage

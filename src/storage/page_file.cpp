@@ -91,6 +91,12 @@ std::optional<std::streamoff> page_offset(PageId page_id) {
 
 PageFile::PageFile(std::filesystem::path path) : path_(std::move(path)) {}
 
+bool PageFile::fail_next_close_for_testing_ = false;
+
+bool PageFile::take_close_failure_for_testing() noexcept {
+    return std::exchange(fail_next_close_for_testing_, false);
+}
+
 PageFile::~PageFile() {
     (void)close();
 }
@@ -407,14 +413,27 @@ std::optional<PageFileError> PageFile::close() {
     if (!open_) {
         return std::nullopt;
     }
+    if (take_close_failure_for_testing()) {
+        return make_error(PageFileErrorKind::kIo, "injected PageFile close failure");
+    }
+    // A failed stream operation sets failbit. Clear it before a retry so an
+    // still-open file can perform the pending flush/close again. If the stream
+    // was actually closed despite reporting failure, the next flush fails and
+    // the owner remains retained instead of reporting a false successful close.
+    stream_.clear();
     stream_.flush();
     const bool flush_succeeded = stream_.good();
-    stream_.close();
-    const bool close_succeeded = !stream_.fail();
-    open_ = false;
-    if (!flush_succeeded || !close_succeeded) {
+    if (!flush_succeeded) {
+        stream_.clear();
         return make_error(PageFileErrorKind::kIo, "cannot close PageFile cleanly");
     }
+    stream_.close();
+    const bool close_succeeded = !stream_.fail() && !stream_.is_open();
+    if (!close_succeeded) {
+        stream_.clear();
+        return make_error(PageFileErrorKind::kIo, "cannot close PageFile cleanly");
+    }
+    open_ = false;
     return std::nullopt;
 }
 

@@ -43,7 +43,7 @@ void e2e(){
     kind(delete_records({99,{}}).error,StorageErrorKind::kTableNotFound);
     kind(open_table({99}).error,StorageErrorKind::kTableNotFound);
     auto first=open_table({0});check(first.cursor && *first.cursor==0);check(!close_cursor({*first.cursor}).error);
-    check(!insert({0,{}}).error);check(!delete_records({0,{}}).error);check(scan().empty());
+    kind(insert({0,{}}).error,StorageErrorKind::kInvalidRequest);check(!delete_records({0,{}}).error);check(scan().empty());
     std::vector<std::vector<Value>> values;for(int i=0;i<10;++i)values.push_back(row(1024,static_cast<char>('a'+i)));
     auto added=insert({0,values});check(!added.error && added.rids.size()==10);
     auto rows=scan();check(rows.size()==10);
@@ -70,7 +70,7 @@ void e2e(){
 void blocked(TableId table,RecordId rid){
     auto i=insert({table,{row()}});kind(i.error,StorageErrorKind::kInvalidRequest);check(i.rids.empty());
     auto d=delete_records({table,{rid}});kind(d.error,StorageErrorKind::kInvalidRequest);check(d.deleted_count==0);
-    check(!insert({table,{}}).error);check(!delete_records({table,{}}).error);
+    kind(insert({table,{}}).error,StorageErrorKind::kInvalidRequest);check(!delete_records({table,{}}).error);
 }
 void restrictions(){
     Temp temp;check(StorageTestAccess::configure(1));check(!open_storage({temp.path.string()}).error);create();create(1);
@@ -114,6 +114,7 @@ void lifecycle(){
     kind(scan_next({*opened.cursor}).error,StorageErrorKind::kCursorInvalid);
     auto c=open_table({0});check(c.cursor.has_value());StorageTestAccess::fail_next_file_close();
     kind(close_storage({}).error,StorageErrorKind::kIoError);nonopen(true);
+    check(StorageTestAccess::file_manager()->find_table_file(0)!=nullptr);
     check(!close_storage({}).error);check(!open_storage({temp.path.string()}).error);
     kind(scan_next({*c.cursor}).error,StorageErrorKind::kCursorInvalid);check(!close_storage({}).error);
 }

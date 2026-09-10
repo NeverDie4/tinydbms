@@ -69,7 +69,7 @@ void run() {
     StorageTestAccess::fail_next_file_close();
     check(close_storage({}).error.has_value());
     check(list_tables({}).error.has_value() && open_storage({actual.path.string()}).error.has_value());
-    check(!StorageTestAccess::file_manager()); // Closing never exposed as Open.
+    check(StorageTestAccess::file_manager()->find_table_file(0)!=nullptr);
     check(!close_storage({}).error); // Retry finishing cleanup.
     check(!open_storage({actual.path.string()}).error);
     // Metadata close failure also stays Closing after files are gone.

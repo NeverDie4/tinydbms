@@ -116,19 +116,28 @@ std::optional<PageFileError> FileManager::close_table_file(TableId table_id) {
         return std::nullopt;
     }
     auto close_error = found->second->close();
+    if (close_error.has_value()) {
+        return close_error;
+    }
     open_files_.erase(found);
-    return close_error;
+    return std::nullopt;
 }
 
 std::optional<PageFileError> FileManager::close_all() {
+    if (open_files_.empty() && PageFile::take_close_failure_for_testing()) {
+        return make_error(PageFileErrorKind::kIo, "injected PageFile close failure");
+    }
     std::optional<PageFileError> first_error;
-    for (auto& [table_id, file] : open_files_) {
-        (void)table_id;
-        if (auto close_error = file->close(); close_error.has_value() && !first_error.has_value()) {
-            first_error = std::move(close_error);
+    for (auto file = open_files_.begin(); file != open_files_.end();) {
+        if (auto close_error = file->second->close(); close_error.has_value()) {
+            if (!first_error.has_value()) {
+                first_error = std::move(close_error);
+            }
+            ++file;
+        } else {
+            file = open_files_.erase(file);
         }
     }
-    open_files_.clear();
     return first_error;
 }
 
