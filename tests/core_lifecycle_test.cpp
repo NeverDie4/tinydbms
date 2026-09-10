@@ -483,6 +483,26 @@ bool test_list_tables_exception_cleans_up() {
     return true;
 }
 
+bool test_split_error_does_not_touch_storage() {
+    fake::reset();
+    fake_compiler::reset();
+    Database database;
+    CHECK(open_database(database));
+
+    const auto oversized = database.execute_script(
+        ExecuteScriptRequest{std::string(tinydbms::kMaxSqlBytes + 1, ' ')});
+    CHECK(oversized.outcomes.size() == 1);
+    CHECK(is_error(oversized.outcomes.front(), ErrorKind::kCompile));
+    CHECK(fake_compiler::state().split_calls == 1);
+    CHECK(fake_compiler::state().compile_calls == 0);
+    CHECK(fake::state().close_calls == 0);
+    CHECK(fake::state().opened);
+
+    CHECK(!database.close().error.has_value());
+    CHECK(fake::state().close_calls == 1);
+    return true;
+}
+
 bool test_execute_script_compiles_in_order_and_stops_on_error() {
     fake::reset();
     fake_compiler::reset();
@@ -538,6 +558,7 @@ int main() {
         test_destructor_releases_guard_after_cleanup_retry_failure() &&
         test_open_cleanup_is_retryable_after_pre_close_exception() &&
         test_list_tables_exception_cleans_up() &&
+        test_split_error_does_not_touch_storage() &&
         test_execute_script_compiles_in_order_and_stops_on_error();
 
     if (!passed) {

@@ -274,6 +274,30 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms_compiler_core_cli_integration_test>
 )
 
+if(TINYDBMS_ENABLE_REAL_MODULES)
+    add_executable(tinydbms_real_modules_integration_test
+        real_modules_integration_test.cpp
+        ${PROJECT_SOURCE_DIR}/src/app/session_core.cpp
+        $<TARGET_OBJECTS:tinydbms_core_objects>
+    )
+
+    target_include_directories(tinydbms_real_modules_integration_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/app
+    )
+
+    target_link_libraries(tinydbms_real_modules_integration_test PRIVATE
+        tinydbms_cli_logic
+        tinydbms_compiler
+        tinydbms_storage
+    )
+
+    add_test(
+        NAME tinydbms.real_modules_integration
+        COMMAND $<TARGET_FILE:tinydbms_real_modules_integration_test>
+    )
+endif()
+
 add_executable(tinydbms_compiler_splitter_test compiler_splitter_test.cpp)
 
 target_link_libraries(tinydbms_compiler_splitter_test PRIVATE

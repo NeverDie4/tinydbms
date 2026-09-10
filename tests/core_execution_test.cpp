@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <filesystem>
+#include <string>
 #include <variant>
 
 namespace {
@@ -46,6 +47,17 @@ int main() {
     assert(std::holds_alternative<Error>(invalid_create.outcomes[0].outcome));
     const auto valid_after_failure = database.execute_script({"CREATE TABLE recovered (id INT);"});
     assert(valid_after_failure.outcomes.size() == 1 && !command_of(valid_after_failure.outcomes[0]).error);
+
+    const auto oversized = database.execute_script({std::string(kMaxSqlBytes + 1, ' ')});
+    assert(oversized.outcomes.size() == 1);
+    const auto* oversized_error = std::get_if<Error>(&oversized.outcomes[0].outcome);
+    assert(oversized_error != nullptr);
+    assert(oversized_error->kind == ErrorKind::kCompile);
+    assert(oversized_error->location.has_value());
+    assert(oversized_error->location->line == 1 && oversized_error->location->column == 1);
+    const auto valid_after_oversized = database.execute_script({"SELECT * FROM student;"});
+    assert(valid_after_oversized.outcomes.size() == 1);
+    assert(std::holds_alternative<QueryResult>(valid_after_oversized.outcomes[0].outcome));
 
     const auto inserted = database.execute_script(
         {"INSERT INTO student VALUES (1, 'Alice'), (2, 'Bob');"});

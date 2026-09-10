@@ -55,7 +55,9 @@ tinydbms::core::CloseDatabaseResult CoreSession::close() {
     }
 
     tinydbms::core::CloseDatabaseResult result = database_->close();
-    database_.reset();
+    if (!result.error.has_value()) {
+        database_.reset();
+    }
     return result;
 }
 

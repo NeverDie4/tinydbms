@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -125,6 +126,19 @@ inline Expr& Expr::operator=(Expr&&) noexcept = default;
 struct SplitStatement {
     std::string sql;       // 一条语句文本，保留原文中从 start 到自身结尾分号的内容
     SourceLocation start;  // sql 首字符在整段输入中的绝对位置（1-based）
+};
+
+// 分句只能成功返回语句列表，或以 CompileError 返回整段输入错误。
+struct SplitStatementsResult {
+    SplitStatementsResult(std::vector<SplitStatement> statements);
+    SplitStatementsResult(CompileError error);
+    ~SplitStatementsResult();
+    SplitStatementsResult(SplitStatementsResult&&) noexcept;
+    SplitStatementsResult& operator=(SplitStatementsResult&&) noexcept;
+    SplitStatementsResult(const SplitStatementsResult&) = delete;
+    SplitStatementsResult& operator=(const SplitStatementsResult&) = delete;
+
+    std::variant<std::vector<SplitStatement>, CompileError> outcome;
 };
 
 struct CreateTablePlan {
@@ -278,8 +292,17 @@ inline CompileResult::~CompileResult() = default;
 inline CompileResult::CompileResult(CompileResult&&) noexcept = default;
 inline CompileResult& CompileResult::operator=(CompileResult&&) noexcept = default;
 
-// 输入整段 SQL 文本，返回带起点的语句列表；列表顺序即原文顺序
-std::vector<SplitStatement> split_statements(std::string_view text);
+inline SplitStatementsResult::SplitStatementsResult(std::vector<SplitStatement> value)
+    : outcome{std::move(value)} {}
+inline SplitStatementsResult::SplitStatementsResult(CompileError value)
+    : outcome{std::move(value)} {}
+inline SplitStatementsResult::~SplitStatementsResult() = default;
+inline SplitStatementsResult::SplitStatementsResult(SplitStatementsResult&&) noexcept = default;
+inline SplitStatementsResult& SplitStatementsResult::operator=(
+    SplitStatementsResult&&) noexcept = default;
+
+// 输入整段 SQL 文本，成功时返回带起点的语句列表；列表顺序即原文顺序。
+SplitStatementsResult split_statements(std::string_view text);
 
 // 无状态纯函数：相同 SQL + 相同 CatalogView 得到相同结果
 CompileResult compile(const CompileRequest& request);

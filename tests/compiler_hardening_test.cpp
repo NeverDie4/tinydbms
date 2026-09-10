@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <iostream>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -124,16 +123,21 @@ void expect_split(
     std::string_view input,
     const std::vector<std::string_view>& sql,
     const std::vector<SourceLocation>& locations) {
-    const auto statements = split_statements(input);
-    test.expect(statements.size() == sql.size(), "split statement count");
-    test.expect(statements.size() == locations.size(), "split location count");
-    if (statements.size() != sql.size() || statements.size() != locations.size()) {
+    const auto result = split_statements(input);
+    const auto* statements = std::get_if<std::vector<SplitStatement>>(&result.outcome);
+    test.expect(statements != nullptr, "split success");
+    if (statements == nullptr) {
         return;
     }
-    for (std::size_t index = 0; index < statements.size(); ++index) {
-        test.expect(statements[index].sql == sql[index], "split SQL");
-        test.expect(statements[index].start.line == locations[index].line, "split line");
-        test.expect(statements[index].start.column == locations[index].column, "split column");
+    test.expect(statements->size() == sql.size(), "split statement count");
+    test.expect(statements->size() == locations.size(), "split location count");
+    if (statements->size() != sql.size() || statements->size() != locations.size()) {
+        return;
+    }
+    for (std::size_t index = 0; index < statements->size(); ++index) {
+        test.expect((*statements)[index].sql == sql[index], "split SQL");
+        test.expect((*statements)[index].start.line == locations[index].line, "split line");
+        test.expect((*statements)[index].start.column == locations[index].column, "split column");
     }
 }
 
@@ -188,15 +192,26 @@ void test_splitter(TestContext& test) {
 
     test.begin_case("split deterministic repeated calls");
     const std::string input = "SELECT * FROM a; -- gap\nSELECT * FROM b;";
-    const auto first = split_statements(input);
+    const auto first_result = split_statements(input);
+    const auto* first = std::get_if<std::vector<SplitStatement>>(&first_result.outcome);
+    test.expect(first != nullptr, "first split success");
     for (int iteration = 0; iteration < 10; ++iteration) {
-        const auto next = split_statements(input);
-        test.expect(next.size() == first.size(), "repeated split size");
-        if (next.size() == first.size()) {
-            for (std::size_t index = 0; index < first.size(); ++index) {
-                test.expect(next[index].sql == first[index].sql, "repeated split SQL");
-                test.expect(next[index].start.line == first[index].start.line, "repeated split line");
-                test.expect(next[index].start.column == first[index].start.column, "repeated split column");
+        const auto next_result = split_statements(input);
+        const auto* next = std::get_if<std::vector<SplitStatement>>(&next_result.outcome);
+        test.expect(next != nullptr, "repeated split success");
+        if (first == nullptr || next == nullptr) {
+            continue;
+        }
+        test.expect(next->size() == first->size(), "repeated split size");
+        if (next->size() == first->size()) {
+            for (std::size_t index = 0; index < first->size(); ++index) {
+                test.expect((*next)[index].sql == (*first)[index].sql, "repeated split SQL");
+                test.expect(
+                    (*next)[index].start.line == (*first)[index].start.line,
+                    "repeated split line");
+                test.expect(
+                    (*next)[index].start.column == (*first)[index].start.column,
+                    "repeated split column");
             }
         }
     }
@@ -724,7 +739,9 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
     for (int index = 0; index < 100; ++index) {
         script += "SELECT * FROM student;";
     }
-    test.expect(split_statements(script).size() == 100, "100 statements split");
+    const auto split_result = split_statements(script);
+    const auto* statements = std::get_if<std::vector<SplitStatement>>(&split_result.outcome);
+    test.expect(statements != nullptr && statements->size() == 100, "100 statements split");
 
     test.begin_case("INSERT 50 rows");
     std::string insert = "INSERT INTO numbers VALUES ";
@@ -818,7 +835,12 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
     maximum_sql.resize(kMaxSqlBytes - 1, ' ');
     maximum_sql.push_back(';');
     plan_of(test, compile_sql(maximum_sql, catalog));
-    test.expect(split_statements(maximum_sql).size() == 1, "maximum SQL text splits");
+    const auto maximum_split = split_statements(maximum_sql);
+    const auto* maximum_statements =
+        std::get_if<std::vector<SplitStatement>>(&maximum_split.outcome);
+    test.expect(
+        maximum_statements != nullptr && maximum_statements->size() == 1,
+        "maximum SQL text splits");
 
     test.begin_case("oversized compile input is rejected");
     std::string oversized_sql = maximum_sql + ' ';
@@ -831,14 +853,15 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         1,
         1);
 
-    test.begin_case("oversized splitter input throws length error");
-    bool length_error = false;
-    try {
-        static_cast<void>(split_statements(oversized_sql));
-    } catch (const std::length_error&) {
-        length_error = true;
+    test.begin_case("oversized splitter input returns lexical error");
+    const auto oversized_split = split_statements(oversized_sql);
+    const auto* split_error = std::get_if<CompileError>(&oversized_split.outcome);
+    test.expect(split_error != nullptr, "oversized split error");
+    if (split_error != nullptr) {
+        test.expect(split_error->kind == CompileErrorKind::kLex, "oversized split error kind");
+        test.expect(split_error->location.line == 1, "oversized split error line");
+        test.expect(split_error->location.column == 1, "oversized split error column");
     }
-    test.expect(length_error, "oversized splitter input rejected before copy");
 }
 
 }  // namespace

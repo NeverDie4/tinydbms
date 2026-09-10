@@ -47,9 +47,20 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
     }
 
     ExecuteScriptResult result;
+    bool storage_execution_started = false;
     try {
-        const std::vector<compiler::SplitStatement> statements =
+        compiler::SplitStatementsResult split =
             compiler::split_statements(request.text);
+        if (auto* split_error = std::get_if<compiler::CompileError>(&split.outcome)) {
+            result.outcomes.push_back(ExecuteResult{Error{
+                ErrorKind::kCompile,
+                split_error->location,
+                std::move(split_error->message)}});
+            return result;
+        }
+
+        const auto& statements =
+            std::get<std::vector<compiler::SplitStatement>>(split.outcome);
         result.outcomes.reserve(statements.size());
 
         for (const compiler::SplitStatement& statement : statements) {
@@ -78,6 +89,8 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             }
 
             compiler::Plan plan = std::move(std::get<compiler::Plan>(compiled.outcome));
+            // 从这里开始 Plan 可能已打开 cursor 或改动 Storage，异常需要清理。
+            storage_execution_started = true;
             ExecuteResult execution = impl_->execute_plan_impl(std::move(plan));
             const bool stop = internal::is_execution_failure(execution);
             result.outcomes.push_back(std::move(execution));
@@ -86,12 +99,12 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             }
         }
     } catch (const std::exception& exception) {
-        if (impl_->open) {
+        if (storage_execution_started && impl_->open) {
             impl_->abort_after_storage_exception();
         }
         result.outcomes.push_back(internal::make_execute_error(ErrorKind::kInternal, exception.what()));
     } catch (...) {
-        if (impl_->open) {
+        if (storage_execution_started && impl_->open) {
             impl_->abort_after_storage_exception();
         }
         result.outcomes.push_back(internal::make_execute_error(

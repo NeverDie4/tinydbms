@@ -90,4 +90,9 @@ cmake --build build/real-debug
 ctest --test-dir build/real-debug --output-on-failure
 ```
 
+真实模块构建下的 `tinydbms.real_modules_integration` 使用临时目录自动验证
+`CREATE TABLE -> INSERT -> SELECT -> DELETE -> close -> reopen -> SELECT`、批处理停止、
+REPL 恢复、超大 SQL 边界、UTF-8 数据目录、编译与语义错误位置、storage 运行期错误和 open
+失败路径。
+
 开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/) 的分层与调用链，不复制其事务、日志或多引擎范围。

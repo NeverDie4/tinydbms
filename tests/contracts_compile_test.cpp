@@ -24,6 +24,9 @@ static_assert(!std::is_default_constructible_v<PlanNode>);
 static_assert(!std::is_default_constructible_v<QueryPlan>);
 static_assert(!std::is_default_constructible_v<Plan>);
 static_assert(!std::is_default_constructible_v<CompileResult>);
+static_assert(!std::is_default_constructible_v<SplitStatementsResult>);
+static_assert(std::is_move_constructible_v<SplitStatementsResult>);
+static_assert(!std::is_copy_constructible_v<SplitStatementsResult>);
 
 static_assert(std::is_move_constructible_v<core::Database>);
 static_assert(!std::is_copy_constructible_v<core::Database>);
@@ -31,7 +34,7 @@ static_assert(!std::is_copy_constructible_v<core::Database>);
 // 公开 API 必须存在且签名正确；这里只做类型检查，不产生链接依赖。
 static_assert(std::is_same_v<
     decltype(split_statements(std::declval<std::string_view>())),
-    std::vector<SplitStatement>>);
+    SplitStatementsResult>);
 static_assert(std::is_same_v<
     decltype(compile(std::declval<const CompileRequest&>())),
     CompileResult>);

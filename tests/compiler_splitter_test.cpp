@@ -2,6 +2,8 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <variant>
+#include <vector>
 
 #include "tinydbms/compiler.hpp"
 
@@ -35,17 +37,24 @@ void expect_split(
     std::string_view case_name,
     std::string_view input,
     std::initializer_list<ExpectedStatement> expected) {
-    const auto actual = tinydbms::compiler::split_statements(input);
+    const auto result = tinydbms::compiler::split_statements(input);
     const std::string prefix{case_name};
+    const auto* actual =
+        std::get_if<std::vector<tinydbms::compiler::SplitStatement>>(&result.outcome);
 
-    test.expect(actual.size() == expected.size(), prefix + ": statement count");
-    if (actual.size() != expected.size()) {
+    test.expect(actual != nullptr, prefix + ": split success");
+    if (actual == nullptr) {
+        return;
+    }
+
+    test.expect(actual->size() == expected.size(), prefix + ": statement count");
+    if (actual->size() != expected.size()) {
         return;
     }
 
     std::size_t index = 0;
     for (const auto& item : expected) {
-        const auto& statement = actual[index];
+        const auto& statement = (*actual)[index];
         test.expect(statement.sql == item.sql, prefix + ": sql[" + std::to_string(index) + "]");
         test.expect(
             statement.start.line == item.line,

@@ -44,8 +44,15 @@ SourceLocation location_at(std::string_view text, std::size_t offset) {
 
 }  // namespace
 
-std::vector<SplitStatement> split_statements(std::string_view text) {
+SplitStatementsResult split_statements(std::string_view text) {
     ++testing::fake_compiler::state().split_calls;
+    if (text.size() > kMaxSqlBytes) {
+        return SplitStatementsResult{CompileError{
+            CompileErrorKind::kLex,
+            SourceLocation{1, 1},
+            "SQL text exceeds maximum length"}};
+    }
+
     std::vector<SplitStatement> statements;
 
     std::size_t cursor = 0;
@@ -68,7 +75,7 @@ std::vector<SplitStatement> split_statements(std::string_view text) {
         }
         cursor = semicolon + 1;
     }
-    return statements;
+    return SplitStatementsResult{std::move(statements)};
 }
 
 CompileResult compile(const CompileRequest& request) {

@@ -169,12 +169,43 @@ bool test_real_compiler_keeps_table_records_isolated() {
     return true;
 }
 
+bool test_core_session_retries_failed_close() {
+    tinydbms::testing::fake_storage::reset();
+
+    CoreSession session;
+    CHECK(!session.open(tinydbms::core::OpenDatabaseRequest{"compiler-integration-data"}).error);
+    tinydbms::testing::fake_storage::set_close_error({
+        tinydbms::storage::StorageErrorKind::kIoError,
+        "injected close failure"});
+
+    const auto failed = session.close();
+    CHECK(failed.error.has_value());
+    CHECK(failed.error->kind == tinydbms::core::ErrorKind::kStorage);
+    CHECK(tinydbms::testing::fake_storage::state().close_calls == 1);
+
+    tinydbms::testing::fake_storage::clear_close_error();
+    const auto retried = session.close();
+    CHECK(!retried.error.has_value());
+    CHECK(tinydbms::testing::fake_storage::state().close_calls == 2);
+    CHECK(!tinydbms::testing::fake_storage::state().opened);
+
+    const auto after_close =
+        session.execute_script(tinydbms::core::ExecuteScriptRequest{"SELECT * FROM students;"});
+    CHECK(after_close.outcomes.size() == 1);
+    const auto* error = std::get_if<tinydbms::core::Error>(&after_close.outcomes.front().outcome);
+    CHECK(error != nullptr);
+    CHECK(error->kind == tinydbms::core::ErrorKind::kExecute);
+    CHECK(error->message == "session is not open");
+    return true;
+}
+
 }  // namespace
 
 int main() {
     return test_real_compiler_drives_core_and_cli() &&
             test_real_compiler_error_stops_before_storage_execution() &&
-            test_real_compiler_keeps_table_records_isolated()
+            test_real_compiler_keeps_table_records_isolated() &&
+            test_core_session_retries_failed_close()
         ? 0
         : 1;
 }

@@ -266,7 +266,7 @@ storage，也不得链接 fake compiler。至少覆盖：
 
 ### 8.3 真实 storage 产品级联调测试
 
-真实 storage 构建下需要增加产品级测试：
+真实 storage 构建下，`tinydbms.real_modules_integration` 产品级测试的目标范围包括：
 
 - --data-dir 临时目录下的 CREATE、INSERT、SELECT、DELETE；
 - 批处理遇错停止，REPL 遇错继续；
@@ -275,6 +275,10 @@ storage，也不得链接 fake compiler。至少覆盖：
 - open、SQL、storage、close 错误的退出码和 stderr；
 - stdout 不混入提示符或错误文本。
 
+当前自动化目标已覆盖持久化、批处理停止、REPL 恢复、超大 SQL 不使会话失效、UTF-8 数据目录、
+UTF-8 VARCHAR 展示、编译与语义错误位置、storage 运行期错误（超行宽插入）以及 open 失败路径。
+仍未由该目标覆盖的是 close 的设备级失败：真实 storage 没有故障注入接缝，该路径由 fake storage
+注入的 core/CLI 测试覆盖；CLI 层的 `ERROR execute` 标签在真实入口不可达，由 core/app 单元测试覆盖。
 这些测试使用测试生成的 SQL 和临时目录，不依赖真实业务数据。它们验证的是外部模块已经
 符合公共契约，而不是由 app 测试代替 compiler/storage 单元测试。
 
@@ -288,7 +292,8 @@ storage，也不得链接 fake compiler。至少覆盖：
 4. 接入 Database 生命周期及退出码累计；
 5. 完成结构化结果展示；
 6. 先运行不依赖外部模块的 CLI 测试；
-7. 保留真实 compiler + fake storage 的 core/CLI 联调测试，并补齐真实 compiler/storage 产品级联调测试；
+7. 保留真实 compiler + fake storage 的 core/CLI 联调测试，并以
+   `tinydbms.real_modules_integration` 覆盖真实 compiler/storage 产品级联调；
 8. 执行完整构建、CTest 和工作区差异审查。
 
 本阶段验收必须满足：
