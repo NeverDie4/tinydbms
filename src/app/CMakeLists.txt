@@ -10,6 +10,4 @@ target_compile_definitions(tinydbms PRIVATE
 
 target_link_libraries(tinydbms PRIVATE
     tinydbms_core
-    tinydbms_compiler
-    tinydbms_storage
 )

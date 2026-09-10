@@ -1,45 +1,77 @@
 # tinydbms
 
-一个用于学习与课程项目的轻量级 DBMS。参考 MiniOB 的分层思路实现，不复用其代码。
+`tinydbms` 是一个单进程、单线程的教学数据库。目前已经提供从 SQL 文本到页式持久化存储的最小完整路径。
 
-## 当前状态
-
-当前仓库只是可编译的开发骨架：
-
-- 可执行入口支持 `--help` 和 `--version`
-- 尚未实现 SQL、执行器、Catalog 或页式存储
-- 编译器层、存储层、core 层均为占位静态库
-- 跨模块契约头文件已落地在 `include/tinydbms/`，模块 API 尚未实现
-
-## 已确认的技术基线
-
-1. C++20（保守子集，不碰 ranges / coroutines / modules）
-2. Linux 使用 g++，Windows 使用 MSVC
-3. CMake + Ninja
-4. 单进程，三层静态库：`tinydbms_compiler`、`tinydbms_storage`、`tinydbms_core`
-5. 测试先使用 CTest + 自写断言；GoogleTest 以后需要时再引入
-6. REPL 以 EOF 退出（Unix 通常 Ctrl-D；Windows 通常 Ctrl-Z 后回车），初版不提供额外元命令；stdin 非交互时按整段批处理执行
-7. 数据目录缺省为当前目录下的 `tinydbms-data/`，可用 `--data-dir` 覆盖
-
-技术决策见 [docs/技术决策.md](docs/技术决策.md)，模块交互契约见 [docs/模块交互契约.md](docs/模块交互契约.md)，字段级消息契约见 [docs/消息契约详细设计.md](docs/消息契约详细设计.md)。
-
-## 构建与测试
-
-```bash
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
-./build/debug/src/app/tinydbms --help
-```
-
-## 目录结构
+## 当前架构
 
 ```text
-src/app/        可执行入口（当前仅 --help / --version）
-src/compiler/   SQL 编译器层占位
-src/core/       Database Core 占位
-src/storage/    页式存储层占位
-include/        公共契约头文件（common / compiler / storage / core）
-tests/          CTest 测试
-docs/           设计文档（技术决策、模块契约、字段级契约）
+App
+  ↓
+Core Database / Executor
+  ├─ Compiler
+  │   ├─ Lexer
+  │   ├─ Parser
+  │   ├─ Semantic
+  │   ├─ Planner
+  │   └─ Optimizer
+  └─ Storage
+      ├─ HeapTable
+      ├─ BufferPool
+      ├─ RecordPage
+      ├─ SlottedPage
+      ├─ RecordCodec
+      └─ PageFile
 ```
+
+`core::Database` 持有运行时 catalog 快照并执行 Compiler 生成的 Plan；Core 只调用 `include/tinydbms/storage.hpp` 的公共 API。Storage 负责 metadata、HeapTable、页面、buffer pool 和表文件，既不知道 SQL，也不计算 WHERE 或 projection。
+
+## 当前 SQL 范围
+
+已支持：
+
+- `CREATE TABLE`
+- `INSERT`，包括完整的显式列重排
+- `SELECT`、列投影与简单 WHERE（比较、`AND`、`OR`、`NOT`）
+- `DELETE`，采用“扫描、收集 RID、关闭 cursor、批量删除”流程
+- 正常 close/reopen 后的 schema 和记录持久化
+
+初版 public type 只有 `INT` 和 `VARCHAR`。`INT` 是有符号 `int32_t`，物理编码为 4-byte little-endian；`VARCHAR` 是 UTF-8，物理编码为 `uint32_t` little-endian 字节长度加内容。
+
+当前未实现 System Catalog 特殊表、FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
+
+## 公共契约
+
+正式公共入口是：
+
+```text
+include/tinydbms/common.hpp
+include/tinydbms/compiler.hpp
+include/tinydbms/core.hpp
+include/tinydbms/storage.hpp
+```
+
+`src/include/tinydbms/*.h` 仅是 compatibility forwarding headers，不是并行 API。
+
+## 构建与验证
+
+本项目必须使用 g++。
+
+```powershell
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+```
+
+## 目录
+
+```text
+src/app/        命令行入口
+src/compiler/   SQL 编译器
+src/core/       Database 生命周期与最小执行器
+src/storage/    Typed Heap Storage
+include/        canonical public contracts
+tests/          CTest 回归与集成测试
+docs/           架构、契约、开发守则与 MiniOB 学习资料
+```
+
+开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/)，借鉴其分层与调用链，不复制其事务、日志或多引擎范围。
