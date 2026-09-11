@@ -141,6 +141,29 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms.storage_page_file_integration_test>
 )
 
+add_executable(tinydbms.system_catalog_test system_catalog_test.cpp)
+target_include_directories(tinydbms.system_catalog_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.system_catalog_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.system_catalog COMMAND $<TARGET_FILE:tinydbms.system_catalog_test>)
+
+add_executable(tinydbms.system_catalog_failure_test system_catalog_failure_test.cpp)
+target_include_directories(tinydbms.system_catalog_failure_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.system_catalog_failure_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.system_catalog_failure COMMAND $<TARGET_FILE:tinydbms.system_catalog_failure_test>)
+
+if(TINYDBMS_ENABLE_REAL_MODULES)
+    add_executable(tinydbms.system_catalog_protection_test system_catalog_protection_test.cpp)
+    target_include_directories(tinydbms.system_catalog_protection_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/storage
+    )
+    target_link_libraries(tinydbms.system_catalog_protection_test PRIVATE
+        tinydbms_core
+        tinydbms_storage
+    )
+    add_test(NAME tinydbms.system_catalog_protection
+        COMMAND $<TARGET_FILE:tinydbms.system_catalog_protection_test>)
+endif()
+
 add_executable(tinydbms.record_codec_test record_codec_test.cpp)
 
 target_include_directories(tinydbms.record_codec_test PRIVATE
@@ -284,6 +307,7 @@ if(TINYDBMS_ENABLE_REAL_MODULES)
     target_include_directories(tinydbms_real_modules_integration_test PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src/app
+        ${PROJECT_SOURCE_DIR}/src/storage
     )
 
     target_link_libraries(tinydbms_real_modules_integration_test PRIVATE

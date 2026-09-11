@@ -7,7 +7,7 @@
 - `app` 提供 `--help`、`--version`、`--data-dir`、REPL 和 stdin 批处理入口。
 - `compiler` 提供分句、词法、语法、语义、优化和 Plan 生成。
 - `core` 提供 `Database` 生命周期、Catalog 恢复、TableId 分配和脚本顺序执行，源码按 lifecycle、script、executor、expression 拆分。
-- `storage` 提供 typed heap storage、buffer pool、record/page 编解码、cursor 和持久化 metadata。
+- `storage` 提供 typed heap storage、buffer pool、record/page 编解码、cursor，以及以 System Catalog 为 schema 权威的持久化元数据。
 - 默认构建仍通过不可用 Session 适配器验证 CLI 边界；完整 SQL 链路需要启用 `TINYDBMS_ENABLE_REAL_MODULES=ON`。
 
 ## 当前架构
@@ -45,7 +45,11 @@ Core Database / Executor
 
 初版 public type 只有 `INT` 和 `VARCHAR`。`INT` 是有符号 `int32_t`，物理编码为 4-byte little-endian；`VARCHAR` 是 UTF-8，物理编码为 `uint32_t` little-endian 字节长度加内容。
 
-当前未实现 System Catalog 特殊表、FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
+`storage.meta` 是 V2 bootstrap，不保存用户 schema。`tdb_sys_tables`（TableId 0）与
+`tdb_sys_columns`（TableId 1）是 Storage 管理的特殊 HeapTable，保存用户 schema；它们可由
+`SELECT` 读取，但普通 `CREATE`、`INSERT` 与 `DELETE` 不能修改。普通用户表从 TableId 2 开始。
+
+当前未实现 FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
 
 ## 公共契约
 

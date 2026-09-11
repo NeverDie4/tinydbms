@@ -43,41 +43,43 @@ void run(std::size_t capacity,ReplacementPolicy policy,int count){
     const auto started=std::chrono::steady_clock::now();Temp temp;
     check(StorageTestAccess::configure(capacity,policy));check(!open_storage({temp.path.string()}).error);
     Rows expected[2];std::uint64_t pages[2]{};
-    for(TableId t=0;t<2;++t){
-        check(!create_table({t,t?"second":"first",{{"i",Type::kInt},{"l",Type::kInt},
+    for(TableId t=2;t<4;++t){
+        const auto index=static_cast<std::size_t>(t-2);
+        check(!create_table({t,t==2?"first":"second",{{"i",Type::kInt},{"l",Type::kInt},
             {"s",Type::kVarchar}}}).error);
         std::vector<std::vector<Value>> values;for(int i=0;i<count;++i)values.push_back(row(i,t));
         auto inserted=insert({t,values});check(!inserted.error && inserted.rids.size()==values.size());
-        for(std::size_t i=0;i<values.size();++i)expected[t].emplace(inserted.rids[i].value,values[i]);
-        pages[t]=StorageTestAccess::file_manager()->find_table_file(t)->page_count();check(pages[t]>3);verify(t,expected[t]);
+        for(std::size_t i=0;i<values.size();++i)expected[index].emplace(inserted.rids[i].value,values[i]);
+        pages[index]=StorageTestAccess::file_manager()->find_table_file(t)->page_count();check(pages[index]>3);verify(t,expected[index]);
     }
     check(expected[0].begin()->first==expected[1].begin()->first); // Same physical RID, distinct scope.
     std::size_t reused=0;
-    for(TableId t=0;t<2;++t){
+    for(TableId t=2;t<4;++t){
+        const auto index=static_cast<std::size_t>(t-2);
         std::vector<RecordId> removed;std::map<std::pair<PageId,SlotId>,std::uint16_t> generations;
-        int ordinal=0;for(const auto& [id,values]:expected[t])if(ordinal++%2==0){
+        int ordinal=0;for(const auto& [id,values]:expected[index])if(ordinal++%2==0){
             removed.push_back({id});auto p=RecordIdCodec::decode({id});check(p.value.has_value());
             generations[{p.value->page_id,p.value->slot_id}]=p.value->generation;}
         auto deleted=delete_records({t,removed});check(!deleted.error && deleted.deleted_count==removed.size());
-        for(auto id:removed)expected[t].erase(id.value);verify(t,expected[t]);
+        for(auto id:removed)expected[index].erase(id.value);verify(t,expected[index]);
         std::vector<std::vector<Value>> replacement;for(std::size_t i=0;i<removed.size();++i)replacement.push_back(row(count+static_cast<int>(i),t));
         auto inserted=insert({t,replacement});check(!inserted.error && inserted.rids.size()==replacement.size());
         for(std::size_t i=0;i<replacement.size();++i){auto id=inserted.rids[i];auto p=RecordIdCodec::decode(id);check(p.value.has_value());
             auto old=generations.find({p.value->page_id,p.value->slot_id});check(old!=generations.end());
-            check(p.value->generation==old->second+1);++reused;expected[t].emplace(id.value,replacement[i]);}
+            check(p.value->generation==old->second+1);++reused;expected[index].emplace(id.value,replacement[i]);}
         for(auto old:removed){auto failed=delete_records({t,{old}});check(failed.error && failed.error->kind==StorageErrorKind::kInvalidRequest && failed.deleted_count==0);}
-        check(StorageTestAccess::file_manager()->find_table_file(t)->page_count()==pages[t]);verify(t,expected[t]);
+        check(StorageTestAccess::file_manager()->find_table_file(t)->page_count()==pages[index]);verify(t,expected[index]);
     }
     metrics();auto stats=StorageTestAccess::buffer_pool()->stats();check(stats.eviction_count>0 && stats.dirty_flush_count>0);
     check(!close_storage({}).error);
     for(int cycle=0;cycle<3;++cycle){
         check(!open_storage({temp.path.string()}).error);
-        for(TableId t=0;t<2;++t){verify(t,expected[t]);auto extra=insert({t,{row(20000+cycle,t)}});check(!extra.error && extra.rids.size()==1);
-            expected[t].emplace(extra.rids[0].value,row(20000+cycle,t));
-            auto old=expected[t].begin()->first;check(!delete_records({t,{{old}}}).error);expected[t].erase(old);verify(t,expected[t]);}
+        for(TableId t=2;t<4;++t){const auto index=static_cast<std::size_t>(t-2);verify(t,expected[index]);auto extra=insert({t,{row(20000+cycle,t)}});check(!extra.error && extra.rids.size()==1);
+            expected[index].emplace(extra.rids[0].value,row(20000+cycle,t));
+            auto old=expected[index].begin()->first;check(!delete_records({t,{{old}}}).error);expected[index].erase(old);verify(t,expected[index]);}
         metrics();check(!close_storage({}).error);
     }
-    check(!open_storage({temp.path.string()}).error);for(TableId t=0;t<2;++t)verify(t,expected[t]);check(!close_storage({}).error);
+    check(!open_storage({temp.path.string()}).error);for(TableId t=2;t<4;++t)verify(t,expected[static_cast<std::size_t>(t-2)]);check(!close_storage({}).error);
     std::cout<<"capacity="<<capacity<<" policy="<<(policy==ReplacementPolicy::kFifo?"FIFO":"LRU")
         <<" initial_rows="<<2*count<<" reused="<<reused<<" pages="<<pages[0]-1<<"+"<<pages[1]-1
         <<" fetch="<<stats.fetch_count<<" hit="<<stats.hit_count<<" miss="<<stats.miss_count

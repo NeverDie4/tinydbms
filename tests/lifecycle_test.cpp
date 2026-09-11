@@ -12,13 +12,13 @@ int main() {
         std::filesystem::temp_directory_path() / ("tinydbms-storage-lifecycle-" + std::to_string(suffix));
 
     assert(!open_storage({data_dir.string()}).error);
-    const CreateTableRequest create{0, "student", {{"id", Type::kInt}, {"name", Type::kVarchar}}};
+    const CreateTableRequest create{2, "student", {{"id", Type::kInt}, {"name", Type::kVarchar}}};
     assert(!create_table(create).error);
     assert(!close_storage({}).error);
 
     assert(!open_storage({data_dir.string()}).error);
     const auto tables = list_tables({});
-    assert(!tables.error && tables.tables.size() == 1 && tables.tables[0].table_id == 0);
+    assert(!tables.error && tables.tables.size() == 3 && tables.tables[2].table_id == 2);
     assert(!close_storage({}).error);
 
     std::filesystem::remove_all(data_dir);
