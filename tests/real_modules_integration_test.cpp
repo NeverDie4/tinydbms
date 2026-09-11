@@ -1,12 +1,18 @@
 #include "runner.hpp"
 #include "session.hpp"
+#include "file_manager.h"
+#include "page_file.h"
+#include "storage_test_access.h"
 
 #include "tinydbms/common.hpp"
+#include "tinydbms/core.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -19,6 +25,10 @@ namespace {
 
 using tinydbms::app::CliEnvironment;
 using tinydbms::app::CoreSession;
+using tinydbms::core::CommandResult;
+using tinydbms::core::Database;
+using tinydbms::core::ExecuteScriptRequest;
+using tinydbms::core::QueryResult;
 
 #define CHECK(condition)                                                                     \
     do {                                                                                     \
@@ -95,6 +105,124 @@ InvocationResult invoke_cli(
         session,
         environment);
     return InvocationResult{exit_code, output_stream.str(), error_stream.str()};
+}
+
+using ExpectedRows = std::map<std::int32_t, std::string>;
+
+std::string make_payload(std::int32_t id) {
+    std::string payload = "row-" + std::to_string(id) + ":";
+    payload.append(tinydbms::kMaxVarcharBytes - payload.size(),
+                   static_cast<char>('a' + (id % 26)));
+    return payload;
+}
+
+bool execute_command(Database& database, std::string script, std::uint64_t expected_affected_rows) {
+    const auto executed = database.execute_script(ExecuteScriptRequest{std::move(script)});
+    CHECK(executed.outcomes.size() == 1);
+    const auto* command = std::get_if<CommandResult>(&executed.outcomes.front().outcome);
+    CHECK(command != nullptr);
+    CHECK(!command->error.has_value());
+    CHECK(command->affected_rows == expected_affected_rows);
+    return true;
+}
+
+bool expect_rows(Database& database, const std::string& script, const ExpectedRows& expected) {
+    const auto executed = database.execute_script(ExecuteScriptRequest{script});
+    CHECK(executed.outcomes.size() == 1);
+    const auto* query = std::get_if<QueryResult>(&executed.outcomes.front().outcome);
+    CHECK(query != nullptr);
+    CHECK(query->columns.size() == 2);
+    CHECK(query->rows.size() == expected.size());
+
+    ExpectedRows actual;
+    for (const auto& row : query->rows) {
+        CHECK(row.size() == 2);
+        const auto* id = std::get_if<std::int32_t>(&row[0].data);
+        const auto* payload = std::get_if<std::string>(&row[1].data);
+        CHECK(id != nullptr);
+        CHECK(payload != nullptr);
+        CHECK(actual.emplace(*id, *payload).second);
+    }
+    CHECK(actual == expected);
+    return true;
+}
+
+bool expect_data_pages_for_first_user_table() {
+    auto* file_manager = tinydbms::storage::internal::StorageTestAccess::file_manager();
+    CHECK(file_manager != nullptr);
+    auto* page_file = file_manager->find_table_file(2);
+    CHECK(page_file != nullptr);
+    // Page 0 is the file header. At least two data pages prove a real cross-page scan.
+    CHECK(page_file->page_count() >= 3);
+    return true;
+}
+
+bool test_sql_multipage_restart_acceptance() {
+    TemporaryDirectory data_dir{"tinydbms-integration-multipage-restart"};
+    ExpectedRows expected;
+    for (std::int32_t id = 0; id < 12; ++id) {
+        expected.emplace(id, make_payload(id));
+    }
+
+    {
+        Database db1;
+        CHECK(!db1.open({data_dir.path().string()}).error.has_value());
+        CHECK(execute_command(
+            db1, "CREATE TABLE multipage_test (id INT, payload VARCHAR);", 0));
+
+        std::string insert = "INSERT INTO multipage_test VALUES ";
+        for (const auto& [id, payload] : expected) {
+            if (id != 0) {
+                insert += ", ";
+            }
+            insert += "(" + std::to_string(id) + ", '" + payload + "')";
+        }
+        insert += ";";
+        CHECK(execute_command(db1, std::move(insert), expected.size()));
+        CHECK(expect_rows(db1, "SELECT * FROM multipage_test;", expected));
+
+        ExpectedRows where_rows;
+        for (const auto& [id, payload] : expected) {
+            if (id >= 8) {
+                where_rows.emplace(id, payload);
+            }
+        }
+        CHECK(expect_rows(db1, "SELECT * FROM multipage_test WHERE id >= 8;", where_rows));
+        CHECK(execute_command(db1, "DELETE FROM multipage_test WHERE id = 3;", 1));
+        CHECK(execute_command(db1, "DELETE FROM multipage_test WHERE id = 9;", 1));
+        expected.erase(3);
+        expected.erase(9);
+        CHECK(expect_rows(db1, "SELECT * FROM multipage_test;", expected));
+        CHECK(expect_data_pages_for_first_user_table());
+        CHECK(!db1.close().error.has_value());
+    }
+
+    {
+        Database db2;
+        CHECK(!db2.open({data_dir.path().string()}).error.has_value());
+        CHECK(expect_rows(db2, "SELECT * FROM multipage_test;", expected));
+        CHECK(expect_data_pages_for_first_user_table());
+
+        const auto inserted_id = 12;
+        expected.emplace(inserted_id, make_payload(inserted_id));
+        CHECK(execute_command(
+            db2,
+            "INSERT INTO multipage_test VALUES (12, '" + expected.at(inserted_id) + "');",
+            1));
+        CHECK(expect_rows(db2, "SELECT * FROM multipage_test WHERE id >= 12;",
+                          ExpectedRows{{inserted_id, expected.at(inserted_id)}}));
+        CHECK(expect_rows(db2, "SELECT * FROM multipage_test;", expected));
+        CHECK(!db2.close().error.has_value());
+    }
+
+    {
+        Database db3;
+        CHECK(!db3.open({data_dir.path().string()}).error.has_value());
+        CHECK(expect_rows(db3, "SELECT * FROM multipage_test;", expected));
+        CHECK(expect_data_pages_for_first_user_table());
+        CHECK(!db3.close().error.has_value());
+    }
+    return true;
 }
 
 bool test_persistent_cli_lifecycle() {
@@ -290,7 +418,8 @@ int main() {
                 test_batch_reports_semantic_error() &&
                 test_batch_reports_storage_error_and_stops() &&
                 test_repl_recovers_after_oversized_input() &&
-                test_open_error_has_storage_exit_status()
+                test_open_error_has_storage_exit_status() &&
+                test_sql_multipage_restart_acceptance()
             ? 0
             : 1;
     } catch (const std::exception& exception) {

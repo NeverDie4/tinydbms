@@ -54,7 +54,7 @@ int run_application(int argc, char* const argv[]) {
 
 int run_windows_application(int argc, wchar_t* const argv[]) {
     try {
-        const auto converted = tinydbms::app::convert_windows_arguments(argc, argv);
+        auto converted = tinydbms::app::convert_windows_arguments(argc, argv);
         if (!converted.has_value()) {
             std::cerr << "ERROR internal failed to convert command-line arguments to UTF-8\n";
             return 1;

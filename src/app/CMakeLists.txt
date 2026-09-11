@@ -36,3 +36,10 @@ target_link_libraries(tinydbms PRIVATE
     tinydbms_cli_logic
     tinydbms_core
 )
+
+# The Windows entrypoint is wmain so command-line arguments are converted from
+# UTF-16 to UTF-8 before the portable CLI path. MinGW selects that CRT startup
+# object only when the executable is linked with -municode.
+if(WIN32 AND MINGW)
+    target_link_options(tinydbms PRIVATE -municode)
+endif()
