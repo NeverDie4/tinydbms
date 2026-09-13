@@ -11,9 +11,8 @@
 
 namespace {
 
-using tinydbms::SourceLocation;
+using tinydbms::CompileStage;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::internal::InsertAst;
 using tinydbms::compiler::internal::LexResult;
 using tinydbms::compiler::internal::ParseResult;
@@ -21,6 +20,11 @@ using tinydbms::compiler::internal::StatementAst;
 using tinydbms::compiler::internal::Token;
 using tinydbms::compiler::internal::parse;
 using tinydbms::compiler::internal::tokenize;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -68,7 +72,7 @@ void expect_syntax_error(
     TestContext& test,
     std::string_view case_name,
     std::string_view sql,
-    SourceLocation expected_location,
+    ExpectedLocation expected_location,
     std::string_view message_part) {
     const ParseResult result = parse_sql(test, case_name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
@@ -78,9 +82,9 @@ void expect_syntax_error(
         return;
     }
 
-    test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": error kind");
-    test.expect(error->location.line == expected_location.line, prefix + ": error line");
-    test.expect(error->location.column == expected_location.column, prefix + ": error column");
+    test.expect(error->stage == CompileStage::kSyntax, prefix + ": error stage");
+    test.expect(error->source.begin.line == expected_location.line, prefix + ": error line");
+    test.expect(error->source.begin.column == expected_location.column, prefix + ": error column");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
 }
 
@@ -224,15 +228,15 @@ int main() {
         const auto result = parse_sql(test, "locations", sql);
         const auto* insert = expect_insert(test, "locations", result);
         if (insert != nullptr && insert->columns.size() == 2 && insert->rows.size() == 1) {
-            test.expect(insert->table_location.line == 1, "locations: table line");
-            test.expect(insert->table_location.column == 13, "locations: table column");
-            test.expect(insert->columns[0].location.line == 2, "locations: id line");
-            test.expect(insert->columns[0].location.column == 3, "locations: id column");
-            test.expect(insert->columns[1].location.line == 3, "locations: name line");
-            test.expect(insert->rows[0][0].location.line == 6, "locations: integer line");
-            test.expect(insert->rows[0][0].location.column == 3, "locations: integer column");
-            test.expect(insert->rows[0][1].location.line == 7, "locations: string line");
-            test.expect(insert->rows[0][1].location.column == 3, "locations: string column");
+            test.expect(insert->table_source.begin.line == 1, "locations: table line");
+            test.expect(insert->table_source.begin.column == 13, "locations: table column");
+            test.expect(insert->columns[0].source.begin.line == 2, "locations: id line");
+            test.expect(insert->columns[0].source.begin.column == 3, "locations: id column");
+            test.expect(insert->columns[1].source.begin.line == 3, "locations: name line");
+            test.expect(insert->rows[0][0].source.begin.line == 6, "locations: integer line");
+            test.expect(insert->rows[0][0].source.begin.column == 3, "locations: integer column");
+            test.expect(insert->rows[0][1].source.begin.line == 7, "locations: string line");
+            test.expect(insert->rows[0][1].source.begin.column == 3, "locations: string column");
         }
     }
 

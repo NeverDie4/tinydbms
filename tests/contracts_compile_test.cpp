@@ -10,6 +10,7 @@
 #include "tinydbms/common.hpp"
 #include "tinydbms/compiler.hpp"
 #include "tinydbms/core.hpp"
+#include "tinydbms/diagnostic.hpp"
 #include "tinydbms/storage.hpp"
 
 namespace {
@@ -52,8 +53,11 @@ static_assert(std::is_same_v<decltype(UpdateAssignment::column_id), ColumnId>);
 static_assert(std::is_same_v<decltype(UpdateAssignment::value), Value>);
 static_assert(std::is_same_v<decltype(FixIt::range), SourceRange>);
 static_assert(std::is_same_v<decltype(FixIt::replacement), std::string>);
+static_assert(std::is_same_v<decltype(CompileError::stage), CompileStage>);
+static_assert(std::is_same_v<decltype(CompileError::source), SourceRange>);
 static_assert(std::is_same_v<decltype(CompileError::suggestion), std::optional<std::string>>);
 static_assert(std::is_same_v<decltype(CompileError::fix_it), std::optional<FixIt>>);
+static_assert(std::is_same_v<decltype(SplitStatement::source), SourceRange>);
 
 static_assert(static_cast<int>(Type::kInt) == 0);
 static_assert(static_cast<int>(Type::kVarchar) == 1);
@@ -189,26 +193,26 @@ int main() {
 
     Plan plan{std::move(query)};
     CompileResult ok{std::move(plan)};
-    const CompileError legacy_error{
-        CompileErrorKind::kSyntax,
-        SourceLocation{1, 1},
+    const CompileError plain_error{
+        CompileStage::kSyntax,
+        SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 1, 0}},
         "syntax error"};
     const FixIt replacement_fix{
-        SourceRange{SourceLocation{1, 1}, SourceLocation{1, 6}},
+        SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 6, 5}},
         "SELECT"};
     const FixIt insertion_fix{
-        SourceRange{SourceLocation{1, 20}, SourceLocation{1, 20}},
+        SourceRange{SourceLocation{1, 20, 19}, SourceLocation{1, 20, 19}},
         ";"};
     const FixIt deletion_fix{
-        SourceRange{SourceLocation{1, 7}, SourceLocation{1, 8}},
+        SourceRange{SourceLocation{1, 7, 6}, SourceLocation{1, 8, 7}},
         ""};
     const CompileError rich_error{
-        CompileErrorKind::kSyntax,
-        SourceLocation{1, 1},
+        CompileStage::kSyntax,
+        SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 6, 5}},
         "unexpected token",
         std::optional<std::string>{"did you mean SELECT?"},
         std::optional<FixIt>{replacement_fix}};
-    CompileResult err{legacy_error};
+    CompileResult err{plain_error};
 
     storage::Record record{storage::RecordId{1}, std::vector<Value>{}};
     core::ExecuteResult result;
@@ -222,7 +226,7 @@ int main() {
     const Value string_value{std::string{"value"}};
     const ColumnMeta legacy_column{"id", Type::kInt};
     const ColumnMeta nullable_column{"name", Type::kVarchar, true};
-    const SourceRange range{SourceLocation{2, 3}, SourceLocation{4, 5}};
+    const SourceRange range{SourceLocation{2, 3, 7}, SourceLocation{4, 5, 19}};
 
     const bool common_contract =
         Type::kBigInt != Type::kInt &&
@@ -238,8 +242,10 @@ int main() {
         !legacy_column.nullable && nullable_column.nullable &&
         range.begin.line == 2 && range.begin.column == 3 &&
         range.end.line == 4 && range.end.column == 5 &&
-        !legacy_error.suggestion.has_value() &&
-        !legacy_error.fix_it.has_value() &&
+        plain_error.stage == CompileStage::kSyntax &&
+        plain_error.source.begin.byte_offset == 0 &&
+        !plain_error.suggestion.has_value() &&
+        !plain_error.fix_it.has_value() &&
         replacement_fix.range.begin.line == 1 &&
         replacement_fix.range.begin.column == 1 &&
         replacement_fix.range.end.line == 1 &&

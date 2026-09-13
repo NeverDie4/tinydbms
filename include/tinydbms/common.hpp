@@ -50,14 +50,9 @@ struct TableMeta {
 };
 
 struct SourceLocation {
-    int line;    // 从 1 开始
-    int column;  // 从 1 开始
-};
-
-// Half-open [begin, end)，位置沿用 1-based UTF-8 byte column。
-struct SourceRange {
-    SourceLocation begin;
-    SourceLocation end;
+    int line;                 // 从 1 开始
+    int column;               // 从 1 开始，按 UTF-8 字节计数
+    std::size_t byte_offset;  // 在所属源码文本内从 0 开始
 };
 
 }  // namespace tinydbms

@@ -30,16 +30,17 @@ namespace tinydbms::compiler {
 
 SplitStatementsResult split_statements(std::string_view text) {
     if (text.size() > kMaxSqlBytes) {
+        const SourceLocation start{1, 1, 0};
         return SplitStatementsResult{CompileError{
-            CompileErrorKind::kLex,
-            SourceLocation{1, 1},
+            CompileStage::kLex,
+            SourceRange{start, start},
             "SQL text exceeds maximum length"}};
     }
 
     std::vector<SplitStatement> statements;
     SplitState state = SplitState::kNormal;
     std::size_t segment_start = 0;
-    SourceLocation segment_location{1, 1};
+    SourceLocation segment_location{1, 1, 0};
     int line = 1;
     int column = 1;
     bool has_sql_content = false;
@@ -55,10 +56,11 @@ SplitStatementsResult split_statements(std::string_view text) {
 
     const auto append_segment = [&statements, text, &segment_location](
                                     std::size_t begin,
-                                    std::size_t end) {
+                                    std::size_t end,
+                                    SourceLocation end_location) {
         statements.push_back(SplitStatement{
             std::string{text.substr(begin, end - begin)},
-            segment_location
+            SourceRange{segment_location, end_location}
         });
     };
 
@@ -86,13 +88,14 @@ SplitStatementsResult split_statements(std::string_view text) {
                     advance_location(next);
                     index += 2;
                 } else if (current == ';') {
-                    if (has_sql_content) {
-                        append_segment(segment_start, index + 1);
-                    }
                     advance_location(current);
                     ++index;
+                    const SourceLocation end_location{line, column, index};
+                    if (has_sql_content) {
+                        append_segment(segment_start, index, end_location);
+                    }
                     segment_start = index;
-                    segment_location = SourceLocation{line, column};
+                    segment_location = end_location;
                     has_sql_content = false;
                 } else {
                     if (!is_whitespace(current)) {
@@ -142,7 +145,10 @@ SplitStatementsResult split_statements(std::string_view text) {
     const bool has_unterminated_input =
         state == SplitState::kInString || state == SplitState::kInBlockComment;
     if (has_sql_content || has_unterminated_input) {
-        append_segment(segment_start, text.size());
+        append_segment(
+            segment_start,
+            text.size(),
+            SourceLocation{line, column, text.size()});
     }
 
     return SplitStatementsResult{std::move(statements)};
@@ -150,9 +156,10 @@ SplitStatementsResult split_statements(std::string_view text) {
 
 CompileResult compile(const CompileRequest& request) {
     if (request.sql.size() > kMaxSqlBytes) {
+        const SourceLocation start{1, 1, 0};
         return CompileResult{CompileError{
-            CompileErrorKind::kLex,
-            SourceLocation{1, 1},
+            CompileStage::kLex,
+            SourceRange{start, start},
             "SQL text exceeds maximum length"
         }};
     }

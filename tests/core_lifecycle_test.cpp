@@ -18,7 +18,7 @@ using tinydbms::TableMeta;
 using tinydbms::Type;
 using tinydbms::compiler::CreateTablePlan;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
+using tinydbms::CompileStage;
 using tinydbms::compiler::CompileResult;
 using tinydbms::compiler::Plan;
 using tinydbms::core::CommandResult;
@@ -520,13 +520,17 @@ bool test_execute_script_recovers_with_shadow_analysis() {
     std::deque<CompileResult> compile_results;
     compile_results.emplace_back(create_table_plan("events"));
     compile_results.emplace_back(CompileError{
-        CompileErrorKind::kSyntax,
-        tinydbms::SourceLocation{1, 3},
+        CompileStage::kSyntax,
+        tinydbms::SourceRange{
+            tinydbms::SourceLocation{2, 3, 3},
+            tinydbms::SourceLocation{2, 3, 3}},
         "injected syntax error"});
     compile_results.emplace_back(create_table_plan("shadow_table"));
     compile_results.emplace_back(CompileError{
-        CompileErrorKind::kSemantic,
-        tinydbms::SourceLocation{1, 1},
+        CompileStage::kSemantic,
+        tinydbms::SourceRange{
+            tinydbms::SourceLocation{2, 1, 1},
+            tinydbms::SourceLocation{2, 1, 1}},
         "injected shadow semantic error"});
     fake_compiler::set_compile_results(std::move(compile_results));
 

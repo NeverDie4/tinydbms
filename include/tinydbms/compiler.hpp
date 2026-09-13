@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "tinydbms/common.hpp"
+#include "tinydbms/diagnostic.hpp"
 
 namespace tinydbms::compiler {
 
@@ -19,20 +20,9 @@ struct CatalogView {
     std::span<const TableMeta> tables;
 };
 
-enum class CompileErrorKind {
-    kLex,
-    kSyntax,
-    kSemantic
-};
-
-struct FixIt {
-    SourceRange range;
-    std::string replacement;
-};
-
 struct CompileError {
-    CompileErrorKind kind;
-    SourceLocation location;  // 相对该条 sql 文本，1-based
+    CompileStage stage;
+    SourceRange source;  // 相对该条 sql 文本的半开区间
     std::string message;
     std::optional<std::string> suggestion = std::nullopt;
     std::optional<FixIt> fix_it = std::nullopt;
@@ -157,8 +147,8 @@ inline Expr::Expr(Expr&&) noexcept = default;
 inline Expr& Expr::operator=(Expr&&) noexcept = default;
 
 struct SplitStatement {
-    std::string sql;       // 一条语句文本，保留原文中从 start 到自身结尾分号的内容
-    SourceLocation start;  // sql 首字符在整段输入中的绝对位置（1-based）
+    std::string sql;      // 保留从语句首字符到结尾分号的原文，包括前导空白和注释
+    SourceRange source;  // sql 在整段脚本中的绝对半开区间
 };
 
 // 分句只能成功返回语句列表，或以 CompileError 返回整段输入错误。

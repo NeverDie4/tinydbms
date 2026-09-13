@@ -28,6 +28,11 @@ private:
     int failures_{0};
 };
 
+struct ExpectedLocation {
+    int line;
+    int column;
+};
+
 CompileResult compile_sql(std::string_view sql, CatalogView catalog) {
     return compile(CompileRequest{std::string{sql}, catalog});
 }
@@ -46,8 +51,8 @@ void expect_error(
     std::string_view name,
     std::string_view sql,
     CatalogView catalog,
-    CompileErrorKind kind,
-    SourceLocation location,
+    CompileStage stage,
+    ExpectedLocation location,
     std::string_view message = {},
     bool expect_empty_extras = true) {
     const CompileResult result = compile_sql(sql, catalog);
@@ -57,9 +62,9 @@ void expect_error(
     if (error == nullptr) {
         return;
     }
-    test.expect(error->kind == kind, prefix + ": error kind");
-    test.expect(error->location.line == location.line, prefix + ": error line");
-    test.expect(error->location.column == location.column, prefix + ": error column");
+    test.expect(error->stage == stage, prefix + ": error stage");
+    test.expect(error->source.begin.line == location.line, prefix + ": error line");
+    test.expect(error->source.begin.column == location.column, prefix + ": error column");
     if (!message.empty()) {
         test.expect(error->message == message, prefix + ": error message");
     }
@@ -70,6 +75,9 @@ void expect_error(
 }
 
 std::size_t source_offset(std::string_view source, SourceLocation location) {
+    if (location.byte_offset <= source.size()) {
+        return location.byte_offset;
+    }
     int line = 1;
     int column = 1;
     for (std::size_t offset = 0; offset < source.size(); ++offset) {
@@ -99,8 +107,8 @@ void expect_fixable(
     std::string_view sql,
     CatalogView catalog,
     std::string_view replacement,
-    SourceLocation begin,
-    SourceLocation end,
+    ExpectedLocation begin,
+    ExpectedLocation end,
     std::optional<std::string_view> suggestion = std::nullopt) {
     const CompileResult result = compile_sql(sql, catalog);
     const auto* error = std::get_if<CompileError>(&result.outcome);
@@ -486,7 +494,7 @@ void test_optimizer_stateless(TestContext& test, CatalogView catalog) {
         "lex error between optimized queries",
         "SELECT @ FROM student;",
         catalog,
-        CompileErrorKind::kLex,
+        CompileStage::kLex,
         {1, 8});
     const CompileResult after_error = compile_sql(sql, catalog);
     expect_age_filter(test, "optimized after error", after_error);
@@ -642,9 +650,13 @@ void test_advanced_diagnostics(TestContext& test, CatalogView catalog) {
         const CompileResult second = compile_sql("SELECT * FROM studnet;", catalog);
         const auto* lhs = std::get_if<CompileError>(&first.outcome);
         const auto* rhs = std::get_if<CompileError>(&second.outcome);
-        test.expect(lhs != nullptr && rhs != nullptr && lhs->kind == rhs->kind &&
-                        lhs->location.line == rhs->location.line &&
-                        lhs->location.column == rhs->location.column &&
+        test.expect(lhs != nullptr && rhs != nullptr && lhs->stage == rhs->stage &&
+                        lhs->source.begin.line == rhs->source.begin.line &&
+                        lhs->source.begin.column == rhs->source.begin.column &&
+                        lhs->source.begin.byte_offset == rhs->source.begin.byte_offset &&
+                        lhs->source.end.line == rhs->source.end.line &&
+                        lhs->source.end.column == rhs->source.end.column &&
+                        lhs->source.end.byte_offset == rhs->source.end.byte_offset &&
                         lhs->message == rhs->message && lhs->suggestion == rhs->suggestion &&
                         !lhs->fix_it.has_value() && !rhs->fix_it.has_value(),
                     "diagnostic generation is deterministic");
@@ -824,7 +836,7 @@ int main() {
         const CompileResult result = compile_sql(sql, catalog);
         const auto* error = std::get_if<CompileError>(&result.outcome);
         test.expect(
-            error != nullptr && error->kind == CompileErrorKind::kSemantic,
+            error != nullptr && error->stage == CompileStage::kSemantic,
             std::string{"BOOLEAN semantic rejection: "} + std::string{sql});
     }
 
@@ -887,37 +899,37 @@ int main() {
         "DOUBLE to BIGINT narrowing",
         "INSERT INTO numeric_values VALUES (1,1.5);",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 38});
     expect_error(
         test,
         "DOUBLE to INT narrowing",
         "INSERT INTO student VALUES (1.5,'Alice',20);",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 29});
 
     struct InvalidDoubleCase {
         std::string_view sql;
-        CompileErrorKind kind;
-        SourceLocation location;
+        CompileStage stage;
+        ExpectedLocation location;
     };
     for (const InvalidDoubleCase invalid : {
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = .5;", CompileErrorKind::kSyntax, {1, 35}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.;", CompileErrorKind::kSyntax, {1, 36}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = -1.5;", CompileErrorKind::kLex, {1, 35}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = +1.5;", CompileErrorKind::kLex, {1, 35}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e3;", CompileErrorKind::kSyntax, {1, 36}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.0e3;", CompileErrorKind::kSyntax, {1, 38}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = NaN;", CompileErrorKind::kSemantic, {1, 35}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = Infinity;", CompileErrorKind::kSemantic, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = .5;", CompileStage::kSyntax, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.;", CompileStage::kSyntax, {1, 36}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = -1.5;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = +1.5;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e3;", CompileStage::kSyntax, {1, 36}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.0e3;", CompileStage::kSyntax, {1, 38}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = NaN;", CompileStage::kSemantic, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = Infinity;", CompileStage::kSemantic, {1, 35}},
          }) {
         expect_error(
             test,
             "invalid DOUBLE syntax",
             invalid.sql,
             catalog,
-            invalid.kind,
+            invalid.stage,
             invalid.location);
     }
 
@@ -991,7 +1003,7 @@ int main() {
         "VARCHAR compared with BIGINT",
         "SELECT id FROM student WHERE name = 2147483648;",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 35});
 
     expect_error(
@@ -999,7 +1011,7 @@ int main() {
         "INT64 overflow",
         "INSERT INTO numeric_values VALUES (1,9223372036854775808);",
         catalog,
-        CompileErrorKind::kLex,
+        CompileStage::kLex,
         {1, 38},
         "integer literal out of range");
     expect_error(
@@ -1007,7 +1019,7 @@ int main() {
         "negative integer rejected",
         "INSERT INTO numeric_values VALUES (1,-1);",
         catalog,
-        CompileErrorKind::kLex,
+        CompileStage::kLex,
         {1, 38},
         "invalid character");
 
@@ -1242,7 +1254,7 @@ int main() {
         "lex error",
         "SELECT @ FROM student;",
         catalog,
-        CompileErrorKind::kLex,
+        CompileStage::kLex,
         {1, 8},
         "invalid character");
     expect_error(
@@ -1250,7 +1262,7 @@ int main() {
         "syntax error",
         "SELECT FROM student;",
         catalog,
-        CompileErrorKind::kSyntax,
+        CompileStage::kSyntax,
         {1, 8},
         "expected SELECT column or '*'");
     expect_error(
@@ -1258,23 +1270,23 @@ int main() {
         "semantic table",
         "SELECT * FROM unknown;",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 15},
         "table 'unknown' does not exist");
-    expect_error(test, "semantic column", "SELECT score FROM student;", catalog, CompileErrorKind::kSemantic, {1, 8});
+    expect_error(test, "semantic column", "SELECT score FROM student;", catalog, CompileStage::kSemantic, {1, 8});
     expect_error(
         test,
         "semantic expression",
         "SELECT id FROM student WHERE name > 'Alice';",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 35});
     expect_error(
         test,
         "missing semicolon",
         "SELECT * FROM student",
         catalog,
-        CompileErrorKind::kSyntax,
+        CompileStage::kSyntax,
         {1, 22},
         {},
         false);
@@ -1283,11 +1295,11 @@ int main() {
         "multiple statements",
         "SELECT * FROM student; DELETE FROM student;",
         catalog,
-        CompileErrorKind::kSyntax,
+        CompileStage::kSyntax,
         {1, 24});
-    expect_error(test, "empty input", "", catalog, CompileErrorKind::kSyntax, {1, 1});
-    expect_error(test, "whitespace input", "   ", catalog, CompileErrorKind::kSyntax, {1, 4});
-    expect_error(test, "comment input", "-- comment", catalog, CompileErrorKind::kSyntax, {1, 11});
+    expect_error(test, "empty input", "", catalog, CompileStage::kSyntax, {1, 1});
+    expect_error(test, "whitespace input", "   ", catalog, CompileStage::kSyntax, {1, 4});
+    expect_error(test, "comment input", "-- comment", catalog, CompileStage::kSyntax, {1, 11});
 
     {
         const CompileResult first = compile_sql("SELECT name,id FROM student;", catalog);
@@ -1361,7 +1373,7 @@ int main() {
             "JOIN ambiguous column",
             "SELECT id FROM student JOIN other ON student.id=other.student_id;",
             join_catalog,
-            CompileErrorKind::kSemantic,
+            CompileStage::kSemantic,
             {1, 8},
             "column 'id' is ambiguous");
     }
@@ -1445,7 +1457,7 @@ int main() {
         "CREATE existing table",
         "CREATE TABLE student(id INT);",
         catalog,
-        CompileErrorKind::kSemantic,
+        CompileStage::kSemantic,
         {1, 14});
 
     if (test.failures() != 0) {

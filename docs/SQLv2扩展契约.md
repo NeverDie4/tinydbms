@@ -16,7 +16,7 @@
 | 表达式列引用 | `ColumnId` | query-local `SlotId` | compiler/core/tests |
 | 查询算子 | Scan/Filter/Project | 增加 Join/Aggregate/Sort | compiler/core/tests |
 | 语句 | CREATE/INSERT/SELECT/DELETE | 增加 UPDATE | compiler/core/storage/app/tests |
-| 诊断 | kind/location/message | 增加 suggestion/FixIt/SourceRange | common/compiler/core/app/tests |
+| 诊断 | kind/location/message | CompileStage + SourceRange + suggestion/FixIt | common/compiler/core/app/tests |
 | 脚本 | 首错立即停止 | 首错后继续分析、永久停止执行 | core/app/tests |
 | 存储格式 | `TINYDBMS_STORAGE_V1` | 可读 V1，新增 V2 格式 | storage/core/tests |
 
@@ -77,7 +77,7 @@ SQL v2 第一阶段只接受非负数值字面量，不增加 unary minus。因�
 |---|---|
 | `0..2147483647` | `INT` |
 | `2147483648..9223372036854775807` | `BIGINT` |
-| 大于 `9223372036854775807` | `CompileErrorKind::kLex` |
+| 大于 `9223372036854775807` | `CompileStage::kLex` |
 
 例如 `1` 和 `2147483647` 是 INT，`2147483648` 和 `9223372036854775807` 是 BIGINT，`9223372036854775808` 是 lexical literal overflow。超出 INT64 不形成合法 numeric token/value，因此不是 Semantic Error。
 
@@ -185,6 +185,12 @@ IS NULL 对任意已绑定标量类型合法，永远返回非 NULL BOOLEAN；IS
 ## 5. SourceRange 与高级诊断
 
 ```cpp
+struct SourceLocation {
+    int line;
+    int column;
+    std::size_t byte_offset;
+};
+
 struct SourceRange {
     SourceLocation begin;
     SourceLocation end;
@@ -196,15 +202,17 @@ struct FixIt {
 };
 
 struct CompileError {
-    CompileErrorKind kind;
-    SourceLocation location;
+    CompileStage stage;
+    SourceRange source;
     std::string message;
     std::optional<std::string> suggestion = std::nullopt;
     std::optional<FixIt> fix_it = std::nullopt;
 };
 ```
 
-SourceRange 使用 half-open `[begin, end)`，begin/end 都是 1-based line 与 1-based UTF-8 byte column；零长度插入满足 begin==end。`SELEC` 位于行首时，其 range 为 `[1:1, 1:6)`，replacement 为 `SELECT`。CompileError 的两个 trailing optional 带默认值，尽量保持旧三字段 aggregate initialization 可编译；首版不增加 warning severity、多 FixIt、notes 或 error code 系统。
+`SourceRange` 使用 half-open `[begin, end)`。行和 UTF-8 byte column 均从 1 开始，`byte_offset` 在所属源码文本中从 0 开始；CRLF 计一个换行，`\r` 不占列，Tab 按一个源码字节推进，任何端点不得落在 CRLF 两字节之间。零长度范围 `begin==end` 表示插入。`SELEC` 位于行首时，其 range 为 `[1:1@0, 1:6@5)`，replacement 为 `SELECT`。
+
+`CompileErrorKind` 被直接删除且不保留别名。`CompileError.stage` 使用 `CompileStage::{kLex,kSyntax,kSemantic}`，`source` 是相对单条 `compile()` 输入的主诊断范围；每条语句最多一个主诊断及一个可选 FixIt。suggestion 是人类可读的可选提示，FixIt 只是建议且永不自动应用。首版不增加 warning severity、多 FixIt、notes 或 error code 系统。
 
 ### 5.1 did-you-mean
 
@@ -464,6 +472,15 @@ DOUBLE 必须通过稳定的 bit representation 与显式 little-endian 编解�
 Script Recovery 属于 Core public API，不进入 compiler。为复用现有 ExecuteResult 并补齐逐语句状态，目标结构为：
 
 ```cpp
+struct SplitStatement {
+    std::string sql;
+    SourceRange source;  // 整段 script 中的绝对半开区间
+};
+```
+
+`SplitStatement.sql` 与 `source` 一一对应，保留从分段首字符到结尾分号的原文，包括前导空白和注释。未闭合字符串或块注释仍作为残缺语句交给单条 `compile()` 产生 lexical diagnostic；splitter 只在 `kMaxSqlBytes` 或分句契约无法满足时失败。一旦分句失败，Core 保守停止整个脚本且不做启发式恢复，脚本级错误使用空插入点 `{1,1,0}-{1,1,0}`。
+
+```cpp
 enum class StatementStatus {
     kExecuted,
     kCompileError,
@@ -506,21 +523,22 @@ Shadow TableId 从 Runtime `next_table_id` 副本开始，按相同规则递增�
 
 ## 13. 位置换算与恢复边界
 
-CompileError.location 和 FixIt.range 在 compile 返回时均相对单条 statement。Core 转成 script 绝对坐标：
+`CompileError.source` 和 `FixIt.range` 在 `compile()` 返回时均相对单条 statement；splitter 返回的 `SplitStatement.source` 已是整段 script 的绝对范围，两类坐标系不得混用。Core 对单条编译诊断的 begin/end 分别按以下规则转成 script 绝对坐标：
 
 ```text
-absolute.line = statement.start.line + local.line - 1
+absolute.line = statement.source.begin.line + local.line - 1
+absolute.byte_offset = statement.source.begin.byte_offset + local.byte_offset
 
 local.line == 1:
-absolute.column = statement.start.column + local.column - 1
+absolute.column = statement.source.begin.column + local.column - 1
 
 local.line > 1:
 absolute.column = local.column
 ```
 
-SourceRange 的 begin/end 分别使用同一公式。规则继续是 1-based、UTF-8 byte column，CRLF 视作一个换行且 `\r` 不占列。StatementResult.source_range 为 `[SplitStatement.start, advance(start, sql))`。
+规则继续是 1-based line、1-based UTF-8 byte column 与 0-based byte offset；CRLF 视作一个换行且 `\r` 不占列，Tab 按字节推进，端点不得位于 CRLF 中间。`StatementResult.source_range` 直接采用 `SplitStatement.source`。
 
-Statement-level recovery 依赖 splitter 能可靠识别 `;` 边界。普通语法/语义错误（如 `SELECT id,,name FROM t;`）不会阻止后续 statement 分析；但未闭合 string 或 block comment 可能让后续分号处于无法判定的 lexical construct 中。首版不承诺从这种输入恢复后续 statement，也不做 heuristic resynchronization 或 same-statement panic recovery。
+Statement-level recovery 依赖 splitter 能可靠识别 `;` 边界。普通语法/语义错误（如 `SELECT id,,name FROM t;`）不会阻止后续 statement 分析。未闭合 string 或 block comment 作为残缺语句交给 compiler；不做 heuristic resynchronization 或 same-statement panic recovery。
 
 ## 14. SQL v2 grammar 范围
 
@@ -588,8 +606,9 @@ NOT 已存在；BY 同时服务 ORDER BY 与 GROUP BY。不得提前加入 LEFT�
 | Type | INT/VARCHAR | +BIGINT/DOUBLE/BOOLEAN | SQL v2 scalar types | High | High | High | Medium |
 | Value | int32/string | monostate/int32/int64/double/bool/string | NULL 与新值类型 | High | High | High | Medium |
 | ColumnMeta | name/type | +nullable | NULL schema | High | High | High | Low |
-| SourceRange | 无 | begin/end half-open | FixIt/statement range | Medium | Medium | None | Medium |
-| CompileError | 3 fields | +optional suggestion/FixIt | diagnostics | High | Medium | None | Medium |
+| SourceLocation/SourceRange | 单点 line/column | begin/end half-open + 0-based byte offset | diagnostic/FixIt/statement range | High | High | None | Medium |
+| CompileError | kind/location/message | stage/source/message + optional suggestion/FixIt | diagnostics | High | Medium | None | Medium |
+| SplitStatement | sql + start | sql + absolute source range | exact script/source correspondence | High | High | None | Medium |
 | ColumnRef | ColumnId | SlotId | JOIN/aggregate 唯一绑定 | High | High | None | None |
 | SeqScanNode | table_id | table_id + ScanColumn mapping | 建立物理列→slot | High | High | None | None |
 | ProjectNode | vector<ColumnId> | vector<SlotId> | 统一数据流 | High | High | None | None |
@@ -645,7 +664,7 @@ SQL v2 本阶段不包含：negative numeric literal、arithmetic、DATE/TIME、
 6. V2 metadata 的 per-table format 允许 V1 decoder 与 V2 decoder 共存，无需原地重写旧 records。
 7. Runtime Catalog 只反映已执行 DDL；首错后 Shadow Catalog 只服务分析，绝不触发 Storage。
 8. Optimizer 的 UNKNOWN 是已知常量而非 unknown-analysis；只有常量 TRUE 能删除 root predicate。
-9. CompileError.location 保持单点主位置；FixIt 使用 local SourceRange，Core 统一转换为 script 绝对范围。
+9. CompileError.stage 替代 CompileErrorKind；CompileError.source 与 FixIt.range 使用 statement-local SourceRange，Core 统一转换为 script 绝对范围。
 10. script 首错后继续 compiler 全流水线但永久停止 executor；首错前副作用不回滚。
 
 当前真实实现与冻结目标存在两项必须在迁移测试中显式处理的差异：

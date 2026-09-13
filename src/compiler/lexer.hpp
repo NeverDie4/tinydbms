@@ -69,7 +69,7 @@ enum class TokenKind {
 struct Token {
     TokenKind kind;
     std::string lexeme;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct LexResult {

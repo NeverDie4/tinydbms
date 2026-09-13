@@ -13,7 +13,7 @@ namespace {
 using tinydbms::SourceLocation;
 using tinydbms::Type;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
+using tinydbms::CompileStage;
 using tinydbms::compiler::internal::CreateTableAst;
 using tinydbms::compiler::internal::LexResult;
 using tinydbms::compiler::internal::ParseResult;
@@ -21,6 +21,11 @@ using tinydbms::compiler::internal::StatementAst;
 using tinydbms::compiler::internal::Token;
 using tinydbms::compiler::internal::parse;
 using tinydbms::compiler::internal::tokenize;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -68,7 +73,7 @@ void expect_syntax_error(
     TestContext& test,
     std::string_view case_name,
     std::string_view sql,
-    SourceLocation expected_location,
+    ExpectedLocation expected_location,
     std::string_view message_part) {
     const ParseResult result = parse_sql(test, case_name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
@@ -78,9 +83,9 @@ void expect_syntax_error(
         return;
     }
 
-    test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": error kind");
-    test.expect(error->location.line == expected_location.line, prefix + ": error line");
-    test.expect(error->location.column == expected_location.column, prefix + ": error column");
+    test.expect(error->stage == CompileStage::kSyntax, prefix + ": error kind");
+    test.expect(error->source.begin.line == expected_location.line, prefix + ": error line");
+    test.expect(error->source.begin.column == expected_location.column, prefix + ": error column");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
 }
 
@@ -151,12 +156,12 @@ int main() {
         const auto result = parse_sql(test, "multiline locations", sql);
         const auto* create = expect_create(test, "multiline locations", result);
         if (create != nullptr && create->columns.size() == 2) {
-            test.expect(create->table_location.line == 1, "multiline: table line");
-            test.expect(create->table_location.column == 14, "multiline: table column");
-            test.expect(create->columns[0].location.line == 2, "multiline: id line");
-            test.expect(create->columns[0].location.column == 3, "multiline: id column");
-            test.expect(create->columns[1].location.line == 3, "multiline: name line");
-            test.expect(create->columns[1].location.column == 3, "multiline: name column");
+            test.expect(create->table_source.begin.line == 1, "multiline: table line");
+            test.expect(create->table_source.begin.column == 14, "multiline: table column");
+            test.expect(create->columns[0].source.begin.line == 2, "multiline: id line");
+            test.expect(create->columns[0].source.begin.column == 3, "multiline: id column");
+            test.expect(create->columns[1].source.begin.line == 3, "multiline: name line");
+            test.expect(create->columns[1].source.begin.column == 3, "multiline: name column");
         }
     }
 
@@ -209,9 +214,9 @@ int main() {
         const auto* error = std::get_if<CompileError>(&result.outcome);
         test.expect(error != nullptr, "empty token stream: error returned");
         if (error != nullptr) {
-            test.expect(error->kind == CompileErrorKind::kSyntax, "empty token stream: syntax kind");
-            test.expect(error->location.line == 1, "empty token stream: line");
-            test.expect(error->location.column == 1, "empty token stream: column");
+            test.expect(error->stage == CompileStage::kSyntax, "empty token stream: syntax kind");
+            test.expect(error->source.begin.line == 1, "empty token stream: line");
+            test.expect(error->source.begin.column == 1, "empty token stream: column");
         }
     }
 

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "tinydbms/common.hpp"
+#include "tinydbms/diagnostic.hpp"
 
 namespace tinydbms::compiler::internal {
 
@@ -16,28 +17,28 @@ struct AstColumnDef {
     std::string name;
     Type type;
     bool nullable;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct CreateTableAst {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     std::vector<AstColumnDef> columns;
 };
 
 struct AstInsertColumn {
     std::string name;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct AstLiteral {
     Value value;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct InsertAst {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     std::vector<AstInsertColumn> columns;
     std::vector<std::vector<AstLiteral>> rows;
 };
@@ -68,20 +69,20 @@ enum class AstNullTestOp {
 struct AstIdentifierExpr {
     std::optional<std::string> qualifier;
     std::string name;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct AstLiteralExpr {
     Value value;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct AstExpr;
 using AstExprPtr = std::unique_ptr<AstExpr>;
 
 struct AstBinaryExpr {
-    AstBinaryExpr(AstCompareOp op, SourceLocation location, AstExprPtr lhs, AstExprPtr rhs);
-    AstBinaryExpr(AstLogicOp op, SourceLocation location, AstExprPtr lhs, AstExprPtr rhs);
+    AstBinaryExpr(AstCompareOp op, SourceRange source, AstExprPtr lhs, AstExprPtr rhs);
+    AstBinaryExpr(AstLogicOp op, SourceRange source, AstExprPtr lhs, AstExprPtr rhs);
     ~AstBinaryExpr();
     AstBinaryExpr(AstBinaryExpr&&) noexcept;
     AstBinaryExpr& operator=(AstBinaryExpr&&) noexcept;
@@ -89,13 +90,13 @@ struct AstBinaryExpr {
     AstBinaryExpr& operator=(const AstBinaryExpr&) = delete;
 
     std::variant<AstCompareOp, AstLogicOp> op;
-    SourceLocation location;
+    SourceRange source;
     AstExprPtr lhs;
     AstExprPtr rhs;
 };
 
 struct AstUnaryExpr {
-    AstUnaryExpr(SourceLocation location, AstExprPtr operand);
+    AstUnaryExpr(SourceRange source, AstExprPtr operand);
     ~AstUnaryExpr();
     AstUnaryExpr(AstUnaryExpr&&) noexcept;
     AstUnaryExpr& operator=(AstUnaryExpr&&) noexcept;
@@ -103,12 +104,12 @@ struct AstUnaryExpr {
     AstUnaryExpr& operator=(const AstUnaryExpr&) = delete;
 
     AstUnaryOp op{AstUnaryOp::kNot};
-    SourceLocation location;
+    SourceRange source;
     AstExprPtr operand;
 };
 
 struct AstNullTestExpr {
-    AstNullTestExpr(AstNullTestOp op, SourceLocation location, AstExprPtr operand);
+    AstNullTestExpr(AstNullTestOp op, SourceRange source, AstExprPtr operand);
     ~AstNullTestExpr();
     AstNullTestExpr(AstNullTestExpr&&) noexcept;
     AstNullTestExpr& operator=(AstNullTestExpr&&) noexcept;
@@ -116,7 +117,7 @@ struct AstNullTestExpr {
     AstNullTestExpr& operator=(const AstNullTestExpr&) = delete;
 
     AstNullTestOp op;
-    SourceLocation location;
+    SourceRange source;
     AstExprPtr operand;
 };
 
@@ -142,32 +143,32 @@ struct AstExpr {
 
 inline AstBinaryExpr::AstBinaryExpr(
     AstCompareOp op_,
-    SourceLocation location_,
+    SourceRange source_,
     AstExprPtr lhs_,
     AstExprPtr rhs_)
-    : op{op_}, location{location_}, lhs{std::move(lhs_)}, rhs{std::move(rhs_)} {}
+    : op{op_}, source{source_}, lhs{std::move(lhs_)}, rhs{std::move(rhs_)} {}
 
 inline AstBinaryExpr::AstBinaryExpr(
     AstLogicOp op_,
-    SourceLocation location_,
+    SourceRange source_,
     AstExprPtr lhs_,
     AstExprPtr rhs_)
-    : op{op_}, location{location_}, lhs{std::move(lhs_)}, rhs{std::move(rhs_)} {}
+    : op{op_}, source{source_}, lhs{std::move(lhs_)}, rhs{std::move(rhs_)} {}
 
 inline AstBinaryExpr::~AstBinaryExpr() = default;
 inline AstBinaryExpr::AstBinaryExpr(AstBinaryExpr&&) noexcept = default;
 inline AstBinaryExpr& AstBinaryExpr::operator=(AstBinaryExpr&&) noexcept = default;
 
-inline AstUnaryExpr::AstUnaryExpr(SourceLocation location_, AstExprPtr operand_)
-    : location{location_}, operand{std::move(operand_)} {}
+inline AstUnaryExpr::AstUnaryExpr(SourceRange source_, AstExprPtr operand_)
+    : source{source_}, operand{std::move(operand_)} {}
 
 inline AstUnaryExpr::~AstUnaryExpr() = default;
 inline AstUnaryExpr::AstUnaryExpr(AstUnaryExpr&&) noexcept = default;
 inline AstUnaryExpr& AstUnaryExpr::operator=(AstUnaryExpr&&) noexcept = default;
 
 inline AstNullTestExpr::AstNullTestExpr(
-    AstNullTestOp op_, SourceLocation location_, AstExprPtr operand_)
-    : op{op_}, location{location_}, operand{std::move(operand_)} {}
+    AstNullTestOp op_, SourceRange source_, AstExprPtr operand_)
+    : op{op_}, source{source_}, operand{std::move(operand_)} {}
 inline AstNullTestExpr::~AstNullTestExpr() = default;
 inline AstNullTestExpr::AstNullTestExpr(AstNullTestExpr&&) noexcept = default;
 inline AstNullTestExpr& AstNullTestExpr::operator=(AstNullTestExpr&&) noexcept = default;
@@ -184,7 +185,7 @@ inline AstExpr& AstExpr::operator=(AstExpr&&) noexcept = default;
 struct AstSelectColumn {
     std::optional<std::string> qualifier;
     std::string name;
-    SourceLocation location;
+    SourceRange source;
 };
 
 enum class AstAggregateKind {
@@ -198,7 +199,7 @@ enum class AstAggregateKind {
 struct AstAggregateCall {
     AstAggregateKind kind;
     std::optional<AstSelectColumn> argument;
-    SourceLocation location;
+    SourceRange source;
 };
 
 using AstSelectItem = std::variant<AstSelectColumn, AstAggregateCall>;
@@ -211,19 +212,19 @@ enum class AstSortDirection {
 struct AstSortKey {
     std::optional<std::string> qualifier;
     std::string column_name;
-    SourceLocation location;
+    SourceRange source;
     AstSortDirection direction;
 };
 
 struct AstJoin {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     AstExprPtr condition;
 };
 
 struct SelectAst {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     std::vector<AstJoin> joins;
     bool select_all;
     std::vector<AstSelectItem> items;
@@ -234,19 +235,19 @@ struct SelectAst {
 
 struct DeleteAst {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     AstExprPtr predicate;
 };
 
 struct AstUpdateAssignment {
     std::string column_name;
-    SourceLocation column_location;
+    SourceRange column_source;
     AstLiteral literal;
 };
 
 struct UpdateAst {
     std::string table_name;
-    SourceLocation table_location;
+    SourceRange table_source;
     std::vector<AstUpdateAssignment> assignments;
     AstExprPtr predicate;
 };

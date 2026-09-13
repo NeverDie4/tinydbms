@@ -134,7 +134,7 @@ ExecuteScriptResult make_script(std::initializer_list<ExecuteResult> outcomes) {
         }
         result.statements.push_back(tinydbms::core::StatementResult{
             index,
-            tinydbms::SourceRange{{1, 1}, {1, 1}},
+            tinydbms::SourceRange{{1, 1, 0U}, {1, 1, 0U}},
             status,
             outcome});
         ++index;
@@ -228,7 +228,7 @@ bool test_batch_rendering_and_lifecycle() {
               Value{std::monostate{}}}}}},
         ExecuteResult{Error{
             ErrorKind::kCompile,
-            tinydbms::SourceLocation{2, 3},
+            tinydbms::SourceLocation{2, 3, 9U},
             "bad\nmessage"}},
     }));
 
@@ -377,12 +377,12 @@ bool test_analysis_only_is_rendered_without_success_command() {
     result.first_error_index = 0;
     result.statements.push_back(tinydbms::core::StatementResult{
         0,
-        tinydbms::SourceRange{{1, 1}, {1, 5}},
+        tinydbms::SourceRange{{1, 1, 0U}, {1, 5, 4U}},
         tinydbms::core::StatementStatus::kCompileError,
         ExecuteResult{make_error(ErrorKind::kCompile, "bad statement")}});
     result.statements.push_back(tinydbms::core::StatementResult{
         1,
-        tinydbms::SourceRange{{1, 6}, {1, 12}},
+        tinydbms::SourceRange{{1, 6, 5U}, {1, 12, 11U}},
         tinydbms::core::StatementStatus::kAnalysisOnly,
         std::nullopt});
     session.execute_results.push_back(std::move(result));
@@ -414,18 +414,18 @@ bool test_diagnostic_details_are_appended() {
     FakeSession session;
     session.execute_results.push_back(make_script({ExecuteResult{Error{
         ErrorKind::kCompile,
-        tinydbms::SourceLocation{2, 1},
+        tinydbms::SourceLocation{2, 1, 6U},
         "expected statement",
         "did you mean 'SELECT'?",
-        tinydbms::compiler::FixIt{
-            tinydbms::SourceRange{{2, 1}, {2, 7}}, "SELECT"}}}}));
+        tinydbms::FixIt{
+            tinydbms::SourceRange{{2, 1, 6U}, {2, 7, 12U}}, "SELECT"}}}}));
     session.execute_results.push_back(make_script({ExecuteResult{Error{
         ErrorKind::kCompile,
-        tinydbms::SourceLocation{1, 23},
+        tinydbms::SourceLocation{1, 23, 22U},
         "expected ';' after SELECT statement",
         std::nullopt,
-        tinydbms::compiler::FixIt{
-            tinydbms::SourceRange{{1, 23}, {1, 23}}, ";"}}}}));
+        tinydbms::FixIt{
+            tinydbms::SourceRange{{1, 23, 22U}, {1, 23, 22U}}, ";"}}}}));
 
     std::string output;
     std::string error;

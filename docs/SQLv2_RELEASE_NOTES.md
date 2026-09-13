@@ -18,6 +18,7 @@ comment has been corrected without changing code or ABI.
 - GROUP BY with COUNT, SUM, AVG, MIN, and MAX
 - query-local SlotId execution and plan-owned result metadata
 - did-you-mean diagnostics and advisory FixIts
+- unified CompileStage diagnostics with precise half-open source ranges
 - statement-level script recovery with shadow-catalog analysis
 - Storage V2 with continued Storage V1 readability
 
@@ -25,6 +26,10 @@ UPDATE is not transactional or crash-atomic. Script recovery continues
 analysis after an error, stops execution at the first failed statement, keeps
 earlier successful effects, and performs no rollback. FixIts are advisory and
 are never applied automatically.
+
+Compiler diagnostics use statement-relative ranges, while split statements
+carry absolute script ranges. Locations use 1-based UTF-8 byte columns and
+0-based byte offsets; Core performs the only relative-to-absolute conversion.
 
 ## Compatibility
 

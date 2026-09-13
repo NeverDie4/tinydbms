@@ -31,6 +31,11 @@ private:
     int failures_{0};
 };
 
+struct ExpectedLocation {
+    int line;
+    int column;
+};
+
 SemanticResult analyze_sql(TestContext& test, std::string_view name, std::string_view sql, CatalogView catalog) {
     const LexResult lexed = tokenize(sql);
     const auto* tokens = std::get_if<std::vector<Token>>(&lexed.outcome);
@@ -90,7 +95,7 @@ void expect_error(
     std::string_view name,
     std::string_view sql,
     CatalogView catalog,
-    SourceLocation location,
+    ExpectedLocation location,
     std::string_view message_part) {
     const SemanticResult result = analyze_sql(test, name, sql, catalog);
     const auto* error = std::get_if<CompileError>(&result.outcome);
@@ -99,9 +104,9 @@ void expect_error(
     if (error == nullptr) {
         return;
     }
-    test.expect(error->kind == CompileErrorKind::kSemantic, prefix + ": error kind");
-    test.expect(error->location.line == location.line, prefix + ": line");
-    test.expect(error->location.column == location.column, prefix + ": column");
+    test.expect(error->stage == CompileStage::kSemantic, prefix + ": error stage");
+    test.expect(error->source.begin.line == location.line, prefix + ": line");
+    test.expect(error->source.begin.column == location.column, prefix + ": column");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": message");
 }
 

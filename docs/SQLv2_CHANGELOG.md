@@ -16,9 +16,11 @@ script recovery.
 - `ColumnMeta` records nullability.
 - Query plans use query-local `SlotId` bindings through scans, expressions,
   projection, sorting, joins, aggregation, and final `QueryOutput` metadata.
-- Diagnostics can carry `SourceRange`, advisory suggestions, and `FixIt`
-  replacements.
-- Script execution reports an ordered outcome for every analyzed statement.
+- Diagnostics use `CompileStage` and statement-relative half-open
+  `SourceRange` values with 1-based UTF-8 byte columns and 0-based byte
+  offsets; they can carry advisory suggestions and one `FixIt` replacement.
+- `SplitStatement` preserves exact script text and an absolute source range;
+  script execution reports an ordered outcome for every analyzed statement.
 
 ## Compiler
 
@@ -60,6 +62,7 @@ script recovery.
 
 ## Diagnostics
 
+- Removed `CompileErrorKind` in favor of the single `CompileStage` contract.
 - Added deterministic keyword and identifier did-you-mean suggestions.
 - Added edit-distance candidate ranking with stable tie handling.
 - Added advisory FixIts for supported punctuation and keyword corrections.
@@ -71,7 +74,8 @@ script recovery.
 - Execution stops at the first failed statement.
 - Effects of earlier successful statements remain; no rollback is performed.
 - A shadow catalog supports later analysis without mutating persistent storage.
-- Diagnostic ranges remain absolute within the original script.
+- Compiler diagnostic ranges are statement-relative and Core converts them to
+  absolute script coordinates; split-statement ranges are absolute already.
 
 ## Compatibility
 

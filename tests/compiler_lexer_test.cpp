@@ -1,5 +1,6 @@
 #include <initializer_list>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -9,9 +10,8 @@
 
 namespace {
 
-using tinydbms::SourceLocation;
+using tinydbms::CompileStage;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::internal::LexResult;
 using tinydbms::compiler::internal::Token;
 using tinydbms::compiler::internal::TokenKind;
@@ -20,6 +20,12 @@ using tinydbms::compiler::internal::tokenize;
 struct ExpectedToken {
     TokenKind kind;
     std::string_view lexeme;
+};
+
+struct ExpectedLocation {
+    int line;
+    int column;
+    std::optional<std::size_t> byte_offset = std::nullopt;
 };
 
 class TestContext {
@@ -83,7 +89,7 @@ void expect_location(
     std::string_view case_name,
     std::string_view input,
     std::size_t token_index,
-    SourceLocation expected) {
+    ExpectedLocation expected) {
     const auto result = tokenize(input);
     const auto* tokens = successful_tokens(test, result, case_name);
     if (tokens == nullptr) {
@@ -96,17 +102,23 @@ void expect_location(
         return;
     }
 
-    test.expect((*tokens)[token_index].location.line == expected.line, prefix + ": line");
-    test.expect((*tokens)[token_index].location.column == expected.column, prefix + ": column");
+    const auto& source = (*tokens)[token_index].source;
+    test.expect(source.begin.line == expected.line, prefix + ": line");
+    test.expect(source.begin.column == expected.column, prefix + ": column");
+    if (expected.byte_offset.has_value()) {
+        test.expect(
+            source.begin.byte_offset == *expected.byte_offset,
+            prefix + ": byte offset");
+    }
+    test.expect(source.end.byte_offset >= source.begin.byte_offset, prefix + ": ordered range");
 }
 
 void expect_lex_error(
     TestContext& test,
     std::string_view case_name,
     std::string_view input,
-    SourceLocation expected,
-    std::string_view message_part,
-    CompileErrorKind expected_kind = CompileErrorKind::kLex) {
+    ExpectedLocation expected,
+    std::string_view message_part) {
     const auto result = tokenize(input);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{case_name};
@@ -115,9 +127,17 @@ void expect_lex_error(
         return;
     }
 
-    test.expect(error->kind == expected_kind, prefix + ": error kind");
-    test.expect(error->location.line == expected.line, prefix + ": error line");
-    test.expect(error->location.column == expected.column, prefix + ": error column");
+    test.expect(error->stage == CompileStage::kLex, prefix + ": error stage");
+    test.expect(error->source.begin.line == expected.line, prefix + ": error line");
+    test.expect(error->source.begin.column == expected.column, prefix + ": error column");
+    if (expected.byte_offset.has_value()) {
+        test.expect(
+            error->source.begin.byte_offset == *expected.byte_offset,
+            prefix + ": error byte offset");
+    }
+    test.expect(
+        error->source.end.byte_offset >= error->source.begin.byte_offset,
+        prefix + ": ordered error range");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
 }
 
@@ -342,7 +362,7 @@ int main() {
         "valid utf8",
         "'中药材' SELECT",
         {{TokenKind::kStringLiteral, "中药材"}, {TokenKind::kSelect, "select"}});
-    expect_location(test, "utf8 byte column", "'中药材' SELECT", 1, {1, 13});
+    expect_location(test, "utf8 byte column", "'中药材' SELECT", 1, {1, 13, 12});
     expect_lex_error(
         test,
         "utf8 invalid continuation",
@@ -395,7 +415,7 @@ int main() {
         });
 
     expect_tokens(test, "whitespace", " \t\r\nSELECT", {{TokenKind::kSelect, "select"}});
-    expect_location(test, "whitespace location", " \t\r\nSELECT", 0, {2, 1});
+    expect_location(test, "whitespace location", " \t\r\nSELECT", 0, {2, 1, 4});
     expect_tokens(
         test,
         "line comment",
@@ -432,7 +452,7 @@ int main() {
     expect_location(test, "location identifier", multiline, 3, {3, 6});
     expect_location(test, "location semicolon", multiline, 4, {3, 7});
     expect_location(test, "location end", multiline, 5, {3, 8});
-    expect_location(test, "crlf location", "SELECT\r\nname", 1, {2, 1});
+    expect_location(test, "crlf location", "SELECT\r\nname", 1, {2, 1, 8});
 
     expect_lex_error(test, "invalid at", "SELECT @ FROM t;", {1, 8}, "character");
     expect_lex_error(test, "invalid backtick", "`name`", {1, 1}, "character");
@@ -448,7 +468,7 @@ int main() {
             {TokenKind::kFrom, "from"},
             {TokenKind::kIdentifier, "t"},
         });
-    expect_location(test, "missing semicolon end", "SELECT * FROM t", 4, {1, 16});
+    expect_location(test, "missing semicolon end", "SELECT * FROM t", 4, {1, 16, 15});
     expect_tokens(
         test,
         "syntax is not lexer's job",
@@ -460,7 +480,7 @@ int main() {
             {TokenKind::kSemicolon, ";"},
         });
     expect_tokens(test, "empty has end", "", {});
-    expect_location(test, "empty end location", "", 0, {1, 1});
+    expect_location(test, "empty end location", "", 0, {1, 1, 0});
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " lexer test assertion(s) failed\n";

@@ -10,10 +10,14 @@
 
 namespace {
 
-using tinydbms::SourceLocation;
+using tinydbms::CompileStage;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using namespace tinydbms::compiler::internal;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -66,16 +70,16 @@ void expect_error(
     TestContext& test,
     std::string_view name,
     std::string_view sql,
-    SourceLocation expected,
+    ExpectedLocation expected,
     std::string_view message_part) {
     const auto result = parse_sql(test, name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{name};
     test.expect(error != nullptr, prefix + ": syntax error");
     if (error != nullptr) {
-        test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": kind");
-        test.expect(error->location.line == expected.line, prefix + ": line");
-        test.expect(error->location.column == expected.column, prefix + ": column");
+        test.expect(error->stage == CompileStage::kSyntax, prefix + ": stage");
+        test.expect(error->source.begin.line == expected.line, prefix + ": line");
+        test.expect(error->source.begin.column == expected.column, prefix + ": column");
         test.expect(error->message.find(message_part) != std::string::npos, prefix + ": message");
     }
 }
@@ -117,9 +121,9 @@ int main() {
             test.expect(id != nullptr && id->name == "id", "three columns: id");
             test.expect(name != nullptr && name->name == "name", "three columns: name");
             test.expect(age != nullptr && age->name == "age", "three columns: age");
-            test.expect(id != nullptr && id->location.column == 8, "three columns: id location");
-            test.expect(name != nullptr && name->location.column == 11, "three columns: name location");
-            test.expect(select->table_location.column == 25, "three columns: table location");
+            test.expect(id != nullptr && id->source.begin.column == 8, "three columns: id location");
+            test.expect(name != nullptr && name->source.begin.column == 11, "three columns: name location");
+            test.expect(select->table_source.begin.column == 25, "three columns: table location");
         }
     }
 

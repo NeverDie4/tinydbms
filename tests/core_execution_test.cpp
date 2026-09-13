@@ -61,7 +61,7 @@ const tinydbms::core::Error& error_of(
 std::optional<std::size_t> byte_offset_of(
     std::string_view text,
     tinydbms::SourceLocation target) {
-    tinydbms::SourceLocation current{1, 1};
+    tinydbms::SourceLocation current{1, 1, 0U};
     for (std::size_t offset = 0; offset <= text.size(); ++offset) {
         if (current.line == target.line && current.column == target.column) {
             return offset;
@@ -75,6 +75,7 @@ std::optional<std::size_t> byte_offset_of(
         } else if (text[offset] != '\r') {
             ++current.column;
         }
+        ++current.byte_offset;
     }
     return std::nullopt;
 }

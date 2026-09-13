@@ -14,15 +14,15 @@
 namespace {
 
 using tinydbms::ColumnMeta;
+using tinydbms::CompileStage;
+using tinydbms::FixIt;
 using tinydbms::SourceLocation;
 using tinydbms::SourceRange;
 using tinydbms::TableId;
 using tinydbms::Type;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::CompileResult;
 using tinydbms::compiler::CreateTablePlan;
-using tinydbms::compiler::FixIt;
 using tinydbms::core::Database;
 using tinydbms::core::ExecuteScriptRequest;
 using tinydbms::core::StatementStatus;
@@ -51,13 +51,20 @@ CompileResult valid_create(std::string name) {
         std::vector<ColumnMeta>{{"id", Type::kInt}}}};
 }
 
-CompileResult compile_error(std::string message) {
+CompileResult compile_error(std::string message, bool has_leading_newline) {
+    const SourceLocation begin = has_leading_newline
+        ? SourceLocation{2, 1, 1}
+        : SourceLocation{1, 1, 0};
+    const SourceLocation end{
+        begin.line,
+        begin.column + 1,
+        begin.byte_offset + 1};
     return CompileResult{CompileError{
-        CompileErrorKind::kSyntax,
-        SourceLocation{1, 1},
+        CompileStage::kSyntax,
+        SourceRange{begin, end},
         std::move(message),
         "did you mean 'SELECT'?",
-        FixIt{SourceRange{{1, 1}, {1, 2}}, "S"}}};
+        FixIt{SourceRange{begin, end}, "S"}}};
 }
 
 bool run_case(const CaseSpec& spec, std::size_t case_index, CaseOutcome& observed) {
@@ -93,11 +100,13 @@ bool run_case(const CaseSpec& spec, std::size_t case_index, CaseOutcome& observe
                 compile_results.push_back(valid_create("invalid-name"));
                 expected_statuses.push_back(StatementStatus::kExecutionError);
             } else {
-                compile_results.push_back(compile_error("injected first compile error"));
+                compile_results.push_back(compile_error(
+                    "injected first compile error", index != 0));
                 expected_statuses.push_back(StatementStatus::kCompileError);
             }
         } else if (spec.later_compile_errors[index]) {
-            compile_results.push_back(compile_error("injected later compile error"));
+            compile_results.push_back(compile_error(
+                "injected later compile error", index != 0));
             expected_statuses.push_back(StatementStatus::kCompileError);
         } else {
             compile_results.push_back(valid_create(
@@ -120,12 +129,21 @@ bool run_case(const CaseSpec& spec, std::size_t case_index, CaseOutcome& observe
     }
 
     observed.statuses.clear();
+    std::size_t expected_source_begin = 0;
     for (std::size_t index = 0; index < result.statements.size(); ++index) {
         const auto& statement = result.statements[index];
+        const std::size_t expected_source_end = script.find(';', expected_source_begin) + 1U;
         if (statement.statement_index != index || statement.status != expected_statuses[index] ||
-            statement.source_range.begin.line != static_cast<int>(index + 1U)) {
+            statement.source_range.begin.byte_offset != expected_source_begin ||
+            statement.source_range.end.byte_offset != expected_source_end ||
+            statement.source_range.end.line != static_cast<int>(index + 1U) ||
+            script.substr(expected_source_begin, expected_source_end - expected_source_begin) !=
+                (index == 0
+                    ? "statement_" + std::to_string(index) + ';'
+                    : "\nstatement_" + std::to_string(index) + ';')) {
             return false;
         }
+        expected_source_begin = expected_source_end;
         if (statement.status == StatementStatus::kAnalysisOnly) {
             if (statement.outcome.has_value()) {
                 return false;
@@ -147,7 +165,7 @@ bool run_case(const CaseSpec& spec, std::size_t case_index, CaseOutcome& observe
 
     fake_compiler::reset();
     std::deque<CompileResult> probe_results;
-    probe_results.push_back(compile_error("shadow leak probe"));
+    probe_results.push_back(compile_error("shadow leak probe", false));
     fake_compiler::set_compile_results(std::move(probe_results));
     (void)database.execute_script({"probe;"});
     if (fake_compiler::state().catalog_sizes != std::vector<std::size_t>{real_create_count}) {

@@ -44,20 +44,20 @@ using ResolveColumnResult = std::variant<ResolvedColumn, CompileError>;
 using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
 
 [[nodiscard]] CompileError make_semantic_error(
-    SourceLocation location,
+    SourceRange source,
     std::string message,
     std::optional<std::string> suggestion = std::nullopt) {
-    CompileError error{CompileErrorKind::kSemantic, location, std::move(message)};
+    CompileError error{CompileStage::kSemantic, source, std::move(message)};
     error.suggestion = std::move(suggestion);
     return error;
 }
 
 [[nodiscard]] SemanticResult semantic_error(
-    SourceLocation location,
+    SourceRange source,
     std::string message,
     std::optional<std::string> suggestion = std::nullopt) {
     return SemanticResult{make_semantic_error(
-        location, std::move(message), std::move(suggestion))};
+        source, std::move(message), std::move(suggestion))};
 }
 
 [[nodiscard]] const TableMeta* find_table(CatalogView catalog, const std::string& name) {
@@ -174,7 +174,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const RelationScope& relations,
     const std::optional<std::string>& qualifier,
     const std::string& name,
-    SourceLocation location) {
+    SourceRange location) {
     if (qualifier.has_value()) {
         const auto relation = std::find_if(
             relations.begin(),
@@ -283,7 +283,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
 
     const AstSelectColumn& argument = *aggregate.argument;
     ResolveColumnResult resolved = resolve_column(
-        relations, argument.qualifier, argument.name, argument.location);
+        relations, argument.qualifier, argument.name, argument.source);
     if (const auto* error = std::get_if<CompileError>(&resolved)) {
         return *error;
     }
@@ -302,7 +302,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         case AstAggregateKind::kSum:
             if (!numeric) {
                 return make_semantic_error(
-                    aggregate.location,
+                    aggregate.source,
                     std::string{"SUM requires a numeric column, but "} +
                         type_name(input_type) + " found");
             }
@@ -311,7 +311,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         case AstAggregateKind::kAvg:
             if (!numeric) {
                 return make_semantic_error(
-                    aggregate.location,
+                    aggregate.source,
                     std::string{"AVG requires a numeric column, but "} +
                         type_name(input_type) + " found");
             }
@@ -321,7 +321,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         case AstAggregateKind::kMax:
             if (!numeric && input_type != Type::kVarchar) {
                 return make_semantic_error(
-                    aggregate.location,
+                    aggregate.source,
                     std::string{aggregate_name(aggregate.kind)} +
                         " does not support " + type_name(input_type));
             }
@@ -356,7 +356,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     if (std::holds_alternative<std::monostate>(literal.value.data)) {
         if (!target.nullable) {
             return make_semantic_error(
-                literal.location,
+                literal.source,
                 "column '" + target.name + "' is NOT NULL, but NULL found");
         }
         return literal.value;
@@ -370,7 +370,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     if (!actual_type.has_value() ||
         (target.type != *actual_type && !widens_int_to_bigint && !widens_to_double)) {
         return make_semantic_error(
-            literal.location,
+            literal.source,
             "column '" + target.name + "' expects " + type_name(target.type) +
                 ", but " +
                 (actual_type.has_value() ? type_name(*actual_type) : "unsupported") +
@@ -502,20 +502,20 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     return op == AstCompareOp::kEq || op == AstCompareOp::kNe;
 }
 
-[[nodiscard]] SourceLocation expression_location(const AstExpr& expression) {
+[[nodiscard]] SourceRange expression_source(const AstExpr& expression) {
     if (const auto* identifier = std::get_if<AstIdentifierExpr>(&expression.kind)) {
-        return identifier->location;
+        return identifier->source;
     }
     if (const auto* literal = std::get_if<AstLiteralExpr>(&expression.kind)) {
-        return literal->location;
+        return literal->source;
     }
     if (const auto* binary = std::get_if<AstBinaryExpr>(&expression.kind)) {
-        return binary->location;
+        return binary->source;
     }
     if (const auto* null_test = std::get_if<AstNullTestExpr>(&expression.kind)) {
-        return null_test->location;
+        return null_test->source;
     }
-    return std::get<AstUnaryExpr>(expression.kind).location;
+    return std::get<AstUnaryExpr>(expression.kind).source;
 }
 
 [[nodiscard]] ExpressionResult analyze_expression(
@@ -523,7 +523,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const RelationScope& relations) {
     if (const auto* identifier = std::get_if<AstIdentifierExpr>(&expression.kind)) {
         ResolveColumnResult resolved = resolve_column(
-            relations, identifier->qualifier, identifier->name, identifier->location);
+            relations, identifier->qualifier, identifier->name, identifier->source);
         if (const auto* error = std::get_if<CompileError>(&resolved)) {
             return *error;
         }
@@ -562,13 +562,13 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
                 const SemanticType concrete = lhs_null ? rhs.type : lhs.type;
                 if (concrete == SemanticType::kUnsupported) {
                     return make_semantic_error(
-                        binary->location,
+                        binary->source,
                         "operator '" + op + "' cannot be applied to unsupported values");
                 }
                 if (!is_equality(*comparison) &&
                     (concrete == SemanticType::kBool || concrete == SemanticType::kVarchar)) {
                     return make_semantic_error(
-                        binary->location,
+                        binary->source,
                         "operator '" + op + "' cannot be applied to " +
                             semantic_type_name(concrete));
                 }
@@ -582,7 +582,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             if (lhs.type != rhs.type &&
                 !(is_numeric(lhs.type) && is_numeric(rhs.type))) {
                 return make_semantic_error(
-                    binary->location,
+                    binary->source,
                     "operator '" + op + "' cannot be applied to " +
                         semantic_type_name(lhs.type) + " and " +
                         semantic_type_name(rhs.type));
@@ -590,17 +590,17 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             if (lhs.type == SemanticType::kUnsupported ||
                 rhs.type == SemanticType::kUnsupported) {
                 return make_semantic_error(
-                    binary->location,
+                    binary->source,
                     "operator '" + op + "' cannot be applied to unsupported values");
             }
             if (lhs.type == SemanticType::kBool && !is_equality(*comparison)) {
                 return make_semantic_error(
-                    binary->location,
+                    binary->source,
                     "operator '" + op + "' cannot be applied to BOOL");
             }
             if (lhs.type == SemanticType::kVarchar && !is_equality(*comparison)) {
                 return make_semantic_error(
-                    binary->location,
+                    binary->source,
                     "operator '" + op + "' cannot be applied to VARCHAR");
             }
             return AnalyzedExpression{
@@ -618,7 +618,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         const bool rhs_truth = rhs.type == SemanticType::kBool || rhs.type == SemanticType::kNull;
         if (!lhs_truth || !rhs_truth) {
             return make_semantic_error(
-                binary->location,
+                binary->source,
                 "operator '" + std::string{logic_symbol(logic)} + "' requires BOOL operands");
         }
         return AnalyzedExpression{
@@ -639,7 +639,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         AnalyzedExpression operand = std::get<AnalyzedExpression>(std::move(operand_result));
         if (operand.type == SemanticType::kUnsupported) {
             return make_semantic_error(
-                null_test->location,
+                null_test->source,
                 "IS NULL operand has an unsupported type");
         }
         return AnalyzedExpression{
@@ -659,7 +659,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     AnalyzedExpression operand = std::get<AnalyzedExpression>(std::move(operand_result));
     if (operand.type != SemanticType::kBool && operand.type != SemanticType::kNull) {
         return make_semantic_error(
-            unary.location,
+            unary.source,
             "operator 'NOT' requires a BOOL operand");
     }
     return AnalyzedExpression{
@@ -671,7 +671,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
 [[nodiscard]] SemanticResult analyze_create(const CreateTableAst& create, CatalogView catalog) {
     if (find_table(catalog, create.table_name) != nullptr) {
         return semantic_error(
-            create.table_location,
+            create.table_source,
             "table '" + create.table_name + "' already exists");
     }
 
@@ -683,7 +683,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             [&column](const AstColumnDef& previous) { return previous.name == column.name; });
         if (duplicate != create.columns.begin() + static_cast<std::ptrdiff_t>(index)) {
             return semantic_error(
-                column.location,
+                column.source,
                 "duplicate column '" + column.name + "'");
         }
     }
@@ -701,7 +701,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const TableMeta* table = find_table(catalog, insert.table_name);
     if (table == nullptr) {
         return semantic_error(
-            insert.table_location,
+            insert.table_source,
             "table '" + insert.table_name + "' does not exist",
             table_suggestion(catalog, insert.table_name));
     }
@@ -712,14 +712,14 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         const std::optional<ColumnId> column_id = find_column(*table, column.name);
         if (!column_id.has_value()) {
             return semantic_error(
-                column.location,
+                column.source,
                 "column '" + column.name + "' does not exist in table '" +
                     table->table_name + "'",
                 qualified_column_suggestion(*table, table->table_name, column.name));
         }
         if (std::find(bound_columns.begin(), bound_columns.end(), *column_id) != bound_columns.end()) {
             return semantic_error(
-                column.location,
+                column.source,
                 "duplicate column '" + column.name + "'");
         }
         bound_columns.push_back(*column_id);
@@ -730,7 +730,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             const ColumnId column_id = static_cast<ColumnId>(index);
             if (std::find(bound_columns.begin(), bound_columns.end(), column_id) == bound_columns.end()) {
                 return semantic_error(
-                    insert.table_location,
+                    insert.table_source,
                     "explicit INSERT column list must contain all columns; missing column '" +
                         table->columns[index].name + "'");
             }
@@ -743,9 +743,9 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
 
     for (const auto& row : insert.rows) {
         if (row.size() != expected_count) {
-            const SourceLocation location = row.size() > expected_count
-                ? row[expected_count].location
-                : (row.empty() ? insert.table_location : row.front().location);
+            const SourceRange location = row.size() > expected_count
+                ? row[expected_count].source
+                : (row.empty() ? insert.table_source : row.front().source);
             return semantic_error(location, "VALUES row value count does not match target column count");
         }
 
@@ -772,7 +772,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const TableMeta* table = find_table(catalog, select.table_name);
     if (table == nullptr) {
         return semantic_error(
-            select.table_location,
+            select.table_source,
             "table '" + select.table_name + "' does not exist",
             table_suggestion(catalog, select.table_name));
     }
@@ -784,7 +784,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         const TableMeta* joined_table = find_table(catalog, join.table_name);
         if (joined_table == nullptr) {
             return semantic_error(
-                join.table_location,
+                join.table_source,
                 "table '" + join.table_name + "' does not exist",
                 table_suggestion(catalog, join.table_name));
         }
@@ -794,7 +794,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             });
         if (duplicate_relation) {
             return semantic_error(
-                join.table_location,
+                join.table_source,
                 "table '" + join.table_name +
                     "' is already present in query; aliases are not supported");
         }
@@ -807,7 +807,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         AnalyzedExpression analyzed = std::get<AnalyzedExpression>(std::move(result));
         if (analyzed.type != SemanticType::kBool && analyzed.type != SemanticType::kNull) {
             return semantic_error(
-                expression_location(*join.condition),
+                expression_source(*join.condition),
                 "JOIN ON predicate must be BOOL");
         }
         joins.push_back(BoundJoin{joined_table->table_id, std::move(analyzed.expression)});
@@ -817,7 +817,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     group_by.reserve(select.group_by.size());
     for (const AstSelectColumn& key : select.group_by) {
         ResolveColumnResult resolved = resolve_column(
-            relations, key.qualifier, key.name, key.location);
+            relations, key.qualifier, key.name, key.source);
         if (const auto* error = std::get_if<CompileError>(&resolved)) {
             return SemanticResult{*error};
         }
@@ -838,7 +838,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const bool aggregate_query = has_aggregate || !group_by.empty();
     if (select.select_all && aggregate_query) {
         return semantic_error(
-            select.table_location,
+            select.table_source,
             "SELECT * is not allowed in an aggregate query");
     }
 
@@ -855,7 +855,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         for (const AstSelectItem& item : select.items) {
             if (const auto* column = std::get_if<AstSelectColumn>(&item)) {
                 ResolveColumnResult resolved = resolve_column(
-                    relations, column->qualifier, column->name, column->location);
+                    relations, column->qualifier, column->name, column->source);
                 if (const auto* error = std::get_if<CompileError>(&resolved)) {
                     return SemanticResult{*error};
                 }
@@ -866,7 +866,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
                             return same_column(key, reference);
                         })) {
                     return semantic_error(
-                        column->location,
+                        column->source,
                         "column '" + column->name +
                             "' is neither grouped nor aggregated");
                 }
@@ -891,7 +891,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         AnalyzedExpression analyzed = std::get<AnalyzedExpression>(std::move(result));
         if (analyzed.type != SemanticType::kBool && analyzed.type != SemanticType::kNull) {
             return semantic_error(
-                expression_location(*select.predicate),
+                expression_source(*select.predicate),
                 "WHERE predicate must be BOOL");
         }
         predicate = std::move(analyzed.expression);
@@ -901,7 +901,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     order_by.reserve(select.order_by.size());
     for (const AstSortKey& key : select.order_by) {
         ResolveColumnResult resolved = resolve_column(
-            relations, key.qualifier, key.column_name, key.location);
+            relations, key.qualifier, key.column_name, key.source);
         if (const auto* error = std::get_if<CompileError>(&resolved)) {
             return SemanticResult{*error};
         }
@@ -912,7 +912,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
                     return same_column(group_key, reference);
                 })) {
             return semantic_error(
-                key.location,
+                key.source,
                 "ORDER BY column '" + key.column_name +
                     "' is neither grouped nor aggregated");
         }
@@ -937,7 +937,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const TableMeta* table = find_table(catalog, deletion.table_name);
     if (table == nullptr) {
         return semantic_error(
-            deletion.table_location,
+            deletion.table_source,
             "table '" + deletion.table_name + "' does not exist",
             table_suggestion(catalog, deletion.table_name));
     }
@@ -952,7 +952,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         AnalyzedExpression analyzed = std::get<AnalyzedExpression>(std::move(result));
         if (analyzed.type != SemanticType::kBool && analyzed.type != SemanticType::kNull) {
             return semantic_error(
-                expression_location(*deletion.predicate),
+                expression_source(*deletion.predicate),
                 "WHERE predicate must be BOOL");
         }
         predicate = std::move(analyzed.expression);
@@ -968,7 +968,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
     const TableMeta* table = find_table(catalog, update.table_name);
     if (table == nullptr) {
         return semantic_error(
-            update.table_location,
+            update.table_source,
             "table '" + update.table_name + "' does not exist",
             table_suggestion(catalog, update.table_name));
     }
@@ -979,7 +979,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         const std::optional<ColumnId> column_id = find_column(*table, assignment.column_name);
         if (!column_id.has_value()) {
             return semantic_error(
-                assignment.column_location,
+                assignment.column_source,
                 "column '" + assignment.column_name + "' does not exist in table '" +
                     table->table_name + "'",
                 qualified_column_suggestion(
@@ -993,7 +993,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
             });
         if (duplicate != bound.assignments.end()) {
             return semantic_error(
-                assignment.column_location,
+                assignment.column_source,
                 "duplicate column '" + assignment.column_name + "'");
         }
         AssignmentResult coerced = coerce_assignment(
@@ -1016,7 +1016,7 @@ using BoundAggregateResult = std::variant<BoundAggregateCall, CompileError>;
         AnalyzedExpression analyzed = std::get<AnalyzedExpression>(std::move(result));
         if (analyzed.type != SemanticType::kBool && analyzed.type != SemanticType::kNull) {
             return semantic_error(
-                expression_location(*update.predicate),
+                expression_source(*update.predicate),
                 "WHERE predicate must be BOOL");
         }
         bound.predicate = std::move(analyzed.expression);

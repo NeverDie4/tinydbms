@@ -907,13 +907,13 @@ struct FuzzCounts {
     return true;
 }
 
-[[nodiscard]] std::string_view error_kind_name(CompileErrorKind kind) {
-    switch (kind) {
-        case CompileErrorKind::kLex:
+[[nodiscard]] std::string_view compile_stage_name(CompileStage stage) {
+    switch (stage) {
+        case CompileStage::kLex:
             return "Lex";
-        case CompileErrorKind::kSyntax:
+        case CompileStage::kSyntax:
             return "Syntax";
-        case CompileErrorKind::kSemantic:
+        case CompileStage::kSemantic:
             return "Semantic";
     }
     return "Unknown";
@@ -1181,8 +1181,8 @@ int main(int argc, char* argv[]) {
         const CompileResult result = compile(CompileRequest{generated.sql, catalog});
         if (const auto* error = std::get_if<CompileError>(&result.outcome)) {
             print_context(iteration, generated);
-            std::cerr << "unexpected " << error_kind_name(error->kind) << " error at "
-                      << error->location.line << ':' << error->location.column
+            std::cerr << "unexpected " << compile_stage_name(error->stage) << " error at "
+                      << error->source.begin.line << ':' << error->source.begin.column
                       << ": " << error->message << '\n';
             return 1;
         }
@@ -1199,9 +1199,9 @@ int main(int argc, char* argv[]) {
             const CompileResult repeated = compile(CompileRequest{generated.sql, catalog});
             if (const auto* error = std::get_if<CompileError>(&repeated.outcome)) {
                 print_context(iteration, generated);
-                std::cerr << "repeated compile produced " << error_kind_name(error->kind)
-                          << " error at " << error->location.line << ':'
-                          << error->location.column << ": " << error->message << '\n';
+                std::cerr << "repeated compile produced " << compile_stage_name(error->stage)
+                          << " error at " << error->source.begin.line << ':'
+                          << error->source.begin.column << ": " << error->message << '\n';
                 return 1;
             }
             const auto* repeated_plan = std::get_if<Plan>(&repeated.outcome);

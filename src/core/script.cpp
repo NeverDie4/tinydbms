@@ -28,50 +28,55 @@ std::optional<SourceLocation> make_absolute_location(
         ? static_cast<std::int64_t>(statement_start.column) + relative_location.column - 1
         : relative_location.column;
 
-    if (line > std::numeric_limits<int>::max() || column > std::numeric_limits<int>::max()) {
+    if (line > std::numeric_limits<int>::max() || column > std::numeric_limits<int>::max() ||
+        relative_location.byte_offset >
+            std::numeric_limits<std::size_t>::max() - statement_start.byte_offset) {
         return std::nullopt;
     }
-    return SourceLocation{static_cast<int>(line), static_cast<int>(column)};
+    return SourceLocation{
+        static_cast<int>(line),
+        static_cast<int>(column),
+        statement_start.byte_offset + relative_location.byte_offset};
 }
 
-std::optional<compiler::FixIt> make_absolute_fix_it(
+std::optional<SourceRange> make_absolute_range(
     SourceLocation statement_start,
-    const std::optional<compiler::FixIt>& relative_fix_it) {
+    SourceRange relative_range) {
+    const std::optional<SourceLocation> begin = make_absolute_location(
+        statement_start, relative_range.begin);
+    const std::optional<SourceLocation> end = make_absolute_location(
+        statement_start, relative_range.end);
+    if (!begin.has_value() || !end.has_value() ||
+        begin->byte_offset > end->byte_offset) {
+        return std::nullopt;
+    }
+    return SourceRange{*begin, *end};
+}
+
+std::optional<FixIt> make_absolute_fix_it(
+    SourceLocation statement_start,
+    const std::optional<FixIt>& relative_fix_it) {
     if (!relative_fix_it.has_value()) {
         return std::nullopt;
     }
-    const std::optional<SourceLocation> begin = make_absolute_location(
-        statement_start, relative_fix_it->range.begin);
-    const std::optional<SourceLocation> end = make_absolute_location(
-        statement_start, relative_fix_it->range.end);
-    if (!begin.has_value() || !end.has_value()) {
+    const std::optional<SourceRange> range = make_absolute_range(
+        statement_start, relative_fix_it->range);
+    if (!range.has_value()) {
         return std::nullopt;
     }
-    return compiler::FixIt{
-        SourceRange{*begin, *end},
+    return FixIt{
+        *range,
         relative_fix_it->replacement};
-}
-
-SourceLocation advance_location(SourceLocation location, std::string_view text) {
-    for (const char character : text) {
-        if (character == '\n') {
-            ++location.line;
-            location.column = 1;
-        } else if (character != '\r') {
-            ++location.column;
-        }
-    }
-    return location;
 }
 
 Error make_compile_error(
     SourceLocation statement_start,
     compiler::CompileError compile_error) {
-    const std::optional<SourceLocation> location = make_absolute_location(
-        statement_start, compile_error.location);
-    const std::optional<compiler::FixIt> fix_it = make_absolute_fix_it(
+    const std::optional<SourceRange> source = make_absolute_range(
+        statement_start, compile_error.source);
+    const std::optional<FixIt> fix_it = make_absolute_fix_it(
         statement_start, compile_error.fix_it);
-    if (!location.has_value() ||
+    if (!source.has_value() ||
         (compile_error.fix_it.has_value() && !fix_it.has_value())) {
         return internal::make_error(
             ErrorKind::kInternal,
@@ -79,7 +84,7 @@ Error make_compile_error(
     }
     return Error{
         ErrorKind::kCompile,
-        location,
+        source->begin,
         std::move(compile_error.message),
         std::move(compile_error.suggestion),
         fix_it};
@@ -128,7 +133,7 @@ StatementResult make_statement_result(
     std::optional<ExecuteResult> outcome) {
     return StatementResult{
         index,
-        SourceRange{statement.start, advance_location(statement.start, statement.sql)},
+        statement.source,
         status,
         std::move(outcome)};
 }
@@ -159,7 +164,7 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
         if (auto* split_error = std::get_if<compiler::CompileError>(&split.outcome)) {
             result.script_error = Error{
                 ErrorKind::kCompile,
-                split_error->location,
+                split_error->source.begin,
                 std::move(split_error->message),
                 std::move(split_error->suggestion),
                 std::move(split_error->fix_it)};
@@ -187,7 +192,9 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
                     index,
                     statement,
                     StatementStatus::kCompileError,
-                    ExecuteResult{make_compile_error(statement.start, std::move(compile_error))}));
+                    ExecuteResult{make_compile_error(
+                        statement.source.begin,
+                        std::move(compile_error))}));
                 if (execution_enabled) {
                     execution_enabled = false;
                     result.first_error_index = index;

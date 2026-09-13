@@ -13,8 +13,13 @@ namespace {
 
 using tinydbms::SourceLocation;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
+using tinydbms::CompileStage;
 using namespace tinydbms::compiler::internal;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -101,16 +106,16 @@ void expect_expression_error(
     TestContext& test,
     std::string_view name,
     std::string_view expression,
-    SourceLocation expected) {
+    ExpectedLocation expected) {
     const std::string sql = "SELECT * FROM t WHERE " + std::string{expression} + ";";
     const auto result = parse_sql(test, name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{name};
     test.expect(error != nullptr, prefix + ": syntax error");
     if (error != nullptr) {
-        test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": error kind");
-        test.expect(error->location.line == expected.line, prefix + ": line");
-        test.expect(error->location.column == expected.column, prefix + ": column");
+        test.expect(error->stage == CompileStage::kSyntax, prefix + ": error kind");
+        test.expect(error->source.begin.line == expected.line, prefix + ": line");
+        test.expect(error->source.begin.column == expected.column, prefix + ": column");
     }
 }
 
@@ -132,10 +137,10 @@ int main() {
             if (rhs != nullptr) {
                 const auto* value = std::get_if<std::int32_t>(&rhs->value.data);
                 test.expect(value != nullptr && *value == 1, "equal: integer value");
-                test.expect(rhs->location.column == 27, "equal: literal location");
+                test.expect(rhs->source.begin.column == 27, "equal: literal location");
             }
-            test.expect(lhs != nullptr && lhs->location.column == 23, "equal: identifier location");
-            test.expect(comparison->location.column == 25, "equal: operator location");
+            test.expect(lhs != nullptr && lhs->source.begin.column == 23, "equal: identifier location");
+            test.expect(comparison->source.begin.column == 25, "equal: operator location");
         }
     }
 
@@ -176,7 +181,7 @@ int main() {
         const auto result = parse_sql(test, "and", "SELECT * FROM t WHERE a = 1 AND b = 2;");
         const auto* root = binary(predicate(test, "and", result));
         test.expect(has_logic(root, AstLogicOp::kAnd), "and: root");
-        test.expect(root != nullptr && root->location.column == 29, "and: operator location");
+        test.expect(root != nullptr && root->source.begin.column == 29, "and: operator location");
     }
 
     {
@@ -208,7 +213,7 @@ int main() {
         const auto result = parse_sql(test, "not", "SELECT * FROM t WHERE NOT a = 1;");
         const auto* root = unary(predicate(test, "not", result));
         test.expect(root != nullptr && root->op == AstUnaryOp::kNot, "not: root");
-        test.expect(root != nullptr && root->location.column == 23, "not: operator location");
+        test.expect(root != nullptr && root->source.begin.column == 23, "not: operator location");
         test.expect(root != nullptr && has_compare(binary(root->operand.get()), AstCompareOp::kEq), "not: comparison operand");
     }
 

@@ -38,7 +38,7 @@ struct Error {
     std::optional<SourceLocation> location;
     std::string message;
     std::optional<std::string> suggestion = std::nullopt;
-    std::optional<compiler::FixIt> fix_it = std::nullopt;
+    std::optional<FixIt> fix_it = std::nullopt;
 };
 
 struct CommandResult {

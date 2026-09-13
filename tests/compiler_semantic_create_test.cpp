@@ -13,12 +13,11 @@
 namespace {
 
 using tinydbms::ColumnMeta;
-using tinydbms::SourceLocation;
+using tinydbms::CompileStage;
 using tinydbms::TableMeta;
 using tinydbms::Type;
 using tinydbms::compiler::CatalogView;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::internal::BoundCreateTable;
 using tinydbms::compiler::internal::BoundStatement;
 using tinydbms::compiler::internal::LexResult;
@@ -29,6 +28,11 @@ using tinydbms::compiler::internal::Token;
 using tinydbms::compiler::internal::analyze;
 using tinydbms::compiler::internal::parse;
 using tinydbms::compiler::internal::tokenize;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -84,7 +88,7 @@ void expect_semantic_error(
     std::string_view case_name,
     std::string_view sql,
     CatalogView catalog,
-    SourceLocation location,
+    ExpectedLocation location,
     std::string_view message_part) {
     const SemanticResult result = analyze_sql(test, case_name, sql, catalog);
     const auto* error = std::get_if<CompileError>(&result.outcome);
@@ -93,9 +97,9 @@ void expect_semantic_error(
     if (error == nullptr) {
         return;
     }
-    test.expect(error->kind == CompileErrorKind::kSemantic, prefix + ": error kind");
-    test.expect(error->location.line == location.line, prefix + ": error line");
-    test.expect(error->location.column == location.column, prefix + ": error column");
+    test.expect(error->stage == CompileStage::kSemantic, prefix + ": error stage");
+    test.expect(error->source.begin.line == location.line, prefix + ": error line");
+    test.expect(error->source.begin.column == location.column, prefix + ": error column");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
 }
 

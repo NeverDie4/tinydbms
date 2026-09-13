@@ -85,7 +85,7 @@ private:
         }
 
         std::string table_name = peek().lexeme;
-        const SourceLocation table_location = peek().location;
+        const SourceRange table_location = peek().source;
         advance();
 
         if (!match(TokenKind::kLeftParen)) {
@@ -99,7 +99,7 @@ private:
             }
 
             std::string column_name = peek().lexeme;
-            const SourceLocation column_location = peek().location;
+            const SourceRange column_location = peek().source;
             advance();
 
             Type column_type;
@@ -174,7 +174,7 @@ private:
         }
 
         std::string table_name = peek().lexeme;
-        const SourceLocation table_location = peek().location;
+        const SourceRange table_location = peek().source;
         advance();
 
         std::vector<AstInsertColumn> columns;
@@ -184,7 +184,7 @@ private:
                     return syntax_error("expected column identifier");
                 }
 
-                columns.push_back(AstInsertColumn{peek().lexeme, peek().location});
+                columns.push_back(AstInsertColumn{peek().lexeme, peek().source});
                 advance();
                 if (!match(TokenKind::kComma)) {
                     break;
@@ -215,27 +215,27 @@ private:
                     if (!value.has_value()) {
                         return syntax_error("invalid integer literal");
                     }
-                    row.push_back(AstLiteral{*value, literal.location});
+                    row.push_back(AstLiteral{*value, literal.source});
                     advance();
                 } else if (literal.kind == TokenKind::kDoubleLiteral) {
                     const std::optional<Value> value = parse_double_literal(literal.lexeme);
                     if (!value.has_value()) {
                         return syntax_error("invalid floating literal");
                     }
-                    row.push_back(AstLiteral{*value, literal.location});
+                    row.push_back(AstLiteral{*value, literal.source});
                     advance();
                 } else if (literal.kind == TokenKind::kStringLiteral) {
-                    row.push_back(AstLiteral{Value{literal.lexeme}, literal.location});
+                    row.push_back(AstLiteral{Value{literal.lexeme}, literal.source});
                     advance();
                 } else if (literal.kind == TokenKind::kTrue ||
                            literal.kind == TokenKind::kFalse) {
                     row.push_back(AstLiteral{
                         Value{literal.kind == TokenKind::kTrue},
-                        literal.location
+                        literal.source
                     });
                     advance();
                 } else if (literal.kind == TokenKind::kNull) {
-                    row.push_back(AstLiteral{Value{std::monostate{}}, literal.location});
+                    row.push_back(AstLiteral{Value{std::monostate{}}, literal.source});
                     advance();
                 } else {
                     return syntax_error(
@@ -318,12 +318,12 @@ private:
                         argument = AstSelectColumn{
                             std::move(column->qualifier),
                             std::move(column->name),
-                            column->location};
+                            column->source};
                     }
                     if (!match(TokenKind::kRightParen)) {
                         return right_parenthesis_error("expected ')' after aggregate argument");
                     }
-                    items.emplace_back(AstAggregateCall{kind, std::move(argument), function.location});
+                    items.emplace_back(AstAggregateCall{kind, std::move(argument), function.source});
                 } else {
                     std::optional<AstIdentifierExpr> column =
                         parse_column_reference(first_item
@@ -335,7 +335,7 @@ private:
                     items.emplace_back(AstSelectColumn{
                         std::move(column->qualifier),
                         std::move(column->name),
-                        column->location});
+                        column->source});
                 }
                 first_item = false;
                 if (!match(TokenKind::kComma)) {
@@ -356,7 +356,7 @@ private:
         }
 
         std::string table_name = peek().lexeme;
-        const SourceLocation table_location = peek().location;
+        const SourceRange table_location = peek().source;
         advance();
 
         std::vector<AstJoin> joins;
@@ -371,7 +371,7 @@ private:
                 return syntax_error("expected table identifier after JOIN");
             }
             std::string joined_table = peek().lexeme;
-            const SourceLocation joined_location = peek().location;
+            const SourceRange joined_location = peek().source;
             advance();
             if (!match(TokenKind::kOn)) {
                 return keyword_error("expected ON after joined table", {{{"on", "ON"}}});
@@ -408,7 +408,7 @@ private:
                 group_by.push_back(AstSelectColumn{
                     std::move(column->qualifier),
                     std::move(column->name),
-                    column->location});
+                    column->source});
                 if (!match(TokenKind::kComma)) {
                     if (check(TokenKind::kIdentifier)) {
                         return insertion_error(
@@ -440,7 +440,7 @@ private:
                 order_by.push_back(AstSortKey{
                     std::move(column->qualifier),
                     std::move(column->name),
-                    column->location,
+                    column->source,
                     direction});
                 if (!match(TokenKind::kComma)) {
                     if (check(TokenKind::kIdentifier)) {
@@ -494,7 +494,7 @@ private:
         }
 
         std::string table_name = peek().lexeme;
-        const SourceLocation table_location = peek().location;
+        const SourceRange table_location = peek().source;
         advance();
 
         AstExprPtr predicate;
@@ -527,7 +527,7 @@ private:
             return syntax_error("expected table identifier after UPDATE");
         }
         std::string table_name = peek().lexeme;
-        const SourceLocation table_location = peek().location;
+        const SourceRange table_location = peek().source;
         advance();
         if (!match(TokenKind::kSet)) {
             return keyword_error("expected SET after table identifier", {{{"set", "SET"}}});
@@ -539,7 +539,7 @@ private:
                 return syntax_error("expected column identifier in SET clause");
             }
             std::string column_name = peek().lexeme;
-            const SourceLocation column_location = peek().location;
+            const SourceRange column_location = peek().source;
             advance();
             if (!match(TokenKind::kEq)) {
                 return syntax_error("expected '=' after SET column");
@@ -565,7 +565,7 @@ private:
             assignments.push_back(AstUpdateAssignment{
                 std::move(column_name),
                 column_location,
-                AstLiteral{std::move(*value), token.location}});
+                AstLiteral{std::move(*value), token.source}});
             advance();
             if (!match(TokenKind::kComma)) {
                 if (check(TokenKind::kIdentifier)) {
@@ -609,7 +609,7 @@ private:
             if (!consume_expression_budget()) {
                 return nullptr;
             }
-            const SourceLocation location = peek().location;
+            const SourceRange location = peek().source;
             advance();
             AstExprPtr rhs = parse_and();
             if (rhs == nullptr) {
@@ -635,7 +635,7 @@ private:
             if (!consume_expression_budget()) {
                 return nullptr;
             }
-            const SourceLocation location = peek().location;
+            const SourceRange location = peek().source;
             advance();
             AstExprPtr rhs = parse_not();
             if (rhs == nullptr) {
@@ -659,7 +659,7 @@ private:
             return nullptr;
         }
 
-        const SourceLocation location = peek().location;
+        const SourceRange location = peek().source;
         advance();
         AstExprPtr operand = parse_not();
         if (operand == nullptr) {
@@ -678,7 +678,7 @@ private:
             if (!consume_expression_budget()) {
                 return nullptr;
             }
-            const SourceLocation location = peek().location;
+            const SourceRange location = peek().source;
             advance();
             const bool negated = match(TokenKind::kNot);
             if (!match(TokenKind::kNull)) {
@@ -700,7 +700,7 @@ private:
             return nullptr;
         }
 
-        const SourceLocation location = peek().location;
+        const SourceRange location = peek().source;
         advance();
         AstExprPtr rhs = parse_primary();
         if (rhs == nullptr) {
@@ -738,7 +738,7 @@ private:
             }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 *value,
-                token.location
+                token.source
             });
             advance();
             return expression;
@@ -754,7 +754,7 @@ private:
             }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 *value,
-                token.location
+                token.source
             });
             advance();
             return expression;
@@ -766,7 +766,7 @@ private:
             }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 Value{token.lexeme},
-                token.location
+                token.source
             });
             advance();
             return expression;
@@ -778,7 +778,7 @@ private:
             }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 Value{token.kind == TokenKind::kTrue},
-                token.location
+                token.source
             });
             advance();
             return expression;
@@ -790,7 +790,7 @@ private:
             }
             auto expression = std::make_unique<AstExpr>(AstLiteralExpr{
                 Value{std::monostate{}},
-                token.location
+                token.source
             });
             advance();
             return expression;
@@ -822,7 +822,7 @@ private:
 
         std::optional<std::string> qualifier;
         std::string name = peek().lexeme;
-        const SourceLocation location = peek().location;
+        const SourceRange location = peek().source;
         advance();
         if (match(TokenKind::kDot)) {
             qualifier = std::move(name);
@@ -867,8 +867,8 @@ private:
     AstExprPtr expression_error(std::string message) {
         if (!expression_error_.has_value()) {
             expression_error_ = CompileError{
-                CompileErrorKind::kSyntax,
-                peek().location,
+                CompileStage::kSyntax,
+                peek().source,
                 std::move(message)
             };
         }
@@ -882,11 +882,12 @@ private:
         return ParseResult{std::move(*expression_error_)};
     }
 
-    static SourceLocation fallback_location(const std::vector<Token>& tokens) {
+    static SourceRange fallback_location(const std::vector<Token>& tokens) {
         if (tokens.empty()) {
-            return SourceLocation{1, 1};
+            const SourceLocation start{1, 1, 0};
+            return SourceRange{start, start};
         }
-        return tokens.back().location;
+        return tokens.back().source;
     }
 
     [[nodiscard]] const Token& peek() const {
@@ -920,8 +921,8 @@ private:
 
     [[nodiscard]] ParseResult syntax_error(std::string message) const {
         return ParseResult{CompileError{
-            CompileErrorKind::kSyntax,
-            peek().location,
+            CompileStage::kSyntax,
+            peek().source,
             std::move(message)
         }};
     }
@@ -930,21 +931,15 @@ private:
         std::string message,
         std::span<const SuggestionCandidate> candidates) const {
         CompileError error{
-            CompileErrorKind::kSyntax,
-            peek().location,
+            CompileStage::kSyntax,
+            peek().source,
             std::move(message)};
         if (peek().kind == TokenKind::kIdentifier) {
             const std::optional<std::string> candidate =
                 best_suggestion(peek().lexeme, candidates);
             if (candidate.has_value()) {
                 error.suggestion = suggestion_message(*candidate);
-                error.fix_it = FixIt{
-                    SourceRange{
-                        peek().location,
-                        SourceLocation{
-                            peek().location.line,
-                            peek().location.column + static_cast<int>(peek().lexeme.size())}},
-                    *candidate};
+                error.fix_it = FixIt{peek().source, *candidate};
             }
         }
         return ParseResult{std::move(error)};
@@ -954,10 +949,12 @@ private:
         std::string message,
         std::string replacement) const {
         CompileError error{
-            CompileErrorKind::kSyntax,
-            peek().location,
+            CompileStage::kSyntax,
+            peek().source,
             std::move(message)};
-        error.fix_it = FixIt{SourceRange{peek().location, peek().location}, std::move(replacement)};
+        error.fix_it = FixIt{
+            SourceRange{peek().source.begin, peek().source.begin},
+            std::move(replacement)};
         return ParseResult{std::move(error)};
     }
 

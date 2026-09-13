@@ -90,7 +90,7 @@ struct GuaranteedCase {
     MutationKind kind;
     std::string original;
     std::string mutated;
-    std::optional<CompileErrorKind> expected_kind;
+    std::optional<CompileStage> expected_stage;
 };
 
 struct GeneralCase {
@@ -256,67 +256,67 @@ struct GuaranteedStageCounts {
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM " + table.table_name,
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kIllegalCharacter:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT @ " + int_name + " FROM " + table.table_name + ';',
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kUnclosedString:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Alice';",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Alice;",
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kUnclosedBlockComment:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM " + table.table_name +
                         "; /* unfinished",
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kMissingSelectFrom:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + ' ' + table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + ' ' + valid_row(engine, table) + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingDeleteFrom:
             return {kind,
                     "DELETE FROM " + table.table_name + ';',
                     "DELETE " + table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingCreateTable:
             return {kind,
                     "CREATE TABLE " + create_name + "(a INT);",
                     "CREATE " + create_name + "(a INT);",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kDuplicateDelimiter:
             return {kind,
                     "SELECT " + int_name + ',' + text_name + " FROM " +
                         table.table_name + ';',
                     "SELECT " + int_name + ",," + text_name + " FROM " +
                         table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kBrokenLeftParenthesis:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1);",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " > 1 AND " + int_name + " = 1);",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kBrokenRightParenthesis:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1);",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1;",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kDoubleEqual:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
@@ -342,26 +342,26 @@ struct GuaranteedStageCounts {
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM fuzz_unknown_table;",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kUnknownColumn:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT fuzz_unknown_column FROM " + table.table_name + ';',
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTypeMismatch:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 1;",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 'abc';",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kVarcharOrdering:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Tom';",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " > 'Tom';",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kPartialInsertColumns:
             return {kind,
                     "INSERT INTO " + table.table_name + '(' +
@@ -370,7 +370,7 @@ struct GuaranteedStageCounts {
                     "INSERT INTO " + table.table_name + '(' +
                         table.columns[0].name + ',' + table.columns[1].name +
                         ") VALUES (1,'Alice');",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kDuplicateInsertColumn:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
@@ -378,32 +378,32 @@ struct GuaranteedStageCounts {
                     "INSERT INTO " + table.table_name + '(' +
                         table.columns[0].name + ',' + table.columns[0].name + ',' +
                         table.columns[2].name + ") VALUES (1,2,3);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTooFewInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES (1,'Alice');",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTooManyInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES (1,'Alice',20,100);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kWrongInsertType:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES ('wrong','Alice',20);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kNonBoolWhere:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 1;",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + ';',
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kUnsupportedStatement:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
@@ -498,10 +498,10 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
 }
 
 [[nodiscard]] bool valid_error(const CompileError& error) {
-    const bool valid_kind = error.kind == CompileErrorKind::kLex ||
-                            error.kind == CompileErrorKind::kSyntax ||
-                            error.kind == CompileErrorKind::kSemantic;
-    return valid_kind && error.location.line >= 1 && error.location.column >= 1 &&
+    const bool valid_stage = error.stage == CompileStage::kLex ||
+                             error.stage == CompileStage::kSyntax ||
+                             error.stage == CompileStage::kSemantic;
+    return valid_stage && error.source.begin.line >= 1 && error.source.begin.column >= 1 &&
            !error.message.empty();
 }
 
@@ -559,9 +559,13 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
     const auto* rhs_error = std::get_if<CompileError>(&rhs.outcome);
     if (lhs_error != nullptr || rhs_error != nullptr) {
         if (lhs_error == nullptr || rhs_error == nullptr ||
-            lhs_error->kind != rhs_error->kind ||
-            lhs_error->location.line != rhs_error->location.line ||
-            lhs_error->location.column != rhs_error->location.column ||
+            lhs_error->stage != rhs_error->stage ||
+            lhs_error->source.begin.line != rhs_error->source.begin.line ||
+            lhs_error->source.begin.column != rhs_error->source.begin.column ||
+            lhs_error->source.begin.byte_offset != rhs_error->source.begin.byte_offset ||
+            lhs_error->source.end.line != rhs_error->source.end.line ||
+            lhs_error->source.end.column != rhs_error->source.end.column ||
+            lhs_error->source.end.byte_offset != rhs_error->source.end.byte_offset ||
             lhs_error->message != rhs_error->message ||
             lhs_error->suggestion != rhs_error->suggestion ||
             lhs_error->fix_it.has_value() != rhs_error->fix_it.has_value()) {
@@ -583,6 +587,9 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
 [[nodiscard]] std::size_t source_offset(
     std::string_view source,
     SourceLocation location) {
+    if (location.byte_offset <= source.size()) {
+        return location.byte_offset;
+    }
     int line = 1;
     int column = 1;
     for (std::size_t offset = 0; offset < source.size(); ++offset) {
@@ -610,9 +617,9 @@ void add_result(ResultCounts& counts, const CompileResult& result) {
     const auto* error = std::get_if<CompileError>(&result.outcome);
     if (error == nullptr) {
         ++counts.success;
-    } else if (error->kind == CompileErrorKind::kLex) {
+    } else if (error->stage == CompileStage::kLex) {
         ++counts.lex;
-    } else if (error->kind == CompileErrorKind::kSyntax) {
+    } else if (error->stage == CompileStage::kSyntax) {
         ++counts.syntax;
     } else {
         ++counts.semantic;
@@ -623,11 +630,11 @@ void add_result(ResultCounts& counts, const CompileResult& result) {
     const std::vector<GuaranteedCase>& cases) {
     GuaranteedStageCounts counts;
     for (const GuaranteedCase& item : cases) {
-        if (!item.expected_kind.has_value()) {
+        if (!item.expected_stage.has_value()) {
             ++counts.unspecified;
-        } else if (*item.expected_kind == CompileErrorKind::kLex) {
+        } else if (*item.expected_stage == CompileStage::kLex) {
             ++counts.lex;
-        } else if (*item.expected_kind == CompileErrorKind::kSyntax) {
+        } else if (*item.expected_stage == CompileStage::kSyntax) {
             ++counts.syntax;
         } else {
             ++counts.semantic;
@@ -787,13 +794,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "invalid CompileError\n";
             return 1;
         }
-        if (item.expected_kind.has_value() && error->kind != *item.expected_kind) {
+        if (item.expected_stage.has_value() && error->stage != *item.expected_stage) {
             print_guaranteed_context(iteration, item);
             std::cerr << "error stage mismatch: expected="
-                      << static_cast<int>(*item.expected_kind)
-                      << " actual=" << static_cast<int>(error->kind)
-                      << " location=" << error->location.line << ':'
-                      << error->location.column << " message=" << error->message << '\n';
+                      << static_cast<int>(*item.expected_stage)
+                      << " actual=" << static_cast<int>(error->stage)
+                      << " location=" << error->source.begin.line << ':'
+                      << error->source.begin.column << " message=" << error->message << '\n';
             return 1;
         }
         if (iteration % 113 == 0) {
@@ -871,7 +878,7 @@ int main(int argc, char* argv[]) {
             catalog
         });
         const auto* error = std::get_if<CompileError>(&result.outcome);
-        if (error == nullptr || error->kind != CompileErrorKind::kLex) {
+        if (error == nullptr || error->stage != CompileStage::kLex) {
             std::cerr << "BIGINT overflow seed=" << kBigIntOverflowSeed
                       << " iteration=" << iteration << " literal=" << literal
                       << " did not produce Lex Error\n";
@@ -895,7 +902,7 @@ int main(int argc, char* argv[]) {
         const auto* error = std::get_if<CompileError>(&result.outcome);
         if (error == nullptr ||
             (range_case &&
-             (error->kind != CompileErrorKind::kLex ||
+             (error->stage != CompileStage::kLex ||
               error->message != "floating literal out of range"))) {
             std::cerr << "DOUBLE invalid seed=" << kDoubleInvalidSeed
                       << " iteration=" << iteration << " literal=" << literal
@@ -944,7 +951,7 @@ int main(int argc, char* argv[]) {
             (iteration + offset) % boolean_invalid_sql.size()];
         const CompileResult result = compile(CompileRequest{std::string{sql}, boolean_catalog});
         const auto* error = std::get_if<CompileError>(&result.outcome);
-        if (error == nullptr || error->kind != CompileErrorKind::kSemantic) {
+        if (error == nullptr || error->stage != CompileStage::kSemantic) {
             std::cerr << "BOOLEAN invalid seed=" << kBooleanInvalidSeed
                       << " iteration=" << iteration << "\nSQL: " << sql
                       << "\nexpected Semantic Error\n";

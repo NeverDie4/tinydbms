@@ -26,8 +26,8 @@ using ExprResult = std::variant<Expr, CompileError>;
 
 [[nodiscard]] CompileError planner_error(std::string message) {
     return CompileError{
-        CompileErrorKind::kSemantic,
-        SourceLocation{1, 1},
+        CompileStage::kSemantic,
+        SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 1, 0}},
         std::move(message)};
 }
 

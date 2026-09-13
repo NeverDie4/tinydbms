@@ -12,8 +12,13 @@ namespace {
 
 using tinydbms::SourceLocation;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
+using tinydbms::CompileStage;
 using namespace tinydbms::compiler::internal;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -65,16 +70,16 @@ void expect_error(
     TestContext& test,
     std::string_view name,
     std::string_view sql,
-    SourceLocation expected,
+    ExpectedLocation expected,
     std::string_view message_part) {
     const auto result = parse_sql(test, name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{name};
     test.expect(error != nullptr, prefix + ": syntax error");
     if (error != nullptr) {
-        test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": kind");
-        test.expect(error->location.line == expected.line, prefix + ": line");
-        test.expect(error->location.column == expected.column, prefix + ": column");
+        test.expect(error->stage == CompileStage::kSyntax, prefix + ": kind");
+        test.expect(error->source.begin.line == expected.line, prefix + ": line");
+        test.expect(error->source.begin.column == expected.column, prefix + ": column");
         test.expect(error->message.find(message_part) != std::string::npos, prefix + ": message");
     }
 }
@@ -89,7 +94,7 @@ int main() {
         const auto* deletion = expect_delete(test, "delete all", result);
         if (deletion != nullptr) {
             test.expect(deletion->table_name == "student", "delete all: table");
-            test.expect(deletion->table_location.column == 13, "delete all: table location");
+            test.expect(deletion->table_source.begin.column == 13, "delete all: table location");
             test.expect(deletion->predicate == nullptr, "delete all: no predicate");
         }
     }
@@ -178,7 +183,7 @@ int main() {
              std::pair{"empty update where", "UPDATE t SET a=1 WHERE;"}}) {
         const auto result = parse_sql(test, name, sql);
         const auto* error = std::get_if<CompileError>(&result.outcome);
-        test.expect(error != nullptr && error->kind == CompileErrorKind::kSyntax,
+        test.expect(error != nullptr && error->stage == CompileStage::kSyntax,
                     std::string{name} + ": syntax error");
     }
 
