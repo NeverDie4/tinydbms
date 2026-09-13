@@ -3,6 +3,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <variant>
@@ -23,6 +24,12 @@ const tinydbms::core::CommandResult& command_of(const tinydbms::core::ExecuteRes
     return std::get<tinydbms::core::CommandResult>(result.outcome);
 }
 
+const tinydbms::core::ExecuteResult& outcome_of(
+    const tinydbms::core::ExecuteScriptResult& script,
+    std::size_t index = 0) {
+    return *script.statements.at(index).outcome();
+}
+
 }  // namespace
 
 int main() {
@@ -39,51 +46,62 @@ int main() {
 
     const auto created = database.execute_script(
         {"CREATE TABLE student (id INT, name VARCHAR);"});
-    assert(created.outcomes.size() == 1);
-    assert(!command_of(created.outcomes[0]).error);
+    assert(created.statements.size() == 1);
+    assert(created.statements[0].status() == StatementStatus::kExecuted);
+    assert(!created.script_error.has_value());
+    assert(!command_of(outcome_of(created)).error);
 
     const auto invalid_create = database.execute_script({"CREATE TABLE invalid (id UNKNOWN);"});
-    assert(invalid_create.outcomes.size() == 1);
-    assert(std::holds_alternative<Error>(invalid_create.outcomes[0].outcome));
+    assert(invalid_create.statements.size() == 1);
+    assert(invalid_create.statements[0].status() == StatementStatus::kCompileError);
+    assert(std::holds_alternative<Error>(outcome_of(invalid_create).outcome));
     const auto valid_after_failure = database.execute_script({"CREATE TABLE recovered (id INT);"});
-    assert(valid_after_failure.outcomes.size() == 1 && !command_of(valid_after_failure.outcomes[0]).error);
+    assert(valid_after_failure.statements.size() == 1 &&
+           !command_of(outcome_of(valid_after_failure)).error);
 
     const auto oversized = database.execute_script({std::string(kMaxSqlBytes + 1, ' ')});
-    assert(oversized.outcomes.size() == 1);
-    const auto* oversized_error = std::get_if<Error>(&oversized.outcomes[0].outcome);
-    assert(oversized_error != nullptr);
-    assert(oversized_error->kind == ErrorKind::kCompile);
-    assert(oversized_error->location.has_value());
-    assert(oversized_error->location->line == 1 && oversized_error->location->column == 1);
+    assert(oversized.statements.empty());
+    assert(oversized.script_error.has_value());
+    assert(oversized.script_error->kind == ErrorKind::kCompile);
+    assert(oversized.script_error->compile_stage.has_value() &&
+           *oversized.script_error->compile_stage == CompileStage::kLex);
+    assert(oversized.script_error->source.has_value());
+    assert(oversized.script_error->source->begin.line == 1 &&
+           oversized.script_error->source->begin.column == 1 &&
+           oversized.script_error->source->begin_offset == 0 &&
+           oversized.script_error->source->end_offset == 0);
     const auto valid_after_oversized = database.execute_script({"SELECT * FROM student;"});
-    assert(valid_after_oversized.outcomes.size() == 1);
-    assert(std::holds_alternative<QueryResult>(valid_after_oversized.outcomes[0].outcome));
+    assert(valid_after_oversized.statements.size() == 1);
+    assert(std::holds_alternative<QueryResult>(outcome_of(valid_after_oversized).outcome));
 
     const auto inserted = database.execute_script(
         {"INSERT INTO student VALUES (1, 'Alice'), (2, 'Bob');"});
-    assert(inserted.outcomes.size() == 1);
-    assert(command_of(inserted.outcomes[0]).affected_rows == 2);
+    assert(inserted.statements.size() == 1);
+    assert(command_of(outcome_of(inserted)).affected_rows == 2);
 
     const auto reordered = database.execute_script(
         {"INSERT INTO student(name, id) VALUES ('Carol', 3);"});
-    assert(reordered.outcomes.size() == 1 && command_of(reordered.outcomes[0]).affected_rows == 1);
+    assert(reordered.statements.size() == 1 &&
+           command_of(outcome_of(reordered)).affected_rows == 1);
 
     const auto selected = database.execute_script(
         {"SELECT name FROM student WHERE id = 1;"});
-    assert(selected.outcomes.size() == 1);
-    const auto& rows = query_of(selected.outcomes[0]);
+    assert(selected.statements.size() == 1);
+    const auto& rows = query_of(outcome_of(selected));
     assert(rows.columns.size() == 1 && rows.columns[0].name == "name");
     assert(rows.rows.size() == 1 && std::get<std::string>(rows.rows[0][0].data) == "Alice");
 
     const auto logical = database.execute_script(
         {"SELECT id FROM student WHERE NOT id = 2 AND (name = 'Alice' OR name = 'Nobody');"});
-    assert(logical.outcomes.size() == 1 && query_of(logical.outcomes[0]).rows.size() == 1);
+    assert(logical.statements.size() == 1 && query_of(outcome_of(logical)).rows.size() == 1);
 
     const auto deleted = database.execute_script(
         {"DELETE FROM student WHERE id = 2; SELECT * FROM student;"});
-    assert(deleted.outcomes.size() == 2);
-    assert(command_of(deleted.outcomes[0]).affected_rows == 1);
-    const auto& remaining = query_of(deleted.outcomes[1]);
+    assert(deleted.statements.size() == 2);
+    assert(deleted.statements[0].status() == StatementStatus::kExecuted);
+    assert(deleted.statements[1].status() == StatementStatus::kExecuted);
+    assert(command_of(outcome_of(deleted, 0)).affected_rows == 1);
+    const auto& remaining = query_of(outcome_of(deleted, 1));
     assert(remaining.rows.size() == 2);
     assert(std::get<std::int32_t>(remaining.rows[0][0].data) == 1);
 
@@ -93,7 +111,8 @@ int main() {
     Database reopened;
     assert(!reopened.open({data_dir.string()}).error);
     const auto persistent = reopened.execute_script({"SELECT * FROM student;"});
-    assert(persistent.outcomes.size() == 1 && query_of(persistent.outcomes[0]).rows.size() == 2);
+    assert(persistent.statements.size() == 1 &&
+           query_of(outcome_of(persistent)).rows.size() == 2);
     assert(!reopened.close().error);
 
     const auto cleanup_dir = temporary_database_path();

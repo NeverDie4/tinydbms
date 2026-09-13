@@ -118,8 +118,9 @@ std::string make_payload(std::int32_t id) {
 
 bool execute_command(Database& database, std::string script, std::uint64_t expected_affected_rows) {
     const auto executed = database.execute_script(ExecuteScriptRequest{std::move(script)});
-    CHECK(executed.outcomes.size() == 1);
-    const auto* command = std::get_if<CommandResult>(&executed.outcomes.front().outcome);
+    CHECK(executed.statements.size() == 1);
+    const auto* command =
+        std::get_if<CommandResult>(&executed.statements.front().outcome()->outcome);
     CHECK(command != nullptr);
     CHECK(!command->error.has_value());
     CHECK(command->affected_rows == expected_affected_rows);
@@ -128,8 +129,9 @@ bool execute_command(Database& database, std::string script, std::uint64_t expec
 
 bool expect_rows(Database& database, const std::string& script, const ExpectedRows& expected) {
     const auto executed = database.execute_script(ExecuteScriptRequest{script});
-    CHECK(executed.outcomes.size() == 1);
-    const auto* query = std::get_if<QueryResult>(&executed.outcomes.front().outcome);
+    CHECK(executed.statements.size() == 1);
+    const auto* query =
+        std::get_if<QueryResult>(&executed.statements.front().outcome()->outcome);
     CHECK(query != nullptr);
     CHECK(query->columns.size() == 2);
     CHECK(query->rows.size() == expected.size());
@@ -271,7 +273,9 @@ bool test_batch_stops_on_compile_error() {
         false);
     CHECK(failed.exit_code == 1);
     CHECK(failed.output.empty());
-    CHECK(failed.error.rfind("ERROR compile 1:8 ", 0) == 0);
+    // 诊断升级后保留语义阶段标签和脚本绝对范围，首错后的语句被跳过。
+    CHECK(failed.error.rfind("ERROR semantic 1:", 0) == 0);
+    CHECK(failed.error.find("SKIPPED 2:") != std::string::npos);
 
     const InvocationResult persisted = invoke_cli(data_dir.path(), "SELECT * FROM items;\n", false);
     CHECK(persisted.exit_code == 0);
@@ -321,7 +325,8 @@ bool test_batch_reports_semantic_error() {
     CHECK(duplicated.exit_code == 1);
     CHECK(duplicated.output.empty());
     // 重复建表由 compiler 语义阶段拒绝，位置由 core 换算为整段输入坐标。
-    CHECK(duplicated.error.rfind("ERROR compile 1:14 ", 0) == 0);
+    CHECK(duplicated.error.rfind("ERROR semantic 1:", 0) == 0);
+    CHECK(duplicated.error.find("SKIPPED 2:") != std::string::npos);
 
     const InvocationResult persisted =
         invoke_cli(data_dir.path(), "SELECT * FROM items;\n", false);
@@ -369,27 +374,25 @@ bool test_batch_reports_storage_error_and_stops() {
     return true;
 }
 
-bool test_repl_recovers_after_oversized_input() {
+bool test_repl_stops_after_oversized_input() {
     TemporaryDirectory data_dir{"tinydbms-integration-repl"};
     std::string input(tinydbms::kMaxSqlBytes + 1, ' ');
     input += "\n";
     input += "CREATE TABLE recovered (id INT);\n";
-    input += "INSERT INTO recovered VALUES (7);\n";
-    input += "SELECT * FROM recovered;\n";
 
     const InvocationResult result = invoke_cli(data_dir.path(), std::move(input), true);
     CHECK(result.exit_code == 1);
-    CHECK(result.output == "OK 0\nOK 1\nid\n7\n");
+    // script_error 是 REPL 致命错误：停止读取后续输入，也不执行任何语句。
+    CHECK(result.output.empty());
     CHECK(
-        result.error.find("ERROR compile 1:1 SQL text exceeds maximum length\n") !=
+        result.error.find("ERROR compile 1:1-1:1 SQL text exceeds maximum length\n") !=
         std::string::npos);
     CHECK(result.error.find("tinydbms> ") != std::string::npos);
 
     const InvocationResult reopened =
         invoke_cli(data_dir.path(), "SELECT * FROM recovered;\n", false);
-    CHECK(reopened.exit_code == 0);
-    CHECK(reopened.error.empty());
-    CHECK(reopened.output == "id\n7\n");
+    CHECK(reopened.exit_code == 1);
+    CHECK(reopened.output.empty());
     return true;
 }
 
@@ -417,7 +420,7 @@ int main() {
                 test_utf8_data_directory_lifecycle() &&
                 test_batch_reports_semantic_error() &&
                 test_batch_reports_storage_error_and_stops() &&
-                test_repl_recovers_after_oversized_input() &&
+                test_repl_stops_after_oversized_input() &&
                 test_open_error_has_storage_exit_status() &&
                 test_sql_multipage_restart_acceptance()
             ? 0

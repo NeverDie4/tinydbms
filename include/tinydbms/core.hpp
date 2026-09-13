@@ -1,14 +1,17 @@
 #ifndef TINYDBMS_CORE_HPP
 #define TINYDBMS_CORE_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "tinydbms/common.hpp"
+#include "tinydbms/diagnostic.hpp"
 
 namespace tinydbms::core {
 
@@ -28,14 +31,17 @@ enum class ErrorKind {
     kCompile,
     kExecute,
     kStorage,
+    kAnalysis,
     kInternal
 };
 
 struct Error {
     ErrorKind kind;
-    // 仅编译错误携带；已由 core 换算为整段输入的绝对位置
-    std::optional<SourceLocation> location;
+    std::optional<CompileStage> compile_stage;  // 仅 kCompile 携带
+    std::optional<SourceRange> source;          // 脚本绝对范围；无法定位时为空
     std::string message;
+    std::optional<std::string> suggestion;      // 仅 kCompile 可能携带
+    std::optional<FixIt> fix_it;                // 仅 kCompile 可能携带
 };
 
 struct CommandResult {
@@ -47,6 +53,197 @@ struct CommandResult {
 
 struct ExecuteResult {
     std::variant<QueryResult, CommandResult, Error> outcome;
+};
+
+// 脚本策略：默认在第一条错误后停止，analyze 仅在显式请求时继续静态分析。
+enum class ScriptErrorPolicy {
+    kStopOnFirstError,
+    kAnalyzeRemaining
+};
+
+enum class StatementStatus {
+    kExecuted,
+    kCompileError,
+    kExecutionError,
+    kExecutionIndeterminate,
+    kAnalysisError,
+    kAnalysisOnly,
+    kSkippedExecution
+};
+
+inline constexpr std::size_t kMaxStatementsPerScript = 4096;
+
+namespace detail {
+
+[[noreturn]] inline void invalid_statement_result(const char* message) {
+    throw std::invalid_argument{message};
+}
+
+inline const ExecuteResult* outcome_pointer(
+    const std::optional<ExecuteResult>& outcome) noexcept {
+    return outcome.has_value() ? &*outcome : nullptr;
+}
+
+inline bool is_error_kind(const ExecuteResult& outcome, ErrorKind kind) noexcept {
+    const Error* error = std::get_if<Error>(&outcome.outcome);
+    return error != nullptr && error->kind == kind;
+}
+
+inline bool is_execution_error_kind(ErrorKind kind) noexcept {
+    return kind == ErrorKind::kExecute || kind == ErrorKind::kStorage;
+}
+
+inline bool carries_execution_error(const ExecuteResult& outcome) noexcept {
+    if (const Error* error = std::get_if<Error>(&outcome.outcome); error != nullptr) {
+        return is_execution_error_kind(error->kind);
+    }
+    const CommandResult* command = std::get_if<CommandResult>(&outcome.outcome);
+    return command != nullptr && command->error.has_value() &&
+        is_execution_error_kind(command->error->kind);
+}
+
+// 工厂的唯一职责是拒绝“状态与 outcome 组合”错误；这里抛出的异常属于实现缺陷，
+// 不应作为正常业务错误被调用方捕获。
+inline void validate_statement_result(
+    StatementStatus status,
+    const std::optional<ExecuteResult>& outcome) {
+    const ExecuteResult* value = outcome_pointer(outcome);
+    switch (status) {
+    case StatementStatus::kExecuted:
+        if (value == nullptr) {
+            invalid_statement_result("kExecuted requires an outcome");
+        }
+        if (std::holds_alternative<QueryResult>(value->outcome)) {
+            return;
+        }
+        if (const CommandResult* command = std::get_if<CommandResult>(&value->outcome);
+            command != nullptr && !command->error.has_value()) {
+            return;
+        }
+        invalid_statement_result("kExecuted must carry a result without an error");
+    case StatementStatus::kCompileError:
+        if (value == nullptr || !is_error_kind(*value, ErrorKind::kCompile)) {
+            invalid_statement_result("kCompileError requires a kCompile error");
+        }
+        return;
+    case StatementStatus::kExecutionError:
+        if (value == nullptr || !carries_execution_error(*value)) {
+            invalid_statement_result("kExecutionError requires a kExecute or kStorage error");
+        }
+        return;
+    case StatementStatus::kAnalysisError:
+        if (value == nullptr || !is_error_kind(*value, ErrorKind::kAnalysis)) {
+            invalid_statement_result("kAnalysisError requires a kAnalysis error");
+        }
+        return;
+    case StatementStatus::kExecutionIndeterminate:
+    case StatementStatus::kAnalysisOnly:
+    case StatementStatus::kSkippedExecution:
+        if (value != nullptr) {
+            invalid_statement_result("status must not carry an outcome");
+        }
+        return;
+    }
+    invalid_statement_result("unknown statement status");
+}
+
+}  // namespace detail
+
+// 逐语句结果只能经命名工厂构造，字段私有且只读。
+class StatementResult {
+public:
+    static StatementResult executed(
+        std::size_t statement_index,
+        SourceRange source,
+        ExecuteResult outcome) {
+        std::optional<ExecuteResult> wrapped{std::move(outcome)};
+        detail::validate_statement_result(StatementStatus::kExecuted, wrapped);
+        return StatementResult{
+            statement_index, source, StatementStatus::kExecuted, std::move(wrapped)};
+    }
+
+    static StatementResult compile_error(
+        std::size_t statement_index,
+        SourceRange source,
+        Error error) {
+        std::optional<ExecuteResult> wrapped{ExecuteResult{std::move(error)}};
+        detail::validate_statement_result(StatementStatus::kCompileError, wrapped);
+        return StatementResult{
+            statement_index, source, StatementStatus::kCompileError, std::move(wrapped)};
+    }
+
+    static StatementResult execution_error(
+        std::size_t statement_index,
+        SourceRange source,
+        ExecuteResult outcome) {
+        std::optional<ExecuteResult> wrapped{std::move(outcome)};
+        detail::validate_statement_result(StatementStatus::kExecutionError, wrapped);
+        return StatementResult{
+            statement_index, source, StatementStatus::kExecutionError, std::move(wrapped)};
+    }
+
+    static StatementResult execution_indeterminate(
+        std::size_t statement_index,
+        SourceRange source) {
+        return StatementResult{
+            statement_index, source, StatementStatus::kExecutionIndeterminate, std::nullopt};
+    }
+
+    static StatementResult analysis_error(
+        std::size_t statement_index,
+        SourceRange source,
+        Error error) {
+        std::optional<ExecuteResult> wrapped{ExecuteResult{std::move(error)}};
+        detail::validate_statement_result(StatementStatus::kAnalysisError, wrapped);
+        return StatementResult{
+            statement_index, source, StatementStatus::kAnalysisError, std::move(wrapped)};
+    }
+
+    static StatementResult analysis_only(
+        std::size_t statement_index,
+        SourceRange source) {
+        return StatementResult{
+            statement_index, source, StatementStatus::kAnalysisOnly, std::nullopt};
+    }
+
+    static StatementResult skipped(
+        std::size_t statement_index,
+        SourceRange source) {
+        return StatementResult{
+            statement_index, source, StatementStatus::kSkippedExecution, std::nullopt};
+    }
+
+    std::size_t statement_index() const noexcept {
+        return statement_index_;
+    }
+
+    const SourceRange& source() const noexcept {
+        return source_;
+    }
+
+    StatementStatus status() const noexcept {
+        return status_;
+    }
+
+    const std::optional<ExecuteResult>& outcome() const noexcept {
+        return outcome_;
+    }
+
+private:
+    StatementResult(
+        std::size_t statement_index,
+        SourceRange source,
+        StatementStatus status,
+        std::optional<ExecuteResult> outcome)
+        : statement_index_{statement_index},
+          source_{source},
+          status_{status},
+          outcome_{std::move(outcome)} {}
+
+    std::size_t statement_index_;
+    SourceRange source_;
+    StatementStatus status_;
+    std::optional<ExecuteResult> outcome_;
 };
 
 struct OpenDatabaseRequest {
@@ -63,11 +260,14 @@ struct CloseDatabaseResult {
 
 struct ExecuteScriptRequest {
     std::string text;  // REPL 一行，或 stdin 批处理的整段文本
+    ScriptErrorPolicy error_policy{ScriptErrorPolicy::kStopOnFirstError};
 };
 
 struct ExecuteScriptResult {
-    // 每条已尝试语句一个结果；遇到错误后停止，剩余语句不执行
-    std::vector<ExecuteResult> outcomes;
+    // 分句失败、语句数超限或致命中止时非空；普通语句错误进入 statements。
+    std::optional<Error> script_error;
+    // 分句成功后覆盖全部已识别语句，按 statement_index 升序且连续。
+    std::vector<StatementResult> statements;
 };
 
 // core 对入口与测试暴露的有状态对象；每个实例持有自己的 Catalog 与生命周期状态

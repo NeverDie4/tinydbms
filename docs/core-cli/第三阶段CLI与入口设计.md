@@ -99,6 +99,7 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --help：打印帮助并退出；
 - --version：打印版本并退出；
 - --data-dir DIR：指定 UTF-8 数据目录，最多出现一次；
+- --error-policy stop|analyze：脚本错误策略，最多出现一次；默认 stop；
 - 未提供 --data-dir 时，使用 ./tinydbms-data。
 
 --help 或 --version 单独出现时立即成功退出，不创建 Database，也不访问 data_dir。
@@ -113,6 +114,7 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --data-dir 后的值为空；
 - --data-dir 后紧邻另一个 `--` 选项，未提供目录值；
 - --data-dir 重复出现；
+- --error-policy 缺少值、值为空、未知值或重复出现；
 - --help/--version 与其他参数混用。
 
 不支持位置参数、短选项、`--data-dir=DIR` 或未列出的 `--` 变体；它们均按未知参数处理。
@@ -142,8 +144,9 @@ Linux 直接把 UTF-8 字符串传给 core。Windows 入口使用宽字符参数
 
 - 读取成功后把原文完整交给 core；
 - 输入读取发生非 EOF 错误时返回退出码 1；
-- core 返回的 outcomes 按顺序展示；
-- core 在第一条错误后停止后续 SQL，app 不自行继续执行剩余文本；
+- core 返回的 statements 按顺序展示；script_error 插在首条 kSkippedExecution 之前；
+- 默认 stop 策略在首错后停止剩余 SQL；analyze 策略下 core 继续静态分析但不执行，
+  app 不自行执行剩余文本；
 - 展示完成后调用一次 close，再根据 close 结果确定最终退出码。
 
 ### 4.3 REPL
@@ -152,9 +155,10 @@ REPL 循环使用 getline 读取一行，每读到一行调用一次 execute_scr
 
 1. 读取一行；
 2. 调用 core；
-3. 按顺序展示 outcomes；
-4. 若有 Error 或携带 error 的 CommandResult，设置累计错误标记；
-5. 继续读取下一行。
+3. 按顺序展示 statements 与 script_error；
+4. 结构化错误（编译/执行/分析）设置累计错误标记；任何 script_error 按致命处理：
+   停止读取后续输入并进入 best-effort close；
+5. 否则继续读取下一行。
 
 读到 EOF 后退出循环并调用 close。非 EOF 的输入错误设置累计错误标记，但仍应尝试
 执行 close。REPL 不提供 quit、help 等 SQL 之外的元命令。
@@ -191,22 +195,33 @@ best-effort close。`runner` 对 open 成功的 Session 保证最多调用一次
 ### 6.1 展示原则
 
 展示器只读取结构化结果，不根据 message 文本推断错误种类，不重新解析 SQL。
-同一 ExecuteScriptResult 中的 outcomes 保持原顺序。
+同一 ExecuteScriptResult 中的 statements 保持原顺序；script_error 固定插在首条
+`kSkippedExecution` 之前，批处理与 REPL 共用同一展示逻辑。
 
 ### 6.2 初版稳定格式
 
 为了便于脚本测试，初版采用简单的制表符格式：
 
-- CommandResult：stdout 输出 `OK `、affected_rows 和换行；
-- QueryResult：第一行输出列名，以制表符分隔；后续每行输出对应 Value，以制表符分隔；
+- `kExecuted` + CommandResult：stdout 输出 `OK `、affected_rows 和换行；
+- `kExecuted` + QueryResult：第一行输出列名，以制表符分隔；后续每行输出对应 Value，以制表符分隔；
 - 空结果仍输出列头，不额外输出“无结果”文本；
 - INT 按十进制输出；
 - VARCHAR 输出 UTF-8 文本；反斜杠、制表符、换行和回车分别编码为 `\\`、`\\t`、`\\n`、`\\r`，
   保证一行一个结果记录且不破坏制表符分隔；
-- Error：stderr 输出 `ERROR <kind> <message>\\n`；编译错误在 kind 后先输出
-  `line:column` 和一个空格，即 `ERROR compile 2:3 <message>\\n`，其他错误例如
-  `ERROR storage <message>\\n`。kind 固定为 `compile`、`execute`、`storage` 或 `internal`；
-  错误消息使用与 VARCHAR 相同的单行转义。
+- 范围格式固定为 `line:column-line:column`（半开区间，来自 SourceRange 的 begin/end）；
+- 语句级错误（`kCompileError`/`kExecutionError`/`kAnalysisError`）：stderr 输出
+  `ERROR <label> <range> <message>\\n`。label 固定为：编译错误的 `lex`/`syntax`/`semantic`
+  （取自 CompileStage），以及 `execute`/`storage`/`analysis`；
+- `script_error`：stderr 输出 `ERROR <kind> <range?> <message>\\n`，kind 为
+  `compile`/`execute`/`storage`/`analysis`/`internal`；有 source 时输出范围，
+  空插入点渲染为 `1:1-1:1`，无 source（moved-from/unopened）时省略范围；
+- suggestion：`SUGGESTION <message>\\n`；
+- fix-it：`FIX <range> <replacement>\\n`；
+- `kAnalysisOnly`：stderr 输出 `ANALYZED <range>\\n`，不输出 OK 或查询行；
+- `kSkippedExecution`：stderr 输出 `SKIPPED <range> policy|aborted\\n`；本次脚本存在
+  script_error 时为 `aborted`，仅因策略跳过时为 `policy`；
+- `kExecutionIndeterminate`：stderr 输出 `INDETERMINATE <range>\\n`；
+- 以上诊断文本（message/suggestion/replacement）使用与 VARCHAR 相同的单行转义。
 
 CREATE TABLE 成功时 affected_rows 为 0。携带 error 的 CommandResult 先输出已完成的
 affected_rows，再输出对应错误，并把本次入口状态标记为失败。
@@ -220,8 +235,13 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 退出码固定为：
 
 - 0：参数、输入、SQL 执行和 close 全部成功；
-- 1：open/close 失败、SQL 编译/执行失败、storage 错误或输入输出错误；
+- 1：open/close 失败、SQL 编译/执行失败、分析错误、storage 错误、输入输出错误，
+  以及任何 script_error（分句失败、语句数超限、致命中止）；
 - 2：命令行参数错误。
+
+`kAnalyzeRemaining` 中后续语句分析成功不能把退出码从 1 恢复为 0；`kAnalysisOnly`、
+`kSkippedExecution`、`kExecutionIndeterminate` 行本身不改变退出码，因为致命中止必然伴随
+`script_error`。
 
 优先级如下：
 
@@ -229,7 +249,8 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 2. 参数成功但 open 失败返回 1；
 3. open 成功后，任何 execute_script、读取或展示错误都累计为失败；
 4. close 失败也返回 1；
-5. REPL 遇到 SQL 错误继续读取，EOF 后按累计错误标记和 close 结果返回；
+5. REPL 遇到结构化错误继续读取；遇到任何 script_error 停止读取后续输入并 best-effort close，
+   EOF 或停止后按累计错误标记和 close 结果返回；
 6. 批处理遇到错误不重复执行剩余 SQL，但仍展示 core 已返回的结果并执行 close。
 
 ## 8. CLI 测试设计
@@ -239,14 +260,21 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 以下测试不依赖真实 compiler/storage：
 
 - help/version 参数的成功路径；
-- 未知参数、缺少值、重复 data_dir、空值和参数混用；
+- 未知参数、缺少值、重复 data_dir、空值和参数混用；--error-policy 的默认值、合法值、
+  缺值、空值、未知值和重复值；
 - 解析结果和默认 data_dir；
 - 批处理与 REPL 的模式判定；
 - 不输出 REPL 提示符的批处理路径；
-- QueryResult、CommandResult、Error 的格式化，包括制表符/换行/反斜杠转义；
+- QueryResult、CommandResult 与七态 StatementStatus 的 stdout/stderr 分流，包括
+  制表符/换行/反斜杠转义；kAnalysisOnly 与 kSkippedExecution 不输出 OK 或查询行；
+- SKIPPED（policy/aborted）、INDETERMINATE 与 script_error 的插入顺序和 stderr 归属；
+- 语句级 lex/syntax/semantic、执行/存储、analysis 标签与范围格式；脚本级 compile/internal
+  标签与空插入点；suggestion、fix-it 与单行转义；
+- CommandResult 部分成功时 stdout 的 `OK <affected_rows>` 与 stderr 错误行的顺序；
 - FakeSession 的 open/execute/close 调用顺序与“最多 close 一次”约束；
-- 批处理遇错停止、REPL 遇错继续、close 失败覆盖成功码但不改变既有失败码；
-- 输入读取失败、输出写入失败和异常转换为退出码 1。
+- 批处理遇错停止、首错后继续分析但最终退出码仍为 1、REPL 结构化错误后继续、
+  script_error 后停止读取并 best-effort close、close 失败覆盖成功码但不改变既有失败码；
+- 输入读取失败、输出写入失败、bad_alloc 与异常转换为退出码 1。
 
 这类测试使用注入的输入流、输出流、交互模式和 FakeSession，不构造真实数据库文件，也不链接
 真实 compiler/storage。
@@ -303,6 +331,8 @@ UTF-8 VARCHAR 展示、编译与语义错误位置、storage 运行期错误（�
 - 默认占位构建不链接可执行的 SQL 运行链路，真实模块联调必须显式启用
   `TINYDBMS_ENABLE_REAL_MODULES=ON`；
 - 参数错误返回 2，运行时错误返回 1；
+- `--error-policy` 默认 stop；analyze 只影响后续语句的静态分析，不恢复退出码、不执行后续语句；
+  任何 script_error 使 REPL 停止读取并使退出码为 1；
 - REPL 和批处理的错误继续策略符合公共契约；
 - runner 在所有 open 成功路径上最多显式调用一次 close；若 core 的 close_storage 自身抛异常，
   core 允许在后续 close 或 Database 析构中做一次清理重试；

@@ -123,7 +123,10 @@ bool test_real_compiler_error_stops_before_storage_execution() {
 
     CHECK(result.exit_code == 1);
     CHECK(result.output == "OK 0\n");
-    CHECK(result.error.rfind("ERROR compile 2:8 ", 0) == 0);
+    // 诊断升级后语义错误保留阶段标签、脚本绝对范围和跳过提示。
+    CHECK(result.error.rfind("ERROR semantic 2:", 0) == 0);
+    CHECK(result.error.find("SKIPPED 3:") != std::string::npos);
+    CHECK(result.error.find(" policy\n") != std::string::npos);
 
     const State& state = tinydbms::testing::fake_storage::state();
     CHECK(state.create_table_calls == 1);
@@ -191,11 +194,10 @@ bool test_core_session_retries_failed_close() {
 
     const auto after_close =
         session.execute_script(tinydbms::core::ExecuteScriptRequest{"SELECT * FROM students;"});
-    CHECK(after_close.outcomes.size() == 1);
-    const auto* error = std::get_if<tinydbms::core::Error>(&after_close.outcomes.front().outcome);
-    CHECK(error != nullptr);
-    CHECK(error->kind == tinydbms::core::ErrorKind::kExecute);
-    CHECK(error->message == "session is not open");
+    CHECK(after_close.statements.empty());
+    CHECK(after_close.script_error.has_value());
+    CHECK(after_close.script_error->kind == tinydbms::core::ErrorKind::kExecute);
+    CHECK(after_close.script_error->message == "session is not open");
     return true;
 }
 

@@ -25,8 +25,23 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
         return make_error("invalid command-line arguments");
     }
 
-    ParsedArguments result{CliAction::kRun, std::string{kDefaultDataDir}};
+    ParsedArguments result;
+    result.data_dir = std::string{kDefaultDataDir};
     bool data_dir_seen = false;
+    bool error_policy_seen = false;
+
+    const auto take_value = [&](int index, std::string_view option, std::string& message) {
+        if (index + 1 >= argc || argv[index + 1] == nullptr || argv[index + 1][0] == '\0') {
+            message = std::string{option} + " requires a non-empty value";
+            return false;
+        }
+        const std::string_view value{argv[index + 1]};
+        if (value.size() >= 2 && value[0] == '-' && value[1] == '-') {
+            message = std::string{option} + " requires a non-empty value";
+            return false;
+        }
+        return true;
+    };
 
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) {
@@ -48,6 +63,26 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
             result.action = CliAction::kVersion;
             return result;
         }
+        if (argument == "--error-policy") {
+            if (error_policy_seen) {
+                return make_error("--error-policy may appear only once");
+            }
+            error_policy_seen = true;
+
+            std::string message;
+            if (!take_value(index, "--error-policy", message)) {
+                return make_error(std::move(message));
+            }
+            const std::string_view value{argv[++index]};
+            if (value == "stop") {
+                result.error_policy = ErrorPolicy::kStop;
+            } else if (value == "analyze") {
+                result.error_policy = ErrorPolicy::kAnalyze;
+            } else {
+                return make_error("--error-policy must be stop or analyze");
+            }
+            continue;
+        }
         if (argument != "--data-dir") {
             return make_error("unknown command-line argument");
         }
@@ -56,12 +91,9 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
         }
         data_dir_seen = true;
 
-        if (index + 1 >= argc || argv[index + 1] == nullptr || argv[index + 1][0] == '\0') {
-            return make_error("--data-dir requires a non-empty value");
-        }
-        const std::string_view value{argv[index + 1]};
-        if (value.size() >= 2 && value[0] == '-' && value[1] == '-') {
-            return make_error("--data-dir requires a non-empty value");
+        std::string message;
+        if (!take_value(index, "--data-dir", message)) {
+            return make_error(std::move(message));
         }
         result.data_dir = argv[++index];
     }
@@ -70,10 +102,12 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
 }
 
 bool write_help(std::ostream& output) {
-    output << "Usage: tinydbms [--help|--version|--data-dir DIR]\n"
+    output << "Usage: tinydbms [--help|--version|--data-dir DIR|--error-policy stop|analyze]\n"
            << "\n"
            << "Read SQL from an interactive terminal or stdin.\n"
-           << "Default data directory: " << kDefaultDataDir << "\n";
+           << "Default data directory: " << kDefaultDataDir << "\n"
+           << "Default error policy: stop (analyze only inspects later statements;"
+              " it never executes them).\n";
     return static_cast<bool>(output);
 }
 

@@ -211,6 +211,7 @@ ExecuteResult Database::Impl::execute_create_table(
 
     storage::CreateTableResult created;
     try {
+        current_plan_storage_called = true;
         created = storage::create_table(storage::CreateTableRequest{
             candidate_id,
             plan.table_name,
@@ -289,6 +290,7 @@ ExecuteResult Database::Impl::execute_insert(
 
     storage::InsertResult inserted;
     try {
+        current_plan_storage_called = true;
         inserted = storage::insert(storage::InsertRequest{
             plan.table_id,
             std::move(physical_rows)});
@@ -342,6 +344,7 @@ ExecuteResult Database::Impl::execute_delete(
 
     storage::OpenTableResult opened;
     try {
+        current_plan_storage_called = true;
         opened = storage::open_table(storage::OpenTableRequest{plan.table_id});
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
@@ -560,6 +563,7 @@ ExecuteResult Database::Impl::execute_query(
 
     storage::OpenTableResult opened;
     try {
+        current_plan_storage_called = true;
         opened = storage::open_table(storage::OpenTableRequest{query.table->table_id});
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
@@ -634,6 +638,7 @@ ExecuteResult Database::Impl::execute_plan_impl(compiler::Plan plan) {
         return internal::make_execute_error(ErrorKind::kExecute, "database is not open");
     }
 
+    current_plan_storage_called = false;
     try {
         return std::visit(
             [this](auto&& typed_plan) -> ExecuteResult {

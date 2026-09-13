@@ -28,6 +28,47 @@ static_assert(!std::is_default_constructible_v<SplitStatementsResult>);
 static_assert(std::is_move_constructible_v<SplitStatementsResult>);
 static_assert(!std::is_copy_constructible_v<SplitStatementsResult>);
 
+// 诊断类型：半开范围与阶段枚举取代旧的 CompileErrorKind。
+static_assert(std::is_same_v<
+    decltype(std::declval<SourceRange&>().begin_offset),
+    std::size_t>);
+static_assert(!std::is_enum_v<SourceRange>);
+static_assert(std::is_enum_v<CompileStage>);
+
+// 逐语句结果只能经命名工厂构造，禁止默认构造与聚合初始化。
+static_assert(!std::is_default_constructible_v<core::StatementResult>);
+static_assert(!std::is_aggregate_v<core::StatementResult>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::executed(
+        std::declval<std::size_t>(),
+        std::declval<SourceRange>(),
+        std::declval<core::ExecuteResult>())),
+    core::StatementResult>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::execution_error(
+        std::declval<std::size_t>(),
+        std::declval<SourceRange>(),
+        std::declval<core::ExecuteResult>())),
+    core::StatementResult>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::skipped(
+        std::declval<std::size_t>(),
+        std::declval<SourceRange>())),
+    core::StatementResult>);
+static_assert(std::is_same_v<
+    decltype(std::declval<const core::StatementResult&>().status()),
+    core::StatementStatus>);
+static_assert(std::is_same_v<
+    decltype(std::declval<const core::StatementResult&>().outcome()),
+    const std::optional<core::ExecuteResult>&>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(std::declval<const core::Error&>().source)>,
+    std::optional<SourceRange>>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(std::declval<const core::Error&>().compile_stage)>,
+    std::optional<CompileStage>>);
+static_assert(core::kMaxStatementsPerScript == 4096);
+
 static_assert(std::is_move_constructible_v<core::Database>);
 static_assert(!std::is_copy_constructible_v<core::Database>);
 
@@ -97,15 +138,25 @@ int main() {
 
     Plan plan{std::move(query)};
     CompileResult ok{std::move(plan)};
-    CompileResult err{CompileError{CompileErrorKind::kSyntax, SourceLocation{1, 1}, "syntax error"}};
+    CompileResult err{CompileError{
+        CompileStage::kSyntax,
+        SourceRange{SourceLocation{1, 1}, SourceLocation{1, 1}, 0, 0},
+        "syntax error",
+        std::nullopt,
+        std::nullopt}};
 
     storage::Record record{storage::RecordId{1}, std::vector<Value>{}};
     core::ExecuteResult result;
     result.outcome = core::CommandResult{0, std::nullopt};
 
+    const SourceRange range{SourceLocation{1, 1}, SourceLocation{1, 1}, 0, 0};
+    core::StatementResult statement =
+        core::StatementResult::skipped(0, range);
+
     (void)ok;
     (void)err;
     (void)record;
     (void)result;
+    (void)statement;
     return 0;
 }

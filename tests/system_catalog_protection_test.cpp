@@ -56,10 +56,10 @@ private:
 
 std::optional<QueryResult> query(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1) {
         return std::nullopt;
     }
-    if (const auto* query_result = std::get_if<QueryResult>(&result.outcomes.front().outcome)) {
+    if (const auto* query_result = std::get_if<QueryResult>(&result.statements.front().outcome()->outcome)) {
         return *query_result;
     }
     return std::nullopt;
@@ -67,20 +67,22 @@ std::optional<QueryResult> query(Database& database, const std::string& sql) {
 
 bool command_failed(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1) {
         return false;
     }
-    const auto* command = std::get_if<CommandResult>(&result.outcomes.front().outcome);
-    return std::holds_alternative<tinydbms::core::Error>(result.outcomes.front().outcome) ||
+    const auto& outcome = *result.statements.front().outcome();
+    const auto* command = std::get_if<CommandResult>(&outcome.outcome);
+    return std::holds_alternative<tinydbms::core::Error>(outcome.outcome) ||
         (command != nullptr && command->error.has_value());
 }
 
 bool command_succeeded(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1) {
         return false;
     }
-    const auto* command = std::get_if<CommandResult>(&result.outcomes.front().outcome);
+    const auto* command =
+        std::get_if<CommandResult>(&result.statements.front().outcome()->outcome);
     return command != nullptr && !command->error.has_value();
 }
 

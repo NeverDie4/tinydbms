@@ -9,12 +9,15 @@ tinydbms::core::Error unavailable_error() {
     return tinydbms::core::Error{
         tinydbms::core::ErrorKind::kInternal,
         std::nullopt,
-        "compiler/storage implementations are not available in this build"};
+        std::nullopt,
+        "compiler/storage implementations are not available in this build",
+        std::nullopt,
+        std::nullopt};
 }
 
 tinydbms::core::ExecuteScriptResult unavailable_execute_result() {
     tinydbms::core::ExecuteScriptResult result;
-    result.outcomes.push_back(tinydbms::core::ExecuteResult{unavailable_error()});
+    result.script_error = unavailable_error();
     return result;
 }
 

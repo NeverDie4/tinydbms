@@ -42,6 +42,7 @@ using tinydbms::core::ExecuteResult;
 using tinydbms::core::ExecuteScriptRequest;
 using tinydbms::core::ExecuteScriptResult;
 using tinydbms::core::QueryResult;
+using tinydbms::core::StatementStatus;
 namespace fake = tinydbms::testing::fake_storage;
 namespace fake_compiler = tinydbms::testing::fake_compiler;
 
@@ -186,6 +187,34 @@ bool is_error(const ExecuteResult& result, ErrorKind kind) {
     return error != nullptr && error->kind == kind;
 }
 
+const ExecuteResult& outcome_of(const ExecuteScriptResult& script, std::size_t index = 0) {
+    return *script.statements.at(index).outcome();
+}
+
+std::size_t statement_count(const ExecuteScriptResult& script) {
+    return script.statements.size();
+}
+
+bool script_error_is(const ExecuteScriptResult& script, ErrorKind kind) {
+    return script.script_error.has_value() && script.script_error->kind == kind;
+}
+
+// 执行器未调用 Storage 就返回 kInternal：当前语句起全部 skipped。
+bool internal_abort_before_storage(
+    const ExecuteScriptResult& script,
+    std::size_t index = 0) {
+    return script_error_is(script, ErrorKind::kInternal) &&
+        script.statements.at(index).status() == StatementStatus::kSkippedExecution;
+}
+
+// 已调用 Storage（或进入 cleanup-pending）后的致命中止：物理状态无法确认。
+bool internal_abort_after_storage(
+    const ExecuteScriptResult& script,
+    std::size_t index = 0) {
+    return script_error_is(script, ErrorKind::kInternal) &&
+        script.statements.at(index).status() == StatementStatus::kExecutionIndeterminate;
+}
+
 bool test_insert_reorders_rows_before_storage() {
     Database database;
     CHECK(start_database(database));
@@ -195,8 +224,8 @@ bool test_insert_reorders_rows_before_storage() {
         insert_plan(
             {2, 0, 1},
             {{int_value(30), int_value(7), text_value("alice")}}));
-    CHECK(script.outcomes.size() == 1);
-    const CommandResult* command = command_of(script.outcomes.front());
+    CHECK(statement_count(script) == 1);
+    const CommandResult* command = command_of(outcome_of(script));
     CHECK(command != nullptr);
     CHECK(command->affected_rows == 1);
     CHECK(!command->error.has_value());
@@ -216,8 +245,8 @@ bool run_invalid_insert(Plan plan) {
     Database database;
     CHECK(start_database(database));
     const auto script = execute_plan(database, std::move(plan));
-    CHECK(script.outcomes.size() == 1);
-    CHECK(is_error(script.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(script) == 1);
+    CHECK(internal_abort_before_storage(script));
     CHECK(fake::state().insert_calls == 0);
     CHECK(close_database(database));
     return true;
@@ -256,8 +285,12 @@ bool test_insert_storage_errors_and_script_stop() {
         "must-not-run",
         {ColumnMeta{"id", Type::kInt}}});
     const auto script = execute_plans(database, std::move(results));
-    CHECK(script.outcomes.size() == 1);
-    const CommandResult* command = command_of(script.outcomes.front());
+    // stop 策略：首错语句保留部分结果，后续已识别语句全部跳过。
+    CHECK(statement_count(script) == 2);
+    CHECK(script.statements[0].status() == StatementStatus::kExecutionError);
+    CHECK(script.statements[1].status() == StatementStatus::kSkippedExecution);
+    CHECK(!script.script_error.has_value());
+    const CommandResult* command = command_of(outcome_of(script));
     CHECK(command != nullptr);
     CHECK(command->affected_rows == 1);
     CHECK(command->error.has_value());
@@ -276,8 +309,8 @@ bool test_insert_storage_errors_and_script_stop() {
             {},
             {{int_value(1), text_value("alice"), int_value(20)},
              {int_value(2), text_value("bob"), int_value(30)}}));
-    CHECK(mismatch.outcomes.size() == 1);
-    CHECK(is_error(mismatch.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(mismatch) == 1);
+    CHECK(internal_abort_after_storage(mismatch));
     CHECK(close_database(mismatch_database));
 
     Database too_many_ids;
@@ -289,8 +322,8 @@ bool test_insert_storage_errors_and_script_stop() {
     const auto too_many = execute_plan(
         too_many_ids,
         insert_plan({}, {{int_value(1), text_value("alice"), int_value(20)}}));
-    CHECK(too_many.outcomes.size() == 1);
-    CHECK(is_error(too_many.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(too_many) == 1);
+    CHECK(internal_abort_after_storage(too_many));
     CHECK(close_database(too_many_ids));
     return true;
 }
@@ -303,8 +336,8 @@ bool test_query_topologies_projection_and_expression() {
         record(3, {int_value(3), text_value("alice"), int_value(40)})}));
 
     const auto full_scan = execute_plan(database, query(scan()));
-    CHECK(full_scan.outcomes.size() == 1);
-    const QueryResult* full_result = query_of(full_scan.outcomes.front());
+    CHECK(statement_count(full_scan) == 1);
+    const QueryResult* full_result = query_of(outcome_of(full_scan));
     CHECK(full_result != nullptr);
     CHECK(full_result->columns.size() == 3);
     CHECK(full_result->columns[0].name == "id");
@@ -319,8 +352,8 @@ bool test_query_topologies_projection_and_expression() {
         std::move(predicate),
         scan()});
     const auto filtered = execute_plan(database, query(std::move(filter_root)));
-    CHECK(filtered.outcomes.size() == 1);
-    const QueryResult* filtered_result = query_of(filtered.outcomes.front());
+    CHECK(statement_count(filtered) == 1);
+    const QueryResult* filtered_result = query_of(outcome_of(filtered));
     CHECK(filtered_result != nullptr);
     CHECK(filtered_result->rows.size() == 2);
     CHECK(std::get<std::int32_t>(filtered_result->rows[0][0].data) == 1);
@@ -336,8 +369,8 @@ bool test_query_topologies_projection_and_expression() {
     const auto disjunction_result = execute_plan(
         database,
         query(std::move(disjunction_root)));
-    CHECK(disjunction_result.outcomes.size() == 1);
-    const QueryResult* disjunction_query = query_of(disjunction_result.outcomes.front());
+    CHECK(statement_count(disjunction_result) == 1);
+    const QueryResult* disjunction_query = query_of(outcome_of(disjunction_result));
     CHECK(disjunction_query != nullptr);
     CHECK(disjunction_query->rows.size() == 2);
     CHECK(std::get<std::int32_t>(disjunction_query->rows[0][0].data) == 1);
@@ -347,8 +380,8 @@ bool test_query_topologies_projection_and_expression() {
         {1, 1, 0},
         scan()});
     const auto projected = execute_plan(database, query(std::move(project_root)));
-    CHECK(projected.outcomes.size() == 1);
-    const QueryResult* projected_result = query_of(projected.outcomes.front());
+    CHECK(statement_count(projected) == 1);
+    const QueryResult* projected_result = query_of(outcome_of(projected));
     CHECK(projected_result != nullptr);
     CHECK(projected_result->columns.size() == 3);
     CHECK(projected_result->columns[0].name == "name");
@@ -370,8 +403,8 @@ bool test_query_topologies_projection_and_expression() {
         {0, 2},
         std::move(filtered_child)});
     const auto project_filter = execute_plan(database, query(std::move(project_filter_root)));
-    CHECK(project_filter.outcomes.size() == 1);
-    const QueryResult* project_filter_result = query_of(project_filter.outcomes.front());
+    CHECK(statement_count(project_filter) == 1);
+    const QueryResult* project_filter_result = query_of(outcome_of(project_filter));
     CHECK(project_filter_result != nullptr);
     CHECK(project_filter_result->rows.size() == 2);
     CHECK(std::get<std::int32_t>(project_filter_result->rows[0][0].data) == 1);
@@ -400,8 +433,8 @@ bool test_delete_collects_ids_and_allows_empty_delete() {
                 CmpOp::kEq,
                 column(0),
                 literal(int_value(2))))}));
-    CHECK(deleted.outcomes.size() == 1);
-    const CommandResult* deleted_command = command_of(deleted.outcomes.front());
+    CHECK(statement_count(deleted) == 1);
+    const CommandResult* deleted_command = command_of(outcome_of(deleted));
     CHECK(deleted_command != nullptr);
     CHECK(deleted_command->affected_rows == 2);
     CHECK(!deleted_command->error.has_value());
@@ -420,8 +453,8 @@ bool test_delete_collects_ids_and_allows_empty_delete() {
                 CmpOp::kEq,
                 column(0),
                 literal(int_value(999)))}));
-    CHECK(no_match.outcomes.size() == 1);
-    const CommandResult* no_match_command = command_of(no_match.outcomes.front());
+    CHECK(statement_count(no_match) == 1);
+    const CommandResult* no_match_command = command_of(outcome_of(no_match));
     CHECK(no_match_command != nullptr);
     CHECK(no_match_command->affected_rows == 0);
     CHECK(!no_match_command->error.has_value());
@@ -430,8 +463,8 @@ bool test_delete_collects_ids_and_allows_empty_delete() {
     CHECK(fake::state().delete_calls == 2);
 
     const auto delete_all = execute_plan(database, delete_plan(1));
-    CHECK(delete_all.outcomes.size() == 1);
-    const CommandResult* delete_all_command = command_of(delete_all.outcomes.front());
+    CHECK(statement_count(delete_all) == 1);
+    const CommandResult* delete_all_command = command_of(outcome_of(delete_all));
     CHECK(delete_all_command != nullptr);
     CHECK(delete_all_command->affected_rows == 1);
     CHECK(!delete_all_command->error.has_value());
@@ -454,8 +487,8 @@ bool test_invalid_predicate_is_rejected_before_open_table() {
                 CmpOp::kEq,
                 column(0),
                 literal(text_value("not an int")))}));
-    CHECK(invalid_delete.outcomes.size() == 1);
-    CHECK(is_error(invalid_delete.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_delete) == 1);
+    CHECK(internal_abort_before_storage(invalid_delete));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(fake::state().delete_calls == 0);
 
@@ -463,8 +496,8 @@ bool test_invalid_predicate_is_rejected_before_open_table() {
         compare(CmpOp::kEq, column(0), literal(text_value("not an int"))),
         scan()});
     const auto invalid_query = execute_plan(database, query(std::move(invalid_filter)));
-    CHECK(invalid_query.outcomes.size() == 1);
-    CHECK(is_error(invalid_query.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_query) == 1);
+    CHECK(internal_abort_before_storage(invalid_query));
     CHECK(fake::state().open_table_calls == 0);
 
     const auto invalid_varchar_order = execute_plan(
@@ -475,8 +508,8 @@ bool test_invalid_predicate_is_rejected_before_open_table() {
                 CmpOp::kLt,
                 column(1),
                 literal(text_value("z")))}));
-    CHECK(invalid_varchar_order.outcomes.size() == 1);
-    CHECK(is_error(invalid_varchar_order.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_varchar_order) == 1);
+    CHECK(internal_abort_before_storage(invalid_varchar_order));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(fake::state().delete_calls == 0);
     CHECK(close_database(database));
@@ -491,8 +524,8 @@ bool test_expression_depth_is_bounded() {
         deeply_nested_predicate(300),
         scan()});
     const auto result = execute_plan(database, query(std::move(deeply_nested_filter)));
-    CHECK(result.outcomes.size() == 1);
-    CHECK(is_error(result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(result) == 1);
+    CHECK(internal_abort_before_storage(result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(database));
     return true;
@@ -502,8 +535,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     Database null_root;
     CHECK(start_database(null_root));
     const auto null_plan = execute_plan(null_root, query(nullptr));
-    CHECK(null_plan.outcomes.size() == 1);
-    CHECK(is_error(null_plan.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(null_plan) == 1);
+    CHECK(internal_abort_before_storage(null_plan));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(null_root));
 
@@ -515,8 +548,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     const auto null_filter_result = execute_plan(
         null_filter_child,
         query(std::move(null_filter_root)));
-    CHECK(null_filter_result.outcomes.size() == 1);
-    CHECK(is_error(null_filter_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(null_filter_result) == 1);
+    CHECK(internal_abort_before_storage(null_filter_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(null_filter_child));
 
@@ -528,8 +561,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     const auto null_project_result = execute_plan(
         null_project_child,
         query(std::move(null_project_root)));
-    CHECK(null_project_result.outcomes.size() == 1);
-    CHECK(is_error(null_project_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(null_project_result) == 1);
+    CHECK(internal_abort_before_storage(null_project_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(null_project_child));
 
@@ -539,8 +572,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     const auto empty_project_result = execute_plan(
         empty_project,
         query(std::move(empty_project_root)));
-    CHECK(empty_project_result.outcomes.size() == 1);
-    CHECK(is_error(empty_project_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(empty_project_result) == 1);
+    CHECK(internal_abort_before_storage(empty_project_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(empty_project));
 
@@ -553,8 +586,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     const auto invalid_topology_result = execute_plan(
         invalid_topology,
         query(std::move(invalid_root)));
-    CHECK(invalid_topology_result.outcomes.size() == 1);
-    CHECK(is_error(invalid_topology_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_topology_result) == 1);
+    CHECK(internal_abort_before_storage(invalid_topology_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(invalid_topology));
 
@@ -564,8 +597,8 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     const auto invalid_column_result = execute_plan(
         invalid_column,
         query(std::move(invalid_column_root)));
-    CHECK(invalid_column_result.outcomes.size() == 1);
-    CHECK(is_error(invalid_column_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_column_result) == 1);
+    CHECK(internal_abort_before_storage(invalid_column_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(invalid_column));
     return true;
@@ -581,8 +614,8 @@ bool test_open_and_scan_result_invariants_close_cursor_once() {
                 tinydbms::storage::StorageErrorKind::kIoError,
                 "error and cursor"}}});
     const auto malformed_open_result = execute_plan(malformed_open, query(scan()));
-    CHECK(malformed_open_result.outcomes.size() == 1);
-    CHECK(is_error(malformed_open_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(malformed_open_result) == 1);
+    CHECK(internal_abort_after_storage(malformed_open_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(malformed_open));
 
@@ -596,8 +629,8 @@ bool test_open_and_scan_result_invariants_close_cursor_once() {
                 "error and cursor"}}});
     const auto malformed_delete_result =
         execute_plan(malformed_delete_open, delete_plan(1));
-    CHECK(malformed_delete_result.outcomes.size() == 1);
-    CHECK(is_error(malformed_delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(malformed_delete_result) == 1);
+    CHECK(internal_abort_after_storage(malformed_delete_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(fake::state().delete_calls == 0);
     CHECK(close_database(malformed_delete_open));
@@ -608,8 +641,8 @@ bool test_open_and_scan_result_invariants_close_cursor_once() {
         std::nullopt,
         std::nullopt});
     const auto missing_cursor_result = execute_plan(missing_cursor, query(scan()));
-    CHECK(missing_cursor_result.outcomes.size() == 1);
-    CHECK(is_error(missing_cursor_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(missing_cursor_result) == 1);
+    CHECK(internal_abort_after_storage(missing_cursor_result));
     CHECK(fake::state().close_cursor_calls == 0);
     CHECK(close_database(missing_cursor));
 
@@ -621,8 +654,8 @@ bool test_open_and_scan_result_invariants_close_cursor_once() {
             tinydbms::storage::StorageErrorKind::kCorrupt,
             "record and error"}}});
     const auto malformed_scan_result = execute_plan(malformed_scan, query(scan()));
-    CHECK(malformed_scan_result.outcomes.size() == 1);
-    CHECK(is_error(malformed_scan_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(malformed_scan_result) == 1);
+    CHECK(internal_abort_after_storage(malformed_scan_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(malformed_scan));
     return true;
@@ -635,8 +668,8 @@ bool test_scan_row_and_close_failures_discard_query_and_delete() {
         record(1, {int_value(1)}),
         std::nullopt}});
     const auto malformed_row_result = execute_plan(malformed_row, query(scan()));
-    CHECK(malformed_row_result.outcomes.size() == 1);
-    CHECK(is_error(malformed_row_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(malformed_row_result) == 1);
+    CHECK(internal_abort_after_storage(malformed_row_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(malformed_row));
 
@@ -648,8 +681,8 @@ bool test_scan_row_and_close_failures_discard_query_and_delete() {
             tinydbms::storage::StorageErrorKind::kIoError,
             "scan failed"}}});
     const auto scan_error_result = execute_plan(scan_error, query(scan()));
-    CHECK(scan_error_result.outcomes.size() == 1);
-    CHECK(is_error(scan_error_result.outcomes.front(), ErrorKind::kStorage));
+    CHECK(statement_count(scan_error_result) == 1);
+    CHECK(is_error(outcome_of(scan_error_result), ErrorKind::kStorage));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(scan_error));
 
@@ -659,8 +692,8 @@ bool test_scan_row_and_close_failures_discard_query_and_delete() {
         tinydbms::storage::StorageErrorKind::kIoError,
         "close failed"});
     const auto close_error_result = execute_plan(close_error, query(scan()));
-    CHECK(close_error_result.outcomes.size() == 1);
-    CHECK(is_error(close_error_result.outcomes.front(), ErrorKind::kStorage));
+    CHECK(statement_count(close_error_result) == 1);
+    CHECK(is_error(outcome_of(close_error_result), ErrorKind::kStorage));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(close_error));
 
@@ -672,8 +705,8 @@ bool test_scan_row_and_close_failures_discard_query_and_delete() {
             tinydbms::storage::StorageErrorKind::kIoError,
             "scan failed"}}});
     const auto delete_result = execute_plan(delete_scan_error, delete_plan(1));
-    CHECK(delete_result.outcomes.size() == 1);
-    CHECK(is_error(delete_result.outcomes.front(), ErrorKind::kStorage));
+    CHECK(statement_count(delete_result) == 1);
+    CHECK(is_error(outcome_of(delete_result), ErrorKind::kStorage));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(fake::state().delete_calls == 0);
     CHECK(close_database(delete_scan_error));
@@ -687,8 +720,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
         tinydbms::storage::StorageErrorKind::kIoError,
         "open failed"});
     const auto open_result = execute_plan(open_error, query(scan()));
-    CHECK(open_result.outcomes.size() == 1);
-    CHECK(is_error(open_result.outcomes.front(), ErrorKind::kStorage));
+    CHECK(statement_count(open_result) == 1);
+    CHECK(is_error(outcome_of(open_result), ErrorKind::kStorage));
     CHECK(fake::state().close_cursor_calls == 0);
     CHECK(close_database(open_error));
 
@@ -696,8 +729,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     CHECK(start_database(scan_exception));
     fake::set_throw_on_scan_next(true);
     const auto scan_result = execute_plan(scan_exception, query(scan()));
-    CHECK(scan_result.outcomes.size() == 1);
-    CHECK(is_error(scan_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(scan_result) == 1);
+    CHECK(internal_abort_after_storage(scan_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(close_database(scan_exception));
 
@@ -707,8 +740,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto post_open_table_result = execute_plan(
         post_open_table_exception,
         query(scan()));
-    CHECK(post_open_table_result.outcomes.size() == 1);
-    CHECK(is_error(post_open_table_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(post_open_table_result) == 1);
+    CHECK(internal_abort_after_storage(post_open_table_result));
     CHECK(fake::state().close_cursor_calls == 0);
     CHECK(fake::state().close_calls == 1);
     CHECK(!fake::state().cursor_opened);
@@ -724,8 +757,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto post_open_delete_result = execute_plan(
         post_open_delete_exception,
         delete_plan(1));
-    CHECK(post_open_delete_result.outcomes.size() == 1);
-    CHECK(is_error(post_open_delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(post_open_delete_result) == 1);
+    CHECK(internal_abort_after_storage(post_open_delete_result));
     CHECK(fake::state().close_cursor_calls == 0);
     CHECK(fake::state().close_calls == 1);
     CHECK(close_database(post_open_delete_exception));
@@ -736,8 +769,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto insert_result = execute_plan(
         insert_exception,
         insert_plan({}, {{int_value(1), text_value("alice"), int_value(20)}}));
-    CHECK(insert_result.outcomes.size() == 1);
-    CHECK(is_error(insert_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(insert_result) == 1);
+    CHECK(internal_abort_after_storage(insert_result));
     CHECK(fake::state().insert_calls == 1);
     CHECK(close_database(insert_exception));
 
@@ -749,8 +782,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto insert_storage_error = execute_plan(
         insert_error,
         insert_plan({}, {{int_value(1), text_value("alice"), int_value(20)}}));
-    CHECK(insert_storage_error.outcomes.size() == 1);
-    CHECK(is_error(insert_storage_error.outcomes.front(), ErrorKind::kStorage));
+    CHECK(statement_count(insert_storage_error) == 1);
+    CHECK(is_error(outcome_of(insert_storage_error), ErrorKind::kStorage));
     CHECK(close_database(insert_error));
 
     Database delete_scan_exception;
@@ -759,8 +792,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto delete_scan_result = execute_plan(
         delete_scan_exception,
         delete_plan(1));
-    CHECK(delete_scan_result.outcomes.size() == 1);
-    CHECK(is_error(delete_scan_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(delete_scan_result) == 1);
+    CHECK(internal_abort_after_storage(delete_scan_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(fake::state().delete_calls == 0);
     CHECK(close_database(delete_scan_exception));
@@ -769,8 +802,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     CHECK(start_database(delete_exception));
     fake::set_throw_on_delete(true);
     const auto delete_result = execute_plan(delete_exception, delete_plan(1));
-    CHECK(delete_result.outcomes.size() == 1);
-    CHECK(is_error(delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(delete_result) == 1);
+    CHECK(internal_abort_after_storage(delete_result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(fake::state().delete_calls == 1);
     CHECK(close_database(delete_exception));
@@ -783,8 +816,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
         Plan{tinydbms::compiler::CreateTablePlan{
             "events",
             {ColumnMeta{"id", Type::kInt}}}});
-    CHECK(post_create_result.outcomes.size() == 1);
-    CHECK(is_error(post_create_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(post_create_result) == 1);
+    CHECK(internal_abort_after_storage(post_create_result));
     CHECK(fake::state().tables.size() == 2);
     CHECK(fake::state().close_calls == 1);
     CHECK(close_database(post_create_exception));
@@ -798,8 +831,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     const auto post_insert_result = execute_plan(
         post_insert_exception,
         insert_plan({}, {{int_value(1), text_value("alice"), int_value(20)}}));
-    CHECK(post_insert_result.outcomes.size() == 1);
-    CHECK(is_error(post_insert_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(post_insert_result) == 1);
+    CHECK(internal_abort_after_storage(post_insert_result));
     CHECK(fake::state().records.size() == 1);
     CHECK(fake::state().close_calls == 1);
     CHECK(close_database(post_insert_exception));
@@ -813,8 +846,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
         record(2, {int_value(2), text_value("bob"), int_value(30)})}));
     fake::set_throw_after_delete(true);
     const auto post_delete_result = execute_plan(post_delete_exception, delete_plan(1));
-    CHECK(post_delete_result.outcomes.size() == 1);
-    CHECK(is_error(post_delete_result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(post_delete_result) == 1);
+    CHECK(internal_abort_after_storage(post_delete_result));
     CHECK(fake::state().records.empty());
     CHECK(fake::state().close_calls == 1);
     CHECK(close_database(post_delete_exception));
@@ -832,8 +865,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
             tinydbms::storage::StorageErrorKind::kIoError,
             "partial delete"}});
     const auto partial_delete_result = execute_plan(partial_delete, delete_plan(1));
-    CHECK(partial_delete_result.outcomes.size() == 1);
-    const CommandResult* partial_command = command_of(partial_delete_result.outcomes.front());
+    CHECK(statement_count(partial_delete_result) == 1);
+    const CommandResult* partial_command = command_of(outcome_of(partial_delete_result));
     CHECK(partial_command != nullptr);
     CHECK(partial_command->affected_rows == 1);
     CHECK(partial_command->error.has_value());
@@ -844,8 +877,8 @@ bool test_storage_errors_and_exceptions_are_contained() {
     CHECK(start_database(invalid_delete_result));
     fake::set_delete_result(tinydbms::storage::DeleteResult{1, std::nullopt});
     const auto invalid_delete = execute_plan(invalid_delete_result, delete_plan(1));
-    CHECK(invalid_delete.outcomes.size() == 1);
-    CHECK(is_error(invalid_delete.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(invalid_delete) == 1);
+    CHECK(internal_abort_after_storage(invalid_delete));
     CHECK(close_database(invalid_delete_result));
     return true;
 }
@@ -855,8 +888,8 @@ bool test_close_exception_is_not_retried() {
     CHECK(start_database(database));
     fake::set_throw_on_close_cursor(true);
     const auto result = execute_plan(database, query(scan()));
-    CHECK(result.outcomes.size() == 1);
-    CHECK(is_error(result.outcomes.front(), ErrorKind::kInternal));
+    CHECK(statement_count(result) == 1);
+    CHECK(internal_abort_after_storage(result));
     CHECK(fake::state().close_cursor_calls == 1);
     CHECK(!fake::state().cursor_opened);
     CHECK(close_database(database));
