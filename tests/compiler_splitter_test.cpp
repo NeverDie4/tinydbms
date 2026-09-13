@@ -15,6 +15,25 @@ struct ExpectedStatement {
     int column;
 };
 
+tinydbms::SourceLocation location_at(std::string_view text, std::size_t offset) {
+    int line = 1;
+    int column = 1;
+    for (std::size_t index = 0; index < offset; ++index) {
+        if (text[index] == '\n') {
+            ++line;
+            column = 1;
+        } else if (text[index] != '\r') {
+            ++column;
+        }
+    }
+    return tinydbms::SourceLocation{line, column, offset};
+}
+
+bool between_crlf(std::string_view text, std::size_t offset) {
+    return offset > 0 && offset < text.size() &&
+        text[offset - 1] == '\r' && text[offset] == '\n';
+}
+
 class TestContext {
 public:
     void expect(bool condition, std::string_view message) {
@@ -53,15 +72,43 @@ void expect_split(
     }
 
     std::size_t index = 0;
+    std::size_t search_offset = 0;
     for (const auto& item : expected) {
         const auto& statement = (*actual)[index];
+        const std::size_t begin_offset = input.find(item.sql, search_offset);
+        test.expect(begin_offset != std::string_view::npos, prefix + ": source exists");
+        if (begin_offset == std::string_view::npos) {
+            return;
+        }
+        const std::size_t end_offset = begin_offset + item.sql.size();
+        const auto expected_begin = location_at(input, begin_offset);
+        const auto expected_end = location_at(input, end_offset);
         test.expect(statement.sql == item.sql, prefix + ": sql[" + std::to_string(index) + "]");
         test.expect(
-            statement.start.line == item.line,
+            statement.source.begin.line == item.line,
             prefix + ": line[" + std::to_string(index) + "]");
         test.expect(
-            statement.start.column == item.column,
+            statement.source.begin.column == item.column,
             prefix + ": column[" + std::to_string(index) + "]");
+        test.expect(
+            statement.source.begin.byte_offset == expected_begin.byte_offset,
+            prefix + ": begin byte offset[" + std::to_string(index) + "]");
+        test.expect(
+            statement.source.end.line == expected_end.line &&
+                statement.source.end.column == expected_end.column &&
+                statement.source.end.byte_offset == expected_end.byte_offset,
+            prefix + ": end location[" + std::to_string(index) + "]");
+        test.expect(
+            input.substr(
+                statement.source.begin.byte_offset,
+                statement.source.end.byte_offset - statement.source.begin.byte_offset) ==
+                statement.sql,
+            prefix + ": source/sql correspondence[" + std::to_string(index) + "]");
+        test.expect(
+            !between_crlf(input, statement.source.begin.byte_offset) &&
+                !between_crlf(input, statement.source.end.byte_offset),
+            prefix + ": endpoints do not split CRLF[" + std::to_string(index) + "]");
+        search_offset = end_offset;
         ++index;
     }
 }
@@ -152,6 +199,39 @@ int main() {
         "utf8 byte column",
         "中;SELECT * FROM t;",
         {{"中;", 1, 1}, {"SELECT * FROM t;", 1, 5}});
+    expect_split(
+        test,
+        "tab and utf8 offsets",
+        "\t中;\r\n\tSELECT * FROM t;",
+        {{"\t中;", 1, 1}, {"\r\n\tSELECT * FROM t;", 1, 6}});
+
+    const std::string too_long(tinydbms::kMaxSqlBytes + 1, 'x');
+    const auto split_error_result = tinydbms::compiler::split_statements(too_long);
+    const auto* split_error =
+        std::get_if<tinydbms::compiler::CompileError>(&split_error_result.outcome);
+    test.expect(split_error != nullptr, "oversized script: split failure");
+    if (split_error != nullptr) {
+        test.expect(split_error->stage == tinydbms::CompileStage::kLex, "oversized script: stage");
+        test.expect(
+            split_error->source.begin.byte_offset == 0 &&
+                split_error->source.end.byte_offset == 0,
+            "oversized script: empty insertion point");
+    }
+
+    for (const std::string_view incomplete : {"SELECT 'abc", "/* unfinished"}) {
+        const auto split = tinydbms::compiler::split_statements(incomplete);
+        const auto* statements =
+            std::get_if<std::vector<tinydbms::compiler::SplitStatement>>(&split.outcome);
+        test.expect(statements != nullptr && statements->size() == 1, "incomplete input: preserved");
+        if (statements != nullptr && statements->size() == 1) {
+            const auto compiled = tinydbms::compiler::compile(
+                tinydbms::compiler::CompileRequest{statements->front().sql, {}});
+            const auto* error = std::get_if<tinydbms::compiler::CompileError>(&compiled.outcome);
+            test.expect(
+                error != nullptr && error->stage == tinydbms::CompileStage::kLex,
+                "incomplete input: compile reports lex error");
+        }
+    }
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " splitter test assertion(s) failed\n";

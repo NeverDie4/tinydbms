@@ -118,8 +118,10 @@ std::string make_payload(std::int32_t id) {
 
 bool execute_command(Database& database, std::string script, std::uint64_t expected_affected_rows) {
     const auto executed = database.execute_script(ExecuteScriptRequest{std::move(script)});
-    CHECK(executed.outcomes.size() == 1);
-    const auto* command = std::get_if<CommandResult>(&executed.outcomes.front().outcome);
+    CHECK(executed.statements.size() == 1 &&
+        executed.statements.front().outcome.has_value());
+    const auto* command = std::get_if<CommandResult>(
+        &executed.statements.front().outcome->outcome);
     CHECK(command != nullptr);
     CHECK(!command->error.has_value());
     CHECK(command->affected_rows == expected_affected_rows);
@@ -128,8 +130,10 @@ bool execute_command(Database& database, std::string script, std::uint64_t expec
 
 bool expect_rows(Database& database, const std::string& script, const ExpectedRows& expected) {
     const auto executed = database.execute_script(ExecuteScriptRequest{script});
-    CHECK(executed.outcomes.size() == 1);
-    const auto* query = std::get_if<QueryResult>(&executed.outcomes.front().outcome);
+    CHECK(executed.statements.size() == 1 &&
+        executed.statements.front().outcome.has_value());
+    const auto* query = std::get_if<QueryResult>(
+        &executed.statements.front().outcome->outcome);
     CHECK(query != nullptr);
     CHECK(query->columns.size() == 2);
     CHECK(query->rows.size() == expected.size());
@@ -270,7 +274,7 @@ bool test_batch_stops_on_compile_error() {
         "INSERT INTO items VALUES (2);\n",
         false);
     CHECK(failed.exit_code == 1);
-    CHECK(failed.output.empty());
+    CHECK(failed.output == "ANALYSIS ONLY\n");
     CHECK(failed.error.rfind("ERROR compile 1:8 ", 0) == 0);
 
     const InvocationResult persisted = invoke_cli(data_dir.path(), "SELECT * FROM items;\n", false);
@@ -319,7 +323,7 @@ bool test_batch_reports_semantic_error() {
         "INSERT INTO items VALUES (1);\n",
         false);
     CHECK(duplicated.exit_code == 1);
-    CHECK(duplicated.output.empty());
+    CHECK(duplicated.output == "ANALYSIS ONLY\n");
     // 重复建表由 compiler 语义阶段拒绝，位置由 core 换算为整段输入坐标。
     CHECK(duplicated.error.rfind("ERROR compile 1:14 ", 0) == 0);
 
@@ -358,7 +362,7 @@ bool test_batch_reports_storage_error_and_stops() {
         "INSERT INTO marker VALUES (1);\n" + oversized + "INSERT INTO marker VALUES (2);\n",
         false);
     CHECK(failed.exit_code == 1);
-    CHECK(failed.output == "OK 1\n");
+    CHECK(failed.output == "OK 1\nANALYSIS ONLY\n");
     CHECK(failed.error.rfind("ERROR storage ", 0) == 0);
 
     const InvocationResult persisted =

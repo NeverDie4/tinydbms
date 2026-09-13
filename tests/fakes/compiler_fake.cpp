@@ -1,5 +1,6 @@
 #include "compiler_fake.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <string>
 #include <utility>
@@ -35,11 +36,11 @@ SourceLocation location_at(std::string_view text, std::size_t offset) {
         if (text[index] == '\n') {
             ++line;
             column = 1;
-        } else {
+        } else if (text[index] != '\r') {
             ++column;
         }
     }
-    return SourceLocation{line, column};
+    return SourceLocation{line, column, offset};
 }
 
 }  // namespace
@@ -47,9 +48,10 @@ SourceLocation location_at(std::string_view text, std::size_t offset) {
 SplitStatementsResult split_statements(std::string_view text) {
     ++testing::fake_compiler::state().split_calls;
     if (text.size() > kMaxSqlBytes) {
+        const SourceLocation start{1, 1, 0};
         return SplitStatementsResult{CompileError{
-            CompileErrorKind::kLex,
-            SourceLocation{1, 1},
+            CompileStage::kLex,
+            SourceRange{start, start},
             "SQL text exceeds maximum length"}};
     }
 
@@ -57,18 +59,21 @@ SplitStatementsResult split_statements(std::string_view text) {
 
     std::size_t cursor = 0;
     while (cursor < text.size()) {
-        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])) != 0) {
-            ++cursor;
-        }
-        if (cursor == text.size()) {
-            break;
-        }
-
         const std::size_t semicolon = text.find(';', cursor);
         const std::size_t end = semicolon == std::string_view::npos ? text.size() : semicolon + 1;
-        statements.push_back(SplitStatement{
-            std::string{text.substr(cursor, end - cursor)},
-            location_at(text, cursor)});
+        const std::string_view segment = text.substr(cursor, end - cursor);
+        const bool has_content = std::any_of(
+            segment.begin(),
+            segment.end(),
+            [](char value) {
+                return value != ';' &&
+                    std::isspace(static_cast<unsigned char>(value)) == 0;
+            });
+        if (has_content) {
+            statements.push_back(SplitStatement{
+                std::string{segment},
+                SourceRange{location_at(text, cursor), location_at(text, end)}});
+        }
 
         if (semicolon == std::string_view::npos) {
             break;
@@ -84,9 +89,10 @@ CompileResult compile(const CompileRequest& request) {
     fake.catalog_sizes.push_back(request.catalog.tables.size());
     auto& results = fake.compile_results;
     if (results.empty()) {
+        const SourceLocation start{1, 1, 0};
         return CompileResult{CompileError{
-            CompileErrorKind::kSyntax,
-            SourceLocation{1, 1},
+            CompileStage::kSyntax,
+            SourceRange{start, start},
             "fake compiler has no configured result"}};
     }
 

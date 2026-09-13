@@ -166,8 +166,19 @@ bool test_system_table_physical_corruption_is_rejected() {
     return true;
 }
 
-struct CatalogTableRow { std::string id; std::string name; std::int32_t column_count; };
-struct CatalogColumnRow { std::string id; std::int32_t ordinal; std::string name; std::string type; };
+struct CatalogTableRow {
+    std::string id;
+    std::string name;
+    std::int32_t column_count;
+    std::string row_format = "V2";
+};
+struct CatalogColumnRow {
+    std::string id;
+    std::int32_t ordinal;
+    std::string name;
+    std::string type;
+    bool nullable = false;
+};
 
 bool write_catalog_rows(const std::filesystem::path& path,
                         const std::vector<CatalogTableRow>& table_rows,
@@ -183,18 +194,22 @@ bool write_catalog_rows(const std::filesystem::path& path,
         return false;
     }
     const TableMeta tables_meta{0, "tdb_sys_tables", {{"table_id", Type::kVarchar},
-        {"table_name", Type::kVarchar}, {"column_count", Type::kInt}}};
+        {"table_name", Type::kVarchar}, {"column_count", Type::kInt},
+        {"row_format", Type::kVarchar}}};
     const TableMeta columns_meta{1, "tdb_sys_columns", {{"table_id", Type::kVarchar},
-        {"column_ordinal", Type::kInt}, {"column_name", Type::kVarchar}, {"column_type", Type::kVarchar}}};
-    HeapTable tables(tables_meta, **files.value, **pool.value);
-    HeapTable columns(columns_meta, **files.value, **pool.value);
+        {"column_ordinal", Type::kInt}, {"column_name", Type::kVarchar},
+        {"column_type", Type::kVarchar}, {"nullable", Type::kBoolean}}};
+    HeapTable tables(tables_meta, RowFormat::kV2, **files.value, **pool.value);
+    HeapTable columns(columns_meta, RowFormat::kV2, **files.value, **pool.value);
     for (const CatalogTableRow& row : table_rows) {
-        if (tables.insert_record({Value{row.id}, Value{row.name}, Value{row.column_count}}).error.has_value()) {
+        if (tables.insert_record({Value{row.id}, Value{row.name}, Value{row.column_count},
+                                  Value{row.row_format}}).error.has_value()) {
             return false;
         }
     }
     for (const CatalogColumnRow& row : column_rows) {
-        if (columns.insert_record({Value{row.id}, Value{row.ordinal}, Value{row.name}, Value{row.type}}).error.has_value()) {
+        if (columns.insert_record({Value{row.id}, Value{row.ordinal}, Value{row.name},
+                                   Value{row.type}, Value{row.nullable}}).error.has_value()) {
             return false;
         }
     }

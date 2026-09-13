@@ -56,10 +56,11 @@ private:
 
 std::optional<QueryResult> query(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1 || !result.statements.front().outcome.has_value()) {
         return std::nullopt;
     }
-    if (const auto* query_result = std::get_if<QueryResult>(&result.outcomes.front().outcome)) {
+    const auto& outcome = result.statements.front().outcome->outcome;
+    if (const auto* query_result = std::get_if<QueryResult>(&outcome)) {
         return *query_result;
     }
     return std::nullopt;
@@ -67,20 +68,22 @@ std::optional<QueryResult> query(Database& database, const std::string& sql) {
 
 bool command_failed(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1 || !result.statements.front().outcome.has_value()) {
         return false;
     }
-    const auto* command = std::get_if<CommandResult>(&result.outcomes.front().outcome);
-    return std::holds_alternative<tinydbms::core::Error>(result.outcomes.front().outcome) ||
+    const auto& outcome = result.statements.front().outcome->outcome;
+    const auto* command = std::get_if<CommandResult>(&outcome);
+    return std::holds_alternative<tinydbms::core::Error>(outcome) ||
         (command != nullptr && command->error.has_value());
 }
 
 bool command_succeeded(Database& database, const std::string& sql) {
     const auto result = database.execute_script(ExecuteScriptRequest{sql});
-    if (result.outcomes.size() != 1) {
+    if (result.statements.size() != 1 || !result.statements.front().outcome.has_value()) {
         return false;
     }
-    const auto* command = std::get_if<CommandResult>(&result.outcomes.front().outcome);
+    const auto* command = std::get_if<CommandResult>(
+        &result.statements.front().outcome->outcome);
     return command != nullptr && !command->error.has_value();
 }
 
@@ -106,11 +109,13 @@ std::vector<Record> scan_storage_table(tinydbms::TableId table_id) {
     return records;
 }
 
-const std::array<tinydbms::core::ColumnHeader, 3> kSystemTablesHeaders{{
-    {"table_id", Type::kVarchar}, {"table_name", Type::kVarchar}, {"column_count", Type::kInt}}};
-const std::array<tinydbms::core::ColumnHeader, 4> kSystemColumnsHeaders{{
+const std::array<tinydbms::core::ColumnHeader, 4> kSystemTablesHeaders{{
+    {"table_id", Type::kVarchar}, {"table_name", Type::kVarchar},
+    {"column_count", Type::kInt}, {"row_format", Type::kVarchar}}};
+const std::array<tinydbms::core::ColumnHeader, 5> kSystemColumnsHeaders{{
     {"table_id", Type::kVarchar}, {"column_ordinal", Type::kInt},
-    {"column_name", Type::kVarchar}, {"column_type", Type::kVarchar}}};
+    {"column_name", Type::kVarchar}, {"column_type", Type::kVarchar},
+    {"nullable", Type::kBoolean}}};
 const std::array<tinydbms::core::ColumnHeader, 1> kTableNameHeader{
     tinydbms::core::ColumnHeader{"table_name", Type::kVarchar}};
 
@@ -131,22 +136,26 @@ bool has_headers(const QueryResult& query, std::span<const tinydbms::core::Colum
 
 bool has_only_student_schema(const QueryResult& tables, const QueryResult& columns) {
     if (!has_headers(tables, kSystemTablesHeaders) ||
-        tables.rows.size() != 1 || tables.rows[0].size() != 3 ||
+        tables.rows.size() != 1 || tables.rows[0].size() != 4 ||
         !has_headers(columns, kSystemColumnsHeaders) ||
-        columns.rows.size() != 2) {
+        columns.rows.size() != 2 || columns.rows[0].size() != 5 ||
+        columns.rows[1].size() != 5) {
         return false;
     }
     return tables.rows[0][0].data == Value{std::string{"2"}}.data &&
         tables.rows[0][1].data == Value{std::string{"student"}}.data &&
         tables.rows[0][2].data == Value{std::int32_t{2}}.data &&
+        tables.rows[0][3].data == Value{std::string{"V2"}}.data &&
         columns.rows[0][0].data == Value{std::string{"2"}}.data &&
         columns.rows[0][1].data == Value{std::int32_t{0}}.data &&
         columns.rows[0][2].data == Value{std::string{"id"}}.data &&
         columns.rows[0][3].data == Value{std::string{"INT32"}}.data &&
+        columns.rows[0][4].data == Value{true}.data &&
         columns.rows[1][0].data == Value{std::string{"2"}}.data &&
         columns.rows[1][1].data == Value{std::int32_t{1}}.data &&
         columns.rows[1][2].data == Value{std::string{"name"}}.data &&
-        columns.rows[1][3].data == Value{std::string{"VARCHAR"}}.data;
+        columns.rows[1][3].data == Value{std::string{"VARCHAR"}}.data &&
+        columns.rows[1][4].data == Value{true}.data;
 }
 
 bool test_system_catalog_read_and_write_protection() {

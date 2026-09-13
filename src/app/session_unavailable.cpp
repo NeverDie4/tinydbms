@@ -14,7 +14,7 @@ tinydbms::core::Error unavailable_error() {
 
 tinydbms::core::ExecuteScriptResult unavailable_execute_result() {
     tinydbms::core::ExecuteScriptResult result;
-    result.outcomes.push_back(tinydbms::core::ExecuteResult{unavailable_error()});
+    result.script_error = unavailable_error();
     return result;
 }
 

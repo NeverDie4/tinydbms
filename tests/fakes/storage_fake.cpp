@@ -103,6 +103,9 @@ void set_insert_result(storage::InsertResult result) {
 void set_delete_result(storage::DeleteResult result) {
     fake_state.delete_result = std::move(result);
 }
+void set_update_result(storage::UpdateResult result) {
+    fake_state.update_result = std::move(result);
+}
 
 void set_throw_on_open(bool enabled) {
     fake_state.throw_on_open = enabled;
@@ -482,6 +485,32 @@ DeleteResult delete_records(const DeleteRequest& request) {
         throw std::runtime_error("injected post-delete exception");
     }
     return DeleteResult{deleted_count, std::nullopt};
+}
+
+UpdateResult update_rows(const UpdateRequest& request) {
+    record_call("update_rows");
+    ++testing::fake_storage::state().update_calls;
+    testing::fake_storage::State& fake = testing::fake_storage::state();
+    fake.last_update_request = request;
+    if (!fake.opened) return {0,invalid_request("storage is not open")};
+    if (!has_table(request.table_id)) return {0,table_not_found("table does not exist")};
+    if (fake.update_result.has_value()) {
+        UpdateResult result=*fake.update_result;
+        fake.update_result.reset();
+        return result;
+    }
+    std::uint64_t count=0;
+    std::vector<Record>& records=fake.records_by_table[request.table_id];
+    for(const UpdateRow& update:request.rows) {
+        const auto record=std::find_if(records.begin(),records.end(),[&](const Record& candidate){
+            return candidate.rid.value==update.rid.value;
+        });
+        if(record==records.end())return {count,invalid_request("record does not exist")};
+        record->values=update.values;
+        ++count;
+    }
+    sync_records_view();
+    return {count,std::nullopt};
 }
 
 }  // namespace tinydbms::storage

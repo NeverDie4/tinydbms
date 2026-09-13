@@ -15,7 +15,7 @@ tinydbms::core::Error not_open_error() {
 
 tinydbms::core::ExecuteScriptResult not_open_execute_result() {
     tinydbms::core::ExecuteScriptResult result;
-    result.outcomes.push_back(tinydbms::core::ExecuteResult{not_open_error()});
+    result.script_error = not_open_error();
     return result;
 }
 

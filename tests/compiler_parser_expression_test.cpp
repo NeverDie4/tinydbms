@@ -13,8 +13,13 @@ namespace {
 
 using tinydbms::SourceLocation;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
+using tinydbms::CompileStage;
 using namespace tinydbms::compiler::internal;
+
+struct ExpectedLocation {
+    int line;
+    int column;
+};
 
 class TestContext {
 public:
@@ -71,6 +76,10 @@ const AstLiteralExpr* literal(const AstExpr* expression) {
     return expression == nullptr ? nullptr : std::get_if<AstLiteralExpr>(&expression->kind);
 }
 
+const AstNullTestExpr* null_test(const AstExpr* expression) {
+    return expression == nullptr ? nullptr : std::get_if<AstNullTestExpr>(&expression->kind);
+}
+
 bool has_compare(const AstBinaryExpr* expression, AstCompareOp expected) {
     if (expression == nullptr) {
         return false;
@@ -97,16 +106,16 @@ void expect_expression_error(
     TestContext& test,
     std::string_view name,
     std::string_view expression,
-    SourceLocation expected) {
+    ExpectedLocation expected) {
     const std::string sql = "SELECT * FROM t WHERE " + std::string{expression} + ";";
     const auto result = parse_sql(test, name, sql);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{name};
     test.expect(error != nullptr, prefix + ": syntax error");
     if (error != nullptr) {
-        test.expect(error->kind == CompileErrorKind::kSyntax, prefix + ": error kind");
-        test.expect(error->location.line == expected.line, prefix + ": line");
-        test.expect(error->location.column == expected.column, prefix + ": column");
+        test.expect(error->stage == CompileStage::kSyntax, prefix + ": error kind");
+        test.expect(error->source.begin.line == expected.line, prefix + ": line");
+        test.expect(error->source.begin.column == expected.column, prefix + ": column");
     }
 }
 
@@ -128,10 +137,10 @@ int main() {
             if (rhs != nullptr) {
                 const auto* value = std::get_if<std::int32_t>(&rhs->value.data);
                 test.expect(value != nullptr && *value == 1, "equal: integer value");
-                test.expect(rhs->location.column == 27, "equal: literal location");
+                test.expect(rhs->source.begin.column == 27, "equal: literal location");
             }
-            test.expect(lhs != nullptr && lhs->location.column == 23, "equal: identifier location");
-            test.expect(comparison->location.column == 25, "equal: operator location");
+            test.expect(lhs != nullptr && lhs->source.begin.column == 23, "equal: identifier location");
+            test.expect(comparison->source.begin.column == 25, "equal: operator location");
         }
     }
 
@@ -172,7 +181,7 @@ int main() {
         const auto result = parse_sql(test, "and", "SELECT * FROM t WHERE a = 1 AND b = 2;");
         const auto* root = binary(predicate(test, "and", result));
         test.expect(has_logic(root, AstLogicOp::kAnd), "and: root");
-        test.expect(root != nullptr && root->location.column == 29, "and: operator location");
+        test.expect(root != nullptr && root->source.begin.column == 29, "and: operator location");
     }
 
     {
@@ -204,7 +213,7 @@ int main() {
         const auto result = parse_sql(test, "not", "SELECT * FROM t WHERE NOT a = 1;");
         const auto* root = unary(predicate(test, "not", result));
         test.expect(root != nullptr && root->op == AstUnaryOp::kNot, "not: root");
-        test.expect(root != nullptr && root->location.column == 23, "not: operator location");
+        test.expect(root != nullptr && root->source.begin.column == 23, "not: operator location");
         test.expect(root != nullptr && has_compare(binary(root->operand.get()), AstCompareOp::kEq), "not: comparison operand");
     }
 
@@ -234,6 +243,30 @@ int main() {
         test.expect(value != nullptr && *value == "Alice", "string literal: value");
     }
 
+    {
+        const auto result = parse_sql(test, "NULL literal", "SELECT * FROM t WHERE NULL;");
+        const auto* value = literal(predicate(test, "NULL literal", result));
+        test.expect(
+            value != nullptr && std::holds_alternative<std::monostate>(value->value.data),
+            "NULL literal: monostate");
+    }
+    {
+        const auto result = parse_sql(test, "IS NULL", "SELECT * FROM t WHERE name IS NULL;");
+        const auto* test_node = null_test(predicate(test, "IS NULL", result));
+        test.expect(test_node != nullptr, "IS NULL: dedicated AST node");
+        if (test_node != nullptr) {
+            test.expect(test_node->op == AstNullTestOp::kIsNull, "IS NULL: op");
+            test.expect(identifier(test_node->operand.get()) != nullptr, "IS NULL: operand");
+        }
+    }
+    {
+        const auto result = parse_sql(test, "IS NOT NULL", "SELECT * FROM t WHERE name IS NOT NULL;");
+        const auto* test_node = null_test(predicate(test, "IS NOT NULL", result));
+        test.expect(
+            test_node != nullptr && test_node->op == AstNullTestOp::kIsNotNull,
+            "IS NOT NULL: dedicated AST node");
+    }
+
     expect_expression_success(test, "type mismatch comparison", "age = 'abc'");
     expect_expression_success(test, "varchar ordering", "name > 'Alice'");
     expect_expression_success(test, "non boolean and", "1 AND 2");
@@ -250,6 +283,8 @@ int main() {
     expect_expression_error(test, "double compare", "a = = 1", {1, 27});
     expect_expression_error(test, "missing compare rhs", "a !=", {1, 27});
     expect_expression_error(test, "double or", "a = 1 OR OR b = 2", {1, 32});
+    expect_expression_error(test, "IS missing NULL", "a IS", {1, 27});
+    expect_expression_error(test, "IS NOT missing NULL", "a IS NOT", {1, 31});
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " expression parser assertion(s) failed\n";

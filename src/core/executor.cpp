@@ -3,6 +3,8 @@
 #include "expression.hpp"
 #include "tinydbms/storage.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -15,6 +17,30 @@ namespace tinydbms::core {
 namespace {
 
 using ExpressionError = internal::expression::Error;
+using SlotRow = internal::expression::SlotRow;
+
+using SlotRowResult = std::variant<SlotRow, Error>;
+using SlotLookupResult = std::variant<const Value*, Error>;
+
+[[nodiscard]] Value validation_value(Type type) {
+    switch (type) {
+        case Type::kInt: return Value{std::int32_t{0}};
+        case Type::kBigInt: return Value{std::int64_t{0}};
+        case Type::kDouble: return Value{0.0};
+        case Type::kBoolean: return Value{false};
+        case Type::kVarchar: return Value{std::string{}};
+    }
+    return Value{std::monostate{}};
+}
+
+[[nodiscard]] std::optional<Type> runtime_type(const Value& value) {
+    if (std::holds_alternative<std::int32_t>(value.data)) return Type::kInt;
+    if (std::holds_alternative<std::int64_t>(value.data)) return Type::kBigInt;
+    if (std::holds_alternative<double>(value.data)) return Type::kDouble;
+    if (std::holds_alternative<bool>(value.data)) return Type::kBoolean;
+    if (std::holds_alternative<std::string>(value.data)) return Type::kVarchar;
+    return std::nullopt;
+}
 
 const TableMeta* find_table(
     const std::vector<TableMeta>& catalog,
@@ -33,6 +59,152 @@ ExecuteResult make_internal_error(std::string message) {
 
 ExecuteResult make_expression_error(const ExpressionError& error) {
     return make_internal_error(error.message);
+}
+
+bool value_matches_column(const Value& value, const ColumnMeta& column) {
+    if (std::holds_alternative<std::monostate>(value.data)) {
+        return column.nullable;
+    }
+    switch (column.type) {
+        case Type::kInt:
+            return std::holds_alternative<std::int32_t>(value.data);
+        case Type::kVarchar:
+            return std::holds_alternative<std::string>(value.data);
+        case Type::kBigInt:
+            return std::holds_alternative<std::int64_t>(value.data);
+        case Type::kDouble:
+            return std::holds_alternative<double>(value.data);
+        case Type::kBoolean:
+            return std::holds_alternative<bool>(value.data);
+    }
+    return false;
+}
+
+std::optional<Error> validate_physical_row(
+    const TableMeta& table,
+    const Row& row) {
+    if (row.size() != table.columns.size()) {
+        return internal::make_error(
+            ErrorKind::kInternal,
+            "record row width does not match table schema");
+    }
+    for (std::size_t index = 0; index < row.size(); ++index) {
+        if (!value_matches_column(row[index], table.columns[index])) {
+            return internal::make_error(
+                ErrorKind::kInternal,
+                "record value type does not match table schema");
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<Error> validate_scan_columns(
+    const TableMeta& table,
+    const std::vector<compiler::ScanColumn>& columns) {
+    if (columns.size() != table.columns.size()) {
+        return internal::make_error(
+            ErrorKind::kInternal,
+            "scan column mapping must cover the table schema");
+    }
+
+    std::vector<bool> used_columns(table.columns.size(), false);
+    std::vector<SlotId> used_slots;
+    used_slots.reserve(columns.size());
+    for (const compiler::ScanColumn& column : columns) {
+        const std::size_t column_index = static_cast<std::size_t>(column.column_id);
+        if (column_index >= table.columns.size()) {
+            return internal::make_error(
+                ErrorKind::kInternal,
+                "scan column id is out of range");
+        }
+        if (used_columns[column_index]) {
+            return internal::make_error(
+                ErrorKind::kInternal,
+                "scan column mapping contains a duplicate column id");
+        }
+        for (SlotId slot_id : used_slots) {
+            if (slot_id == column.output_slot) {
+                return internal::make_error(
+                    ErrorKind::kInternal,
+                    "scan column mapping contains a duplicate output slot");
+            }
+        }
+        used_columns[column_index] = true;
+        used_slots.push_back(column.output_slot);
+    }
+    return std::nullopt;
+}
+
+SlotRowResult materialize_slot_row(
+    const TableMeta& table,
+    const Row& physical_row,
+    const std::vector<compiler::ScanColumn>& columns) {
+    if (const std::optional<Error> row_error = validate_physical_row(table, physical_row);
+        row_error.has_value()) {
+        return *row_error;
+    }
+    if (const std::optional<Error> mapping_error = validate_scan_columns(table, columns);
+        mapping_error.has_value()) {
+        return *mapping_error;
+    }
+
+    SlotRow result;
+    result.reserve(columns.size());
+    for (const compiler::ScanColumn& column : columns) {
+        const std::size_t column_index = static_cast<std::size_t>(column.column_id);
+        result.push_back(internal::expression::SlotValue{
+            column.output_slot,
+            physical_row[column_index]});
+    }
+    return result;
+}
+
+SlotRowResult make_validation_slot_row(
+    const TableMeta& table,
+    const std::vector<compiler::ScanColumn>& columns) {
+    Row physical_row;
+    physical_row.reserve(table.columns.size());
+    for (const ColumnMeta& column : table.columns) {
+        switch (column.type) {
+            case Type::kInt:
+                physical_row.push_back(Value{std::int32_t{0}});
+                break;
+            case Type::kVarchar:
+                physical_row.push_back(Value{std::string{}});
+                break;
+            case Type::kBigInt:
+                physical_row.push_back(Value{std::int64_t{0}});
+                break;
+            case Type::kDouble:
+                physical_row.push_back(Value{0.0});
+                break;
+            case Type::kBoolean:
+                physical_row.push_back(Value{false});
+                break;
+        }
+    }
+    return materialize_slot_row(table, physical_row, columns);
+}
+
+SlotLookupResult lookup_slot(const SlotRow& row, SlotId slot_id) {
+    const Value* result = nullptr;
+    for (const internal::expression::SlotValue& entry : row) {
+        if (entry.slot_id != slot_id) {
+            continue;
+        }
+        if (result != nullptr) {
+            return internal::make_error(
+                ErrorKind::kInternal,
+                "slot is bound more than once");
+        }
+        result = &entry.value;
+    }
+    if (result == nullptr) {
+        return internal::make_error(
+            ErrorKind::kInternal,
+            "slot is missing or unbound");
+    }
+    return result;
 }
 
 class CursorGuard {
@@ -279,10 +451,10 @@ ExecuteResult Database::Impl::execute_insert(
             }
         }
 
-        if (const std::optional<ExpressionError> row_error =
-                internal::expression::validate_row(*table, physical_row);
+        if (const std::optional<Error> row_error =
+                validate_physical_row(*table, physical_row);
             row_error.has_value()) {
-            return make_expression_error(*row_error);
+            return ExecuteResult{*row_error};
         }
         physical_rows.push_back(std::move(physical_row));
     }
@@ -332,9 +504,15 @@ ExecuteResult Database::Impl::execute_delete(
         table_error.has_value()) {
         return ExecuteResult{std::move(*table_error)};
     }
+    SlotRowResult validation_row = make_validation_slot_row(*table, plan.input_columns);
+    if (const Error* error = std::get_if<Error>(&validation_row)) {
+        return ExecuteResult{*error};
+    }
     if (plan.predicate.has_value()) {
         if (const std::optional<ExpressionError> predicate_error =
-                internal::expression::validate_predicate(*plan.predicate, *table);
+                internal::expression::validate_predicate(
+                    *plan.predicate,
+                    std::get<SlotRow>(validation_row));
             predicate_error.has_value()) {
             return make_expression_error(*predicate_error);
         }
@@ -374,17 +552,17 @@ ExecuteResult Database::Impl::execute_delete(
         *opened.cursor,
         [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
-            const Row& row = record.values;
-            if (const std::optional<ExpressionError> row_error =
-                    internal::expression::validate_row(*table, row);
-                row_error.has_value()) {
-                return internal::make_error(ErrorKind::kInternal, row_error->message);
+            SlotRowResult materialized =
+                materialize_slot_row(*table, record.values, plan.input_columns);
+            if (const Error* error = std::get_if<Error>(&materialized)) {
+                return *error;
             }
+            const SlotRow& row = std::get<SlotRow>(materialized);
 
             bool matches = true;
             if (plan.predicate.has_value()) {
                 const std::variant<bool, ExpressionError> predicate =
-                    internal::expression::evaluate_predicate(*plan.predicate, *table, row);
+                    internal::expression::evaluate_predicate(*plan.predicate, row);
                 if (const ExpressionError* error = std::get_if<ExpressionError>(&predicate)) {
                     return internal::make_error(ErrorKind::kInternal, error->message);
                 }
@@ -440,15 +618,296 @@ ExecuteResult Database::Impl::execute_delete(
     return ExecuteResult{CommandResult{deleted.deleted_count, std::nullopt}};
 }
 
+ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
+    const TableMeta* table=find_table(catalog,plan.table_id);
+    if(table==nullptr)return make_internal_error("update plan references an unknown table");
+    if(const auto table_error=internal::validate_table_metadata(*table);table_error.has_value())
+        return ExecuteResult{*table_error};
+    if(plan.assignments.empty())return make_internal_error("update plan must contain assignments");
+    SlotRowResult validation_row=make_validation_slot_row(*table,plan.input_columns);
+    if(const Error* error=std::get_if<Error>(&validation_row))return ExecuteResult{*error};
+    std::vector<bool> assigned(table->columns.size(),false);
+    for(const compiler::UpdateAssignment& assignment:plan.assignments) {
+        const std::size_t column_index=static_cast<std::size_t>(assignment.column_id);
+        if(column_index>=table->columns.size())
+            return make_internal_error("update assignment column id is out of range");
+        if(assigned[column_index])
+            return make_internal_error("update plan contains a duplicate assignment column");
+        if(!value_matches_column(assignment.value,table->columns[column_index]))
+            return make_internal_error("update assignment value type does not match table schema");
+        assigned[column_index]=true;
+    }
+    if(plan.predicate.has_value()) {
+        if(const auto error=internal::expression::validate_predicate(
+                *plan.predicate,std::get<SlotRow>(validation_row));error.has_value())
+            return make_expression_error(*error);
+    }
+
+    storage::OpenTableResult opened;
+    try {
+        opened=storage::open_table(storage::OpenTableRequest{plan.table_id});
+    } catch(const std::exception& exception) {
+        abort_after_storage_exception();return make_internal_error(exception.what());
+    } catch(...) {
+        abort_after_storage_exception();return make_internal_error("unknown exception while opening table for update");
+    }
+    if(opened.error.has_value()) {
+        if(opened.cursor.has_value()) {
+            CursorGuard invalid_result_cursor{*opened.cursor};
+            close_ignoring_errors(invalid_result_cursor);
+            if(invalid_result_cursor.close_threw())abort_after_storage_exception();
+            return make_internal_error("open_table returned both error and cursor");
+        }
+        return ExecuteResult{internal::map_storage_error(*opened.error)};
+    }
+    if(!opened.cursor.has_value())return make_internal_error("open_table returned no cursor on success");
+
+    CursorGuard cursor{*opened.cursor};
+    std::vector<storage::UpdateRow> updates;
+    const std::optional<Error> scan_error=scan_records(
+        cursor,*opened.cursor,[this]() noexcept { abort_after_storage_exception(); },
+        [&](const storage::Record& record)->std::optional<Error>{
+            SlotRowResult materialized=materialize_slot_row(*table,record.values,plan.input_columns);
+            if(const Error* error=std::get_if<Error>(&materialized))return *error;
+            if(plan.predicate.has_value()) {
+                const auto predicate=internal::expression::evaluate_predicate(
+                    *plan.predicate,std::get<SlotRow>(materialized));
+                if(const ExpressionError* error=std::get_if<ExpressionError>(&predicate))
+                    return internal::make_error(ErrorKind::kInternal,error->message);
+                if(!std::get<bool>(predicate))return std::nullopt;
+            }
+            Row replacement=record.values;
+            for(const compiler::UpdateAssignment& assignment:plan.assignments)
+                replacement[static_cast<std::size_t>(assignment.column_id)]=assignment.value;
+            if(const auto row_error=validate_physical_row(*table,replacement);row_error.has_value())
+                return *row_error;
+            updates.push_back(storage::UpdateRow{record.rid,std::move(replacement)});
+            return std::nullopt;
+        });
+    if(scan_error.has_value())return ExecuteResult{*scan_error};
+    if(const auto close_error=cursor.close();close_error.has_value()) {
+        if(cursor.close_threw())abort_after_storage_exception();
+        return ExecuteResult{*close_error};
+    }
+
+    const std::uint64_t requested=static_cast<std::uint64_t>(updates.size());
+    storage::UpdateResult updated;
+    try {
+        updated=storage::update_rows(storage::UpdateRequest{plan.table_id,std::move(updates)});
+    } catch(const std::exception& exception) {
+        abort_after_storage_exception();return make_internal_error(exception.what());
+    } catch(...) {
+        abort_after_storage_exception();return make_internal_error("unknown exception while updating rows");
+    }
+    if(updated.updated_count>requested) {
+        abort_after_storage_exception();return make_internal_error("storage returned too many updated rows");
+    }
+    if(updated.error.has_value()) {
+        Error error=internal::map_storage_error(*updated.error);
+        if(updated.updated_count==0)return ExecuteResult{std::move(error)};
+        return ExecuteResult{CommandResult{updated.updated_count,std::move(error)}};
+    }
+    if(updated.updated_count!=requested) {
+        abort_after_storage_exception();return make_internal_error("storage returned an incomplete successful update result");
+    }
+    return ExecuteResult{CommandResult{updated.updated_count,std::nullopt}};
+}
+
 namespace {
 
 struct ValidatedQuery {
-    const TableMeta* table = nullptr;
-    const compiler::Expr* predicate = nullptr;
-    std::vector<ColumnId> outputs;
+    const compiler::PlanNode* input = nullptr;
+    std::vector<SlotId> outputs;
+    std::vector<ColumnHeader> result_columns;
 };
 
 using QueryValidationResult = std::variant<ValidatedQuery, Error>;
+using DataflowValidationResult = std::variant<SlotRow, Error>;
+
+[[nodiscard]] SlotRowResult merge_slot_rows(const SlotRow& left, const SlotRow& right) {
+    SlotRow merged = left;
+    merged.reserve(left.size() + right.size());
+    for (const internal::expression::SlotValue& value : right) {
+        SlotLookupResult existing = lookup_slot(merged, value.slot_id);
+        if (std::holds_alternative<const Value*>(existing)) {
+            return internal::make_error(
+                ErrorKind::kInternal, "join inputs contain duplicate slot bindings");
+        }
+        merged.push_back(value);
+    }
+    return merged;
+}
+
+DataflowValidationResult validate_dataflow_node(
+    const std::vector<TableMeta>& catalog,
+    const compiler::PlanNode& node) {
+    if (const auto* scan = std::get_if<compiler::SeqScanNode>(&node.kind)) {
+        const TableMeta* table = find_table(catalog, scan->table_id);
+        if (table == nullptr) {
+            return internal::make_error(
+                ErrorKind::kInternal, "query plan references an unknown table");
+        }
+        if (const std::optional<Error> table_error = internal::validate_table_metadata(*table);
+            table_error.has_value()) {
+            return std::move(*table_error);
+        }
+        return make_validation_slot_row(*table, scan->columns);
+    }
+
+    if (const auto* filter = std::get_if<compiler::FilterNode>(&node.kind)) {
+        if (!filter->child) {
+            return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
+        }
+        DataflowValidationResult child = validate_dataflow_node(catalog, *filter->child);
+        if (const Error* error = std::get_if<Error>(&child)) {
+            return *error;
+        }
+        SlotRow row = std::get<SlotRow>(std::move(child));
+        if (const std::optional<ExpressionError> error =
+                internal::expression::validate_predicate(filter->predicate, row);
+            error.has_value()) {
+            return internal::make_error(ErrorKind::kInternal, error->message);
+        }
+        return row;
+    }
+
+    if (const auto* sort = std::get_if<compiler::SortNode>(&node.kind)) {
+        if (sort->keys.empty()) {
+            return internal::make_error(ErrorKind::kInternal, "sort keys must not be empty");
+        }
+        if (!sort->child) {
+            return internal::make_error(ErrorKind::kInternal, "sort node has a null child");
+        }
+        DataflowValidationResult child = validate_dataflow_node(catalog, *sort->child);
+        if (const Error* error = std::get_if<Error>(&child)) {
+            return *error;
+        }
+        SlotRow row = std::get<SlotRow>(std::move(child));
+        for (const compiler::SortKey& key : sort->keys) {
+            SlotLookupResult slot = lookup_slot(row, key.slot_id);
+            if (const Error* error = std::get_if<Error>(&slot)) {
+                return *error;
+            }
+        }
+        return row;
+    }
+
+    if (const auto* join = std::get_if<compiler::JoinNode>(&node.kind)) {
+        if (!join->left || !join->right) {
+            return internal::make_error(ErrorKind::kInternal, "join node has a null child");
+        }
+        DataflowValidationResult left = validate_dataflow_node(catalog, *join->left);
+        if (const Error* error = std::get_if<Error>(&left)) {
+            return *error;
+        }
+        DataflowValidationResult right = validate_dataflow_node(catalog, *join->right);
+        if (const Error* error = std::get_if<Error>(&right)) {
+            return *error;
+        }
+        SlotRowResult merged = merge_slot_rows(
+            std::get<SlotRow>(left), std::get<SlotRow>(right));
+        if (const Error* error = std::get_if<Error>(&merged)) {
+            return *error;
+        }
+        SlotRow row = std::get<SlotRow>(std::move(merged));
+        if (const std::optional<ExpressionError> error =
+                internal::expression::validate_predicate(join->condition, row);
+            error.has_value()) {
+            return internal::make_error(ErrorKind::kInternal, error->message);
+        }
+        return row;
+    }
+
+    if (const auto* aggregate = std::get_if<compiler::AggregateNode>(&node.kind)) {
+        if (!aggregate->child) {
+            return internal::make_error(
+                ErrorKind::kInternal, "aggregate node has a null child");
+        }
+        DataflowValidationResult child = validate_dataflow_node(catalog, *aggregate->child);
+        if (const Error* error = std::get_if<Error>(&child)) {
+            return *error;
+        }
+        const SlotRow& child_row = std::get<SlotRow>(child);
+        SlotRow output;
+        output.reserve(aggregate->group_keys.size() + aggregate->aggregates.size());
+        for (SlotId slot_id : aggregate->group_keys) {
+            SlotLookupResult value = lookup_slot(child_row, slot_id);
+            if (const Error* error = std::get_if<Error>(&value)) {
+                return *error;
+            }
+            if (std::any_of(
+                    output.begin(), output.end(), [slot_id](const auto& entry) {
+                        return entry.slot_id == slot_id;
+                    })) {
+                return internal::make_error(
+                    ErrorKind::kInternal, "aggregate contains a duplicate group slot");
+            }
+            output.push_back(internal::expression::SlotValue{
+                slot_id, **std::get_if<const Value*>(&value)});
+        }
+        for (const compiler::AggregateCall& call : aggregate->aggregates) {
+            SlotLookupResult collision = lookup_slot(child_row, call.output_slot);
+            if (std::holds_alternative<const Value*>(collision) ||
+                std::any_of(
+                    output.begin(), output.end(), [&call](const auto& entry) {
+                        return entry.slot_id == call.output_slot;
+                    })) {
+                return internal::make_error(
+                    ErrorKind::kInternal,
+                    "aggregate output slot collides with an existing slot");
+            }
+
+            std::optional<Type> input_type;
+            if (call.input_slot.has_value()) {
+                SlotLookupResult input = lookup_slot(child_row, *call.input_slot);
+                if (const Error* error = std::get_if<Error>(&input)) {
+                    return *error;
+                }
+                input_type = runtime_type(**std::get_if<const Value*>(&input));
+            }
+            const bool numeric = input_type == Type::kInt ||
+                input_type == Type::kBigInt || input_type == Type::kDouble;
+            bool valid = true;
+            switch (call.kind) {
+                case compiler::AggregateKind::kCount:
+                    valid = call.output_type == Type::kBigInt && !call.nullable;
+                    break;
+                case compiler::AggregateKind::kSum:
+                    valid = call.input_slot.has_value() && numeric && call.nullable &&
+                        call.output_type ==
+                            (input_type == Type::kDouble ? Type::kDouble : Type::kBigInt);
+                    break;
+                case compiler::AggregateKind::kAvg:
+                    valid = call.input_slot.has_value() && numeric && call.nullable &&
+                        call.output_type == Type::kDouble;
+                    break;
+                case compiler::AggregateKind::kMin:
+                case compiler::AggregateKind::kMax:
+                    valid = call.input_slot.has_value() && input_type.has_value() &&
+                        *input_type != Type::kBoolean && call.nullable &&
+                        call.output_type == *input_type;
+                    break;
+                default:
+                    valid = false;
+                    break;
+            }
+            if (call.kind != compiler::AggregateKind::kCount &&
+                !call.input_slot.has_value()) {
+                valid = false;
+            }
+            if (!valid) {
+                return internal::make_error(
+                    ErrorKind::kInternal, "aggregate call has an invalid type contract");
+            }
+            output.push_back(internal::expression::SlotValue{
+                call.output_slot, validation_value(call.output_type)});
+        }
+        return output;
+    }
+
+    return internal::make_error(
+        ErrorKind::kInternal, "query plan has an invalid node topology");
+}
 
 QueryValidationResult validate_query_plan(
     const std::vector<TableMeta>& catalog,
@@ -457,88 +916,354 @@ QueryValidationResult validate_query_plan(
         return internal::make_error(ErrorKind::kInternal, "query plan has a null root");
     }
 
-    const compiler::FilterNode* filter = nullptr;
-    const compiler::ProjectNode* project = nullptr;
-    const compiler::SeqScanNode* scan = nullptr;
-    const compiler::PlanNode* current = plan.root.get();
-
-    if (const auto* scan_node = std::get_if<compiler::SeqScanNode>(&current->kind)) {
-        scan = scan_node;
-    } else if (const auto* filter_node = std::get_if<compiler::FilterNode>(&current->kind)) {
-        filter = filter_node;
-        if (!filter->child) {
-            return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
-        }
-        current = filter->child.get();
-        scan = std::get_if<compiler::SeqScanNode>(&current->kind);
-        if (scan == nullptr) {
-            return internal::make_error(
-                ErrorKind::kInternal,
-                "filter node must be directly above seq scan");
-        }
-    } else if (const auto* project_node = std::get_if<compiler::ProjectNode>(&current->kind)) {
-        project = project_node;
-        if (!project->child) {
-            return internal::make_error(ErrorKind::kInternal, "project node has a null child");
-        }
-        current = project->child.get();
-        if (const auto* child_filter_node = std::get_if<compiler::FilterNode>(&current->kind)) {
-            filter = child_filter_node;
-            if (!filter->child) {
-                return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
-            }
-            current = filter->child.get();
-        }
-        scan = std::get_if<compiler::SeqScanNode>(&current->kind);
-        if (scan == nullptr) {
-            return internal::make_error(
-                ErrorKind::kInternal,
-                "project plan has an invalid child topology");
-        }
-    } else {
-        return internal::make_error(ErrorKind::kInternal, "query plan has an unknown root topology");
+    const auto* project = std::get_if<compiler::ProjectNode>(&plan.root->kind);
+    if (project != nullptr && !project->child) {
+        return internal::make_error(ErrorKind::kInternal, "project node has a null child");
     }
-
-    const TableMeta* table = find_table(catalog, scan->table_id);
-    if (table == nullptr) {
-        return internal::make_error(ErrorKind::kInternal, "query plan references an unknown table");
+    if (project != nullptr && project->outputs.empty()) {
+        return internal::make_error(ErrorKind::kInternal, "project outputs must not be empty");
     }
-    if (const std::optional<Error> table_error = internal::validate_table_metadata(*table);
-        table_error.has_value()) {
-        return std::move(*table_error);
-    }
-
-    if (filter != nullptr) {
-        if (const std::optional<ExpressionError> predicate_error =
-                internal::expression::validate_predicate(filter->predicate, *table);
-            predicate_error.has_value()) {
-            return internal::make_error(ErrorKind::kInternal, predicate_error->message);
-        }
+    const compiler::PlanNode* input = project == nullptr
+        ? plan.root.get()
+        : project->child.get();
+    DataflowValidationResult validation_row =
+        validate_dataflow_node(catalog, *input);
+    if (const Error* error = std::get_if<Error>(&validation_row)) {
+        return *error;
     }
 
     ValidatedQuery result;
-    result.table = table;
-    result.predicate = filter == nullptr ? nullptr : &filter->predicate;
+    result.input = input;
     if (project == nullptr) {
-        if (table->columns.size() > std::numeric_limits<ColumnId>::max()) {
-            return internal::make_error(ErrorKind::kInternal, "table has too many columns");
-        }
-        result.outputs.reserve(table->columns.size());
-        for (std::size_t index = 0; index < table->columns.size(); ++index) {
-            result.outputs.push_back(static_cast<ColumnId>(index));
+        for (const internal::expression::SlotValue& value : std::get<SlotRow>(validation_row)) {
+            result.outputs.push_back(value.slot_id);
         }
     } else {
-        if (project->outputs.empty()) {
-            return internal::make_error(ErrorKind::kInternal, "project outputs must not be empty");
-        }
         result.outputs = project->outputs;
-        for (ColumnId column_id : result.outputs) {
-            if (column_id >= table->columns.size()) {
-                return internal::make_error(ErrorKind::kInternal, "project column id is out of range");
-            }
+    }
+
+    if (result.outputs.size() != plan.outputs.size()) {
+        return internal::make_error(
+            ErrorKind::kInternal,
+            "query output count does not match projected row width");
+    }
+    for (SlotId slot_id : result.outputs) {
+        SlotLookupResult slot = lookup_slot(std::get<SlotRow>(validation_row), slot_id);
+        if (const Error* error = std::get_if<Error>(&slot)) {
+            return *error;
         }
     }
+
+    result.result_columns.reserve(plan.outputs.size());
+    for (std::size_t index = 0; index < plan.outputs.size(); ++index) {
+        const compiler::QueryOutput& output = plan.outputs[index];
+        if (result.outputs[index] != output.slot_id) {
+            return internal::make_error(
+                ErrorKind::kInternal,
+                "query output slot does not match project position");
+        }
+        result.result_columns.push_back(ColumnHeader{output.name, output.type});
+    }
     return result;
+}
+
+enum class SortValueFamily {
+    kNumeric,
+    kBoolean,
+    kVarchar
+};
+
+[[nodiscard]] bool is_null(const Value& value) {
+    return std::holds_alternative<std::monostate>(value.data);
+}
+
+[[nodiscard]] SortValueFamily sort_value_family(const Value& value) {
+    if (std::holds_alternative<std::int32_t>(value.data) ||
+        std::holds_alternative<std::int64_t>(value.data) ||
+        std::holds_alternative<double>(value.data)) {
+        return SortValueFamily::kNumeric;
+    }
+    if (std::holds_alternative<bool>(value.data)) {
+        return SortValueFamily::kBoolean;
+    }
+    return SortValueFamily::kVarchar;
+}
+
+[[nodiscard]] bool is_finite_sort_value(const Value& value) {
+    const auto* number = std::get_if<double>(&value.data);
+    return number == nullptr || std::isfinite(*number);
+}
+
+[[nodiscard]] double sort_numeric_double(const Value& value) {
+    if (const auto* number = std::get_if<double>(&value.data)) {
+        return *number;
+    }
+    if (const auto* integer = std::get_if<std::int64_t>(&value.data)) {
+        return static_cast<double>(*integer);
+    }
+    return static_cast<double>(std::get<std::int32_t>(value.data));
+}
+
+[[nodiscard]] int compare_sort_values(const Value& lhs, const Value& rhs) {
+    if (std::holds_alternative<double>(lhs.data) ||
+        std::holds_alternative<double>(rhs.data)) {
+        const double lhs_number = sort_numeric_double(lhs);
+        const double rhs_number = sort_numeric_double(rhs);
+        return lhs_number < rhs_number ? -1 : (rhs_number < lhs_number ? 1 : 0);
+    }
+    if (std::holds_alternative<std::int32_t>(lhs.data) ||
+        std::holds_alternative<std::int64_t>(lhs.data)) {
+        const std::int64_t lhs_integer = std::holds_alternative<std::int64_t>(lhs.data)
+            ? std::get<std::int64_t>(lhs.data)
+            : static_cast<std::int64_t>(std::get<std::int32_t>(lhs.data));
+        const std::int64_t rhs_integer = std::holds_alternative<std::int64_t>(rhs.data)
+            ? std::get<std::int64_t>(rhs.data)
+            : static_cast<std::int64_t>(std::get<std::int32_t>(rhs.data));
+        return lhs_integer < rhs_integer ? -1 : (rhs_integer < lhs_integer ? 1 : 0);
+    }
+    if (const auto* lhs_boolean = std::get_if<bool>(&lhs.data)) {
+        const bool rhs_boolean = std::get<bool>(rhs.data);
+        return *lhs_boolean == rhs_boolean ? 0 : (*lhs_boolean ? 1 : -1);
+    }
+    const std::string& lhs_text = std::get<std::string>(lhs.data);
+    const std::string& rhs_text = std::get<std::string>(rhs.data);
+    return lhs_text < rhs_text ? -1 : (rhs_text < lhs_text ? 1 : 0);
+}
+
+struct SortableRow {
+    SlotRow row;
+    std::vector<Value> keys;
+};
+
+using SortRowsResult = std::variant<std::vector<SortableRow>, Error>;
+using DataflowRowsResult = std::variant<std::vector<SlotRow>, Error>;
+
+struct AggregateState {
+    std::int64_t count{0};
+    std::optional<Value> value;
+    long double average_sum{0.0L};
+};
+
+struct AggregateGroup {
+    std::vector<Value> keys;
+    std::vector<AggregateState> states;
+};
+
+[[nodiscard]] bool grouping_value_equal(const Value& lhs, const Value& rhs) {
+    if (std::holds_alternative<std::monostate>(lhs.data) ||
+        std::holds_alternative<std::monostate>(rhs.data)) {
+        return std::holds_alternative<std::monostate>(lhs.data) &&
+            std::holds_alternative<std::monostate>(rhs.data);
+    }
+    return lhs.data == rhs.data;
+}
+
+[[nodiscard]] bool grouping_keys_equal(
+    const std::vector<Value>& lhs,
+    const std::vector<Value>& rhs) {
+    return lhs.size() == rhs.size() && std::equal(
+        lhs.begin(), lhs.end(), rhs.begin(), grouping_value_equal);
+}
+
+[[nodiscard]] std::variant<std::int64_t, Error> checked_increment(
+    std::int64_t value) {
+    if (value == std::numeric_limits<std::int64_t>::max()) {
+        return internal::make_error(ErrorKind::kExecute, "aggregate count overflow");
+    }
+    return value + 1;
+}
+
+[[nodiscard]] std::variant<std::int64_t, Error> checked_add(
+    std::int64_t lhs,
+    std::int64_t rhs) {
+    if ((rhs > 0 && lhs > std::numeric_limits<std::int64_t>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<std::int64_t>::min() - rhs)) {
+        return internal::make_error(ErrorKind::kExecute, "aggregate SUM overflow");
+    }
+    return lhs + rhs;
+}
+
+[[nodiscard]] std::variant<bool, Error> accumulate_aggregate(
+    const compiler::AggregateCall& call,
+    const SlotRow& row,
+    AggregateState& state) {
+    const Value* input = nullptr;
+    if (call.input_slot.has_value()) {
+        SlotLookupResult found = lookup_slot(row, *call.input_slot);
+        if (const Error* error = std::get_if<Error>(&found)) return *error;
+        input = *std::get_if<const Value*>(&found);
+    }
+    if (call.kind == compiler::AggregateKind::kCount) {
+        if (input != nullptr && std::holds_alternative<std::monostate>(input->data)) {
+            return true;
+        }
+        auto incremented = checked_increment(state.count);
+        if (const Error* error = std::get_if<Error>(&incremented)) return *error;
+        state.count = std::get<std::int64_t>(incremented);
+        return true;
+    }
+    if (input == nullptr || std::holds_alternative<std::monostate>(input->data)) {
+        return true;
+    }
+
+    if (call.kind == compiler::AggregateKind::kSum) {
+        if (call.output_type == Type::kDouble) {
+            const auto* number = std::get_if<double>(&input->data);
+            if (number == nullptr) {
+                return internal::make_error(
+                    ErrorKind::kInternal, "aggregate SUM input type mismatch");
+            }
+            const double current = state.value.has_value()
+                ? std::get<double>(state.value->data)
+                : 0.0;
+            const double sum = current + *number;
+            if (!std::isfinite(sum)) {
+                return internal::make_error(
+                    ErrorKind::kExecute, "aggregate SUM produced a non-finite DOUBLE");
+            }
+            state.value = Value{sum};
+            return true;
+        }
+        std::int64_t operand = 0;
+        if (const auto* value = std::get_if<std::int32_t>(&input->data)) {
+            operand = *value;
+        } else if (const auto* value = std::get_if<std::int64_t>(&input->data)) {
+            operand = *value;
+        } else {
+            return internal::make_error(
+                ErrorKind::kInternal, "aggregate SUM input type mismatch");
+        }
+        const std::int64_t current = state.value.has_value()
+            ? std::get<std::int64_t>(state.value->data)
+            : 0;
+        auto sum = checked_add(current, operand);
+        if (const Error* error = std::get_if<Error>(&sum)) return *error;
+        state.value = Value{std::get<std::int64_t>(sum)};
+        return true;
+    }
+
+    if (call.kind == compiler::AggregateKind::kAvg) {
+        long double operand = 0.0L;
+        if (const auto* value = std::get_if<std::int32_t>(&input->data)) {
+            operand = static_cast<long double>(*value);
+        } else if (const auto* value = std::get_if<std::int64_t>(&input->data)) {
+            operand = static_cast<long double>(*value);
+        } else if (const auto* value = std::get_if<double>(&input->data)) {
+            operand = static_cast<long double>(*value);
+        } else {
+            return internal::make_error(
+                ErrorKind::kInternal, "aggregate AVG input type mismatch");
+        }
+        auto incremented = checked_increment(state.count);
+        if (const Error* error = std::get_if<Error>(&incremented)) return *error;
+        state.count = std::get<std::int64_t>(incremented);
+        state.average_sum += operand;
+        if (!std::isfinite(state.average_sum)) {
+            return internal::make_error(
+                ErrorKind::kExecute, "aggregate AVG produced a non-finite value");
+        }
+        return true;
+    }
+
+    if (call.kind != compiler::AggregateKind::kMin &&
+        call.kind != compiler::AggregateKind::kMax) {
+        return internal::make_error(
+            ErrorKind::kInternal, "unknown aggregate function");
+    }
+
+    if (!state.value.has_value()) {
+        state.value = *input;
+        return true;
+    }
+    const int comparison = compare_sort_values(*input, *state.value);
+    if ((call.kind == compiler::AggregateKind::kMin && comparison < 0) ||
+        (call.kind == compiler::AggregateKind::kMax && comparison > 0)) {
+        state.value = *input;
+    }
+    return true;
+}
+
+[[nodiscard]] std::variant<Value, Error> finish_aggregate(
+    const compiler::AggregateCall& call,
+    const AggregateState& state) {
+    if (call.kind == compiler::AggregateKind::kCount) return Value{state.count};
+    if (call.kind == compiler::AggregateKind::kAvg) {
+        if (state.count == 0) return Value{std::monostate{}};
+        const double average = static_cast<double>(
+            state.average_sum / static_cast<long double>(state.count));
+        if (!std::isfinite(average)) {
+            return internal::make_error(
+                ErrorKind::kExecute, "aggregate AVG produced a non-finite DOUBLE");
+        }
+        return Value{average};
+    }
+    return state.value.has_value() ? *state.value : Value{std::monostate{}};
+}
+
+[[nodiscard]] SortRowsResult prepare_sort_rows(
+    std::vector<SlotRow> rows,
+    const std::vector<compiler::SortKey>& keys) {
+    std::vector<std::optional<SortValueFamily>> families(keys.size());
+    std::vector<SortableRow> sortable_rows;
+    sortable_rows.reserve(rows.size());
+    for (SlotRow& row : rows) {
+        SortableRow sortable{std::move(row), {}};
+        sortable.keys.reserve(keys.size());
+        for (std::size_t index = 0; index < keys.size(); ++index) {
+            SlotLookupResult lookup = lookup_slot(sortable.row, keys[index].slot_id);
+            if (const Error* error = std::get_if<Error>(&lookup)) {
+                return *error;
+            }
+            const Value& value = **std::get_if<const Value*>(&lookup);
+            if (!is_finite_sort_value(value)) {
+                return internal::make_error(
+                    ErrorKind::kInternal,
+                    "sort key contains a non-finite DOUBLE value");
+            }
+            if (!is_null(value)) {
+                const SortValueFamily family = sort_value_family(value);
+                if (families[index].has_value() && *families[index] != family) {
+                    return internal::make_error(
+                        ErrorKind::kInternal,
+                        "sort key contains values from incompatible type families");
+                }
+                families[index] = family;
+            }
+            sortable.keys.push_back(value);
+        }
+        sortable_rows.push_back(std::move(sortable));
+    }
+    return sortable_rows;
+}
+
+void sort_rows(
+    std::vector<SortableRow>& rows,
+    const std::vector<compiler::SortKey>& keys) {
+    std::stable_sort(
+        rows.begin(),
+        rows.end(),
+        [&keys](const SortableRow& lhs, const SortableRow& rhs) {
+            for (std::size_t index = 0; index < keys.size(); ++index) {
+                const Value& lhs_value = lhs.keys[index];
+                const Value& rhs_value = rhs.keys[index];
+                const bool lhs_null = is_null(lhs_value);
+                const bool rhs_null = is_null(rhs_value);
+                if (lhs_null || rhs_null) {
+                    if (lhs_null != rhs_null) {
+                        return !lhs_null;
+                    }
+                    continue;
+                }
+                const int comparison = compare_sort_values(lhs_value, rhs_value);
+                if (comparison == 0) {
+                    continue;
+                }
+                return keys[index].direction == compiler::SortDirection::kAsc
+                    ? comparison < 0
+                    : comparison > 0;
+            }
+            return false;
+        });
 }
 
 }  // namespace
@@ -552,79 +1277,227 @@ ExecuteResult Database::Impl::execute_query(
     ValidatedQuery query = std::move(std::get<ValidatedQuery>(validation));
 
     QueryResult result;
-    result.columns.reserve(query.outputs.size());
-    for (ColumnId column_id : query.outputs) {
-        const ColumnMeta& column = query.table->columns[column_id];
-        result.columns.push_back(ColumnHeader{column.name, column.type});
-    }
-
-    storage::OpenTableResult opened;
-    try {
-        opened = storage::open_table(storage::OpenTableRequest{query.table->table_id});
-    } catch (const std::exception& exception) {
-        abort_after_storage_exception();
-        return make_internal_error(exception.what());
-    } catch (...) {
-        abort_after_storage_exception();
-        return make_internal_error("unknown exception while opening table for query");
-    }
-
-    if (opened.error.has_value()) {
-        if (opened.cursor.has_value()) {
-            CursorGuard invalid_result_cursor{*opened.cursor};
-            close_ignoring_errors(invalid_result_cursor);
-            if (invalid_result_cursor.close_threw()) {
+    result.columns = std::move(query.result_columns);
+    const auto execute_node = [this](auto&& self, const compiler::PlanNode& node)
+        -> DataflowRowsResult {
+        if (const auto* scan = std::get_if<compiler::SeqScanNode>(&node.kind)) {
+            const TableMeta* table = find_table(catalog, scan->table_id);
+            if (table == nullptr) {
+                return internal::make_error(
+                    ErrorKind::kInternal, "query plan references an unknown table");
+            }
+            storage::OpenTableResult opened;
+            try {
+                opened = storage::open_table(storage::OpenTableRequest{table->table_id});
+            } catch (const std::exception& exception) {
                 abort_after_storage_exception();
+                return internal::make_error(ErrorKind::kInternal, exception.what());
+            } catch (...) {
+                abort_after_storage_exception();
+                return internal::make_error(
+                    ErrorKind::kInternal, "unknown exception while opening table for query");
             }
-            return make_internal_error("open_table returned both error and cursor");
+            if (opened.error.has_value()) {
+                if (opened.cursor.has_value()) {
+                    CursorGuard invalid_result_cursor{*opened.cursor};
+                    close_ignoring_errors(invalid_result_cursor);
+                    if (invalid_result_cursor.close_threw()) {
+                        abort_after_storage_exception();
+                    }
+                    return internal::make_error(
+                        ErrorKind::kInternal, "open_table returned both error and cursor");
+                }
+                return internal::map_storage_error(*opened.error);
+            }
+            if (!opened.cursor.has_value()) {
+                return internal::make_error(
+                    ErrorKind::kInternal, "open_table returned no cursor on success");
+            }
+
+            std::vector<SlotRow> rows;
+            CursorGuard cursor{*opened.cursor};
+            const std::optional<Error> scan_error = scan_records(
+                cursor,
+                *opened.cursor,
+                [this]() noexcept { abort_after_storage_exception(); },
+                [&](const storage::Record& record) -> std::optional<Error> {
+                    SlotRowResult materialized =
+                        materialize_slot_row(*table, record.values, scan->columns);
+                    if (const Error* error = std::get_if<Error>(&materialized)) {
+                        return *error;
+                    }
+                    rows.push_back(std::get<SlotRow>(std::move(materialized)));
+                    return std::nullopt;
+                });
+            if (scan_error.has_value()) {
+                return std::move(*scan_error);
+            }
+            if (const std::optional<Error> close_error = cursor.close(); close_error.has_value()) {
+                if (cursor.close_threw()) {
+                    abort_after_storage_exception();
+                }
+                return std::move(*close_error);
+            }
+            return rows;
         }
-        return ExecuteResult{internal::map_storage_error(*opened.error)};
-    }
-    if (!opened.cursor.has_value()) {
-        return make_internal_error("open_table returned no cursor on success");
-    }
 
-    CursorGuard cursor{*opened.cursor};
-    const std::optional<Error> scan_error = scan_records(
-        cursor,
-        *opened.cursor,
-        [this]() noexcept { abort_after_storage_exception(); },
-        [&](const storage::Record& record) -> std::optional<Error> {
-            const Row& row = record.values;
-            if (const std::optional<ExpressionError> row_error =
-                    internal::expression::validate_row(*query.table, row);
-                row_error.has_value()) {
-                return internal::make_error(ErrorKind::kInternal, row_error->message);
+        if (const auto* filter = std::get_if<compiler::FilterNode>(&node.kind)) {
+            DataflowRowsResult child = self(self, *filter->child);
+            if (const Error* error = std::get_if<Error>(&child)) {
+                return *error;
             }
-
-            if (query.predicate != nullptr) {
+            std::vector<SlotRow> filtered;
+            for (SlotRow& row : std::get<std::vector<SlotRow>>(child)) {
                 const std::variant<bool, ExpressionError> predicate =
-                    internal::expression::evaluate_predicate(*query.predicate, *query.table, row);
+                    internal::expression::evaluate_predicate(filter->predicate, row);
                 if (const ExpressionError* error = std::get_if<ExpressionError>(&predicate)) {
                     return internal::make_error(ErrorKind::kInternal, error->message);
                 }
-                if (!std::get<bool>(predicate)) {
-                    return std::nullopt;
+                if (std::get<bool>(predicate)) {
+                    filtered.push_back(std::move(row));
+                }
+            }
+            return filtered;
+        }
+
+        if (const auto* sort = std::get_if<compiler::SortNode>(&node.kind)) {
+            DataflowRowsResult child = self(self, *sort->child);
+            if (const Error* error = std::get_if<Error>(&child)) {
+                return *error;
+            }
+            SortRowsResult prepared = prepare_sort_rows(
+                std::get<std::vector<SlotRow>>(std::move(child)), sort->keys);
+            if (const Error* error = std::get_if<Error>(&prepared)) {
+                return *error;
+            }
+            std::vector<SortableRow> sortable =
+                std::get<std::vector<SortableRow>>(std::move(prepared));
+            sort_rows(sortable, sort->keys);
+            std::vector<SlotRow> rows;
+            rows.reserve(sortable.size());
+            for (SortableRow& row : sortable) {
+                rows.push_back(std::move(row.row));
+            }
+            return rows;
+        }
+
+        if (const auto* join = std::get_if<compiler::JoinNode>(&node.kind)) {
+            DataflowRowsResult left_result = self(self, *join->left);
+            if (const Error* error = std::get_if<Error>(&left_result)) {
+                return *error;
+            }
+            DataflowRowsResult right_result = self(self, *join->right);
+            if (const Error* error = std::get_if<Error>(&right_result)) {
+                return *error;
+            }
+            const std::vector<SlotRow>& left_rows =
+                std::get<std::vector<SlotRow>>(left_result);
+            const std::vector<SlotRow>& right_rows =
+                std::get<std::vector<SlotRow>>(right_result);
+            std::vector<SlotRow> joined;
+            for (const SlotRow& left : left_rows) {
+                for (const SlotRow& right : right_rows) {
+                    SlotRowResult merged = merge_slot_rows(left, right);
+                    if (const Error* error = std::get_if<Error>(&merged)) {
+                        return *error;
+                    }
+                    SlotRow row = std::get<SlotRow>(std::move(merged));
+                    const std::variant<bool, ExpressionError> matches =
+                        internal::expression::evaluate_predicate(join->condition, row);
+                    if (const ExpressionError* error = std::get_if<ExpressionError>(&matches)) {
+                        return internal::make_error(ErrorKind::kInternal, error->message);
+                    }
+                    if (std::get<bool>(matches)) {
+                        joined.push_back(std::move(row));
+                    }
+                }
+            }
+            return joined;
+        }
+
+        if (const auto* aggregate = std::get_if<compiler::AggregateNode>(&node.kind)) {
+            DataflowRowsResult child_result = self(self, *aggregate->child);
+            if (const Error* error = std::get_if<Error>(&child_result)) {
+                return *error;
+            }
+            std::vector<AggregateGroup> groups;
+            if (aggregate->group_keys.empty()) {
+                groups.push_back(AggregateGroup{
+                    {}, std::vector<AggregateState>(aggregate->aggregates.size())});
+            }
+            for (const SlotRow& row : std::get<std::vector<SlotRow>>(child_result)) {
+                std::vector<Value> keys;
+                keys.reserve(aggregate->group_keys.size());
+                for (SlotId slot_id : aggregate->group_keys) {
+                    SlotLookupResult value = lookup_slot(row, slot_id);
+                    if (const Error* error = std::get_if<Error>(&value)) return *error;
+                    keys.push_back(**std::get_if<const Value*>(&value));
+                }
+                auto group = std::find_if(
+                    groups.begin(), groups.end(), [&keys](const AggregateGroup& candidate) {
+                        return grouping_keys_equal(candidate.keys, keys);
+                    });
+                if (group == groups.end()) {
+                    groups.push_back(AggregateGroup{
+                        std::move(keys),
+                        std::vector<AggregateState>(aggregate->aggregates.size())});
+                    group = groups.end() - 1;
+                }
+                for (std::size_t index = 0; index < aggregate->aggregates.size(); ++index) {
+                    auto accumulated = accumulate_aggregate(
+                        aggregate->aggregates[index], row, group->states[index]);
+                    if (const Error* error = std::get_if<Error>(&accumulated)) return *error;
                 }
             }
 
-            Row projected;
-            projected.reserve(query.outputs.size());
-            for (ColumnId column_id : query.outputs) {
-                projected.push_back(row[column_id]);
+            std::vector<SlotRow> rows;
+            rows.reserve(groups.size());
+            for (const AggregateGroup& group : groups) {
+                SlotRow row;
+                row.reserve(aggregate->group_keys.size() + aggregate->aggregates.size());
+                for (std::size_t index = 0; index < aggregate->group_keys.size(); ++index) {
+                    row.push_back(internal::expression::SlotValue{
+                        aggregate->group_keys[index], group.keys[index]});
+                }
+                for (std::size_t index = 0; index < aggregate->aggregates.size(); ++index) {
+                    auto value = finish_aggregate(
+                        aggregate->aggregates[index], group.states[index]);
+                    if (const Error* error = std::get_if<Error>(&value)) return *error;
+                    row.push_back(internal::expression::SlotValue{
+                        aggregate->aggregates[index].output_slot,
+                        std::get<Value>(std::move(value))});
+                }
+                rows.push_back(std::move(row));
             }
-            result.rows.push_back(std::move(projected));
-            return std::nullopt;
-        });
-    if (scan_error.has_value()) {
-        return ExecuteResult{std::move(*scan_error)};
-    }
-
-    if (const std::optional<Error> close_error = cursor.close(); close_error.has_value()) {
-        if (cursor.close_threw()) {
-            abort_after_storage_exception();
+            return rows;
         }
-        return ExecuteResult{std::move(*close_error)};
+
+        return internal::make_error(
+            ErrorKind::kInternal, "query execution encountered an invalid node topology");
+    };
+
+    DataflowRowsResult executed = execute_node(execute_node, *query.input);
+    if (const Error* error = std::get_if<Error>(&executed)) {
+        return ExecuteResult{*error};
+    }
+    std::vector<SlotRow> rows =
+        std::get<std::vector<SlotRow>>(std::move(executed));
+    result.rows.reserve(rows.size());
+    for (const SlotRow& row : rows) {
+        Row projected;
+        projected.reserve(query.outputs.size());
+        for (SlotId slot_id : query.outputs) {
+            SlotLookupResult value = lookup_slot(row, slot_id);
+            if (const Error* error = std::get_if<Error>(&value)) {
+                return ExecuteResult{*error};
+            }
+            projected.push_back(**std::get_if<const Value*>(&value));
+        }
+        if (projected.size() != result.columns.size()) {
+            return make_internal_error(
+                "projected row width does not match query output count");
+        }
+        result.rows.push_back(std::move(projected));
     }
     return ExecuteResult{std::move(result)};
 }
@@ -645,6 +1518,8 @@ ExecuteResult Database::Impl::execute_plan_impl(compiler::Plan plan) {
                     return execute_insert(typed_plan);
                 } else if constexpr (std::is_same_v<PlanType, compiler::DeletePlan>) {
                     return execute_delete(typed_plan);
+                } else if constexpr (std::is_same_v<PlanType, compiler::UpdatePlan>) {
+                    return execute_update(typed_plan);
                 } else {
                     return execute_query(typed_plan);
                 }

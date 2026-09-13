@@ -1,5 +1,6 @@
 #include <initializer_list>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -9,9 +10,8 @@
 
 namespace {
 
-using tinydbms::SourceLocation;
+using tinydbms::CompileStage;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::internal::LexResult;
 using tinydbms::compiler::internal::Token;
 using tinydbms::compiler::internal::TokenKind;
@@ -20,6 +20,12 @@ using tinydbms::compiler::internal::tokenize;
 struct ExpectedToken {
     TokenKind kind;
     std::string_view lexeme;
+};
+
+struct ExpectedLocation {
+    int line;
+    int column;
+    std::optional<std::size_t> byte_offset = std::nullopt;
 };
 
 class TestContext {
@@ -83,7 +89,7 @@ void expect_location(
     std::string_view case_name,
     std::string_view input,
     std::size_t token_index,
-    SourceLocation expected) {
+    ExpectedLocation expected) {
     const auto result = tokenize(input);
     const auto* tokens = successful_tokens(test, result, case_name);
     if (tokens == nullptr) {
@@ -96,17 +102,23 @@ void expect_location(
         return;
     }
 
-    test.expect((*tokens)[token_index].location.line == expected.line, prefix + ": line");
-    test.expect((*tokens)[token_index].location.column == expected.column, prefix + ": column");
+    const auto& source = (*tokens)[token_index].source;
+    test.expect(source.begin.line == expected.line, prefix + ": line");
+    test.expect(source.begin.column == expected.column, prefix + ": column");
+    if (expected.byte_offset.has_value()) {
+        test.expect(
+            source.begin.byte_offset == *expected.byte_offset,
+            prefix + ": byte offset");
+    }
+    test.expect(source.end.byte_offset >= source.begin.byte_offset, prefix + ": ordered range");
 }
 
 void expect_lex_error(
     TestContext& test,
     std::string_view case_name,
     std::string_view input,
-    SourceLocation expected,
-    std::string_view message_part,
-    CompileErrorKind expected_kind = CompileErrorKind::kLex) {
+    ExpectedLocation expected,
+    std::string_view message_part) {
     const auto result = tokenize(input);
     const auto* error = std::get_if<CompileError>(&result.outcome);
     const std::string prefix{case_name};
@@ -115,9 +127,17 @@ void expect_lex_error(
         return;
     }
 
-    test.expect(error->kind == expected_kind, prefix + ": error kind");
-    test.expect(error->location.line == expected.line, prefix + ": error line");
-    test.expect(error->location.column == expected.column, prefix + ": error column");
+    test.expect(error->stage == CompileStage::kLex, prefix + ": error stage");
+    test.expect(error->source.begin.line == expected.line, prefix + ": error line");
+    test.expect(error->source.begin.column == expected.column, prefix + ": error column");
+    if (expected.byte_offset.has_value()) {
+        test.expect(
+            error->source.begin.byte_offset == *expected.byte_offset,
+            prefix + ": error byte offset");
+    }
+    test.expect(
+        error->source.end.byte_offset >= error->source.begin.byte_offset,
+        prefix + ": ordered error range");
     test.expect(error->message.find(message_part) != std::string::npos, prefix + ": error message");
 }
 
@@ -138,7 +158,7 @@ int main() {
     expect_tokens(
         test,
         "keywords",
-        "CREATE TABLE INSERT INTO VALUES SELECT FROM WHERE DELETE AND OR NOT INT VARCHAR",
+        "CREATE TABLE INSERT INTO VALUES SELECT FROM JOIN INNER ON WHERE ORDER BY GROUP COUNT SUM AVG MIN MAX ASC DESC DELETE UPDATE SET AND OR NOT IS NULL INT BIGINT DOUBLE BOOLEAN VARCHAR TRUE FALSE",
         {
             {TokenKind::kCreate, "create"},
             {TokenKind::kTable, "table"},
@@ -147,19 +167,85 @@ int main() {
             {TokenKind::kValues, "values"},
             {TokenKind::kSelect, "select"},
             {TokenKind::kFrom, "from"},
+            {TokenKind::kJoin, "join"},
+            {TokenKind::kInner, "inner"},
+            {TokenKind::kOn, "on"},
             {TokenKind::kWhere, "where"},
+            {TokenKind::kOrder, "order"},
+            {TokenKind::kBy, "by"},
+            {TokenKind::kGroup, "group"},
+            {TokenKind::kCount, "count"},
+            {TokenKind::kSum, "sum"},
+            {TokenKind::kAvg, "avg"},
+            {TokenKind::kMin, "min"},
+            {TokenKind::kMax, "max"},
+            {TokenKind::kAsc, "asc"},
+            {TokenKind::kDesc, "desc"},
             {TokenKind::kDelete, "delete"},
+            {TokenKind::kUpdate, "update"},
+            {TokenKind::kSet, "set"},
             {TokenKind::kAnd, "and"},
             {TokenKind::kOr, "or"},
             {TokenKind::kNot, "not"},
+            {TokenKind::kIs, "is"},
+            {TokenKind::kNull, "null"},
             {TokenKind::kInt, "int"},
+            {TokenKind::kBigInt, "bigint"},
+            {TokenKind::kDouble, "double"},
+            {TokenKind::kBoolean, "boolean"},
             {TokenKind::kVarchar, "varchar"},
+            {TokenKind::kTrue, "true"},
+            {TokenKind::kFalse, "false"},
         });
     expect_tokens(
         test,
         "keyword case",
-        "SeLeCt FROM where",
-        {{TokenKind::kSelect, "select"}, {TokenKind::kFrom, "from"}, {TokenKind::kWhere, "where"}});
+        "SeLeCt FROM JoIn InNeR oN where OrDeR By aSc DeSc",
+        {{TokenKind::kSelect, "select"}, {TokenKind::kFrom, "from"},
+         {TokenKind::kJoin, "join"}, {TokenKind::kInner, "inner"},
+         {TokenKind::kOn, "on"}, {TokenKind::kWhere, "where"}, {TokenKind::kOrder, "order"},
+         {TokenKind::kBy, "by"}, {TokenKind::kAsc, "asc"},
+         {TokenKind::kDesc, "desc"}});
+    expect_tokens(
+        test,
+        "aggregate keyword case",
+        "GrOuP CoUnT SuM AvG MiN MaX",
+        {{TokenKind::kGroup, "group"}, {TokenKind::kCount, "count"},
+         {TokenKind::kSum, "sum"}, {TokenKind::kAvg, "avg"},
+         {TokenKind::kMin, "min"}, {TokenKind::kMax, "max"}});
+    expect_tokens(
+        test,
+        "BIGINT keyword case",
+        "BIGINT bigint BigInt",
+        {{TokenKind::kBigInt, "bigint"}, {TokenKind::kBigInt, "bigint"}, {TokenKind::kBigInt, "bigint"}});
+    expect_tokens(
+        test,
+        "DOUBLE keyword case",
+        "DOUBLE double Double",
+        {{TokenKind::kDouble, "double"}, {TokenKind::kDouble, "double"}, {TokenKind::kDouble, "double"}});
+    expect_tokens(
+        test,
+        "BOOLEAN keyword and literal case",
+        "BOOLEAN boolean Boolean TRUE true TrUe FALSE false FaLsE",
+        {{TokenKind::kBoolean, "boolean"}, {TokenKind::kBoolean, "boolean"},
+         {TokenKind::kBoolean, "boolean"}, {TokenKind::kTrue, "true"},
+         {TokenKind::kTrue, "true"}, {TokenKind::kTrue, "true"},
+         {TokenKind::kFalse, "false"}, {TokenKind::kFalse, "false"},
+         {TokenKind::kFalse, "false"}});
+    expect_tokens(
+        test,
+        "NULL and IS keyword case",
+        "NULL null NuLl IS is Is",
+        {{TokenKind::kNull, "null"}, {TokenKind::kNull, "null"},
+         {TokenKind::kNull, "null"}, {TokenKind::kIs, "is"},
+         {TokenKind::kIs, "is"}, {TokenKind::kIs, "is"}});
+    expect_tokens(
+        test,
+        "UPDATE and SET keyword case",
+        "UPDATE update UpDaTe SET set SeT",
+        {{TokenKind::kUpdate, "update"}, {TokenKind::kUpdate, "update"},
+         {TokenKind::kUpdate, "update"}, {TokenKind::kSet, "set"},
+         {TokenKind::kSet, "set"}, {TokenKind::kSet, "set"}});
     expect_tokens(
         test,
         "identifiers",
@@ -180,34 +266,77 @@ int main() {
     expect_tokens(
         test,
         "integers",
-        "0 123 2147483647",
+        "0 123 2147483647 2147483648 9223372036854775807 0009223372036854775807",
         {
             {TokenKind::kIntegerLiteral, "0"},
             {TokenKind::kIntegerLiteral, "123"},
             {TokenKind::kIntegerLiteral, "2147483647"},
+            {TokenKind::kIntegerLiteral, "2147483648"},
+            {TokenKind::kIntegerLiteral, "9223372036854775807"},
+            {TokenKind::kIntegerLiteral, "0009223372036854775807"},
+        });
+    expect_lex_error(
+        test,
+        "negative integer",
+        "-1",
+        {1, 1},
+        "invalid character");
+    expect_lex_error(
+        test,
+        "INT32_MIN spelling rejected",
+        "-2147483648",
+        {1, 1},
+        "invalid character");
+    expect_lex_error(test, "unary plus rejected", "+1", {1, 1}, "invalid character");
+    expect_lex_error(
+        test,
+        "INT64 overflow",
+        "9223372036854775808",
+        {1, 1},
+        "integer literal out of range");
+    expect_lex_error(
+        test,
+        "leading zero INT64 overflow",
+        "0009223372036854775808",
+        {1, 1},
+        "integer literal out of range");
+    expect_lex_error(
+        test,
+        "very long integer overflow",
+        "999999999999999999999999",
+        {1, 1},
+        "integer literal out of range");
+    expect_tokens(
+        test,
+        "double literals",
+        "0.0 1.0 12.5 00012.500 2147483648.0 9223372036854775807.0",
+        {
+            {TokenKind::kDoubleLiteral, "0.0"},
+            {TokenKind::kDoubleLiteral, "1.0"},
+            {TokenKind::kDoubleLiteral, "12.5"},
+            {TokenKind::kDoubleLiteral, "00012.500"},
+            {TokenKind::kDoubleLiteral, "2147483648.0"},
+            {TokenKind::kDoubleLiteral, "9223372036854775807.0"},
         });
     expect_tokens(
         test,
-        "negative integers",
-        "-1 -2147483648",
+        "dot remains independent",
+        ".5 1. abc.def",
         {
-            {TokenKind::kIntegerLiteral, "-1"},
-            {TokenKind::kIntegerLiteral, "-2147483648"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIntegerLiteral, "5"},
+            {TokenKind::kIntegerLiteral, "1"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIdentifier, "abc"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIdentifier, "def"},
         });
     expect_lex_error(
         test,
-        "positive integer overflow",
-        "2147483648",
+        "double overflow",
+        "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.0",
         {1, 1},
-        "integer",
-        CompileErrorKind::kSemantic);
-    expect_lex_error(
-        test,
-        "negative integer overflow",
-        "-2147483649",
-        {1, 1},
-        "integer",
-        CompileErrorKind::kSemantic);
+        "floating literal out of range");
 
     expect_tokens(test, "string", "'Alice'", {{TokenKind::kStringLiteral, "Alice"}});
     expect_tokens(test, "empty string", "''", {{TokenKind::kStringLiteral, ""}});
@@ -233,7 +362,7 @@ int main() {
         "valid utf8",
         "'中药材' SELECT",
         {{TokenKind::kStringLiteral, "中药材"}, {TokenKind::kSelect, "select"}});
-    expect_location(test, "utf8 byte column", "'中药材' SELECT", 1, {1, 13});
+    expect_location(test, "utf8 byte column", "'中药材' SELECT", 1, {1, 13, 12});
     expect_lex_error(
         test,
         "utf8 invalid continuation",
@@ -286,7 +415,7 @@ int main() {
         });
 
     expect_tokens(test, "whitespace", " \t\r\nSELECT", {{TokenKind::kSelect, "select"}});
-    expect_location(test, "whitespace location", " \t\r\nSELECT", 0, {2, 1});
+    expect_location(test, "whitespace location", " \t\r\nSELECT", 0, {2, 1, 4});
     expect_tokens(
         test,
         "line comment",
@@ -323,7 +452,7 @@ int main() {
     expect_location(test, "location identifier", multiline, 3, {3, 6});
     expect_location(test, "location semicolon", multiline, 4, {3, 7});
     expect_location(test, "location end", multiline, 5, {3, 8});
-    expect_location(test, "crlf location", "SELECT\r\nname", 1, {2, 1});
+    expect_location(test, "crlf location", "SELECT\r\nname", 1, {2, 1, 8});
 
     expect_lex_error(test, "invalid at", "SELECT @ FROM t;", {1, 8}, "character");
     expect_lex_error(test, "invalid backtick", "`name`", {1, 1}, "character");
@@ -339,7 +468,7 @@ int main() {
             {TokenKind::kFrom, "from"},
             {TokenKind::kIdentifier, "t"},
         });
-    expect_location(test, "missing semicolon end", "SELECT * FROM t", 4, {1, 16});
+    expect_location(test, "missing semicolon end", "SELECT * FROM t", 4, {1, 16, 15});
     expect_tokens(
         test,
         "syntax is not lexer's job",
@@ -351,7 +480,7 @@ int main() {
             {TokenKind::kSemicolon, ";"},
         });
     expect_tokens(test, "empty has end", "", {});
-    expect_location(test, "empty end location", "", 0, {1, 1});
+    expect_location(test, "empty end location", "", 0, {1, 1, 0});
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " lexer test assertion(s) failed\n";

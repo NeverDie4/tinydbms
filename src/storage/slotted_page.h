@@ -61,6 +61,9 @@ public:
         RawPage& page, PageId page_id, std::span<const std::byte> payload);
     static SlottedPageResult<std::vector<std::byte>> get(
         const RawPage& page, PageId page_id, SlotHandle handle);
+    static std::optional<SlottedPageError> replace(
+        RawPage& page, PageId page_id, SlotHandle handle,
+        std::span<const std::byte> payload);
     static std::optional<SlottedPageError> erase(
         RawPage& page, PageId page_id, SlotHandle handle);
 };

@@ -16,6 +16,10 @@ target_include_directories(tinydbms_cli_logic PUBLIC
 
 add_executable(tinydbms main.cpp)
 
+if(MINGW)
+    target_link_options(tinydbms PRIVATE -municode)
+endif()
+
 if(TINYDBMS_ENABLE_REAL_MODULES)
     target_sources(tinydbms PRIVATE session_core.cpp)
     target_compile_definitions(tinydbms PRIVATE TINYDBMS_ENABLE_REAL_MODULES=1)

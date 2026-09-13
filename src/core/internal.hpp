@@ -26,6 +26,7 @@ struct Database::Impl {
     ExecuteResult execute_create_table(const compiler::CreateTablePlan& plan);
     ExecuteResult execute_insert(const compiler::InsertPlan& plan);
     ExecuteResult execute_delete(const compiler::DeletePlan& plan);
+    ExecuteResult execute_update(const compiler::UpdatePlan& plan);
     ExecuteResult execute_query(const compiler::QueryPlan& plan);
     ExecuteResult execute_plan_impl(compiler::Plan plan);
 };
@@ -56,7 +57,8 @@ inline bool has_duplicate_table(
 }
 
 inline bool is_supported_type(Type type) noexcept {
-    return type == Type::kInt || type == Type::kVarchar;
+    return type == Type::kInt || type == Type::kBigInt || type == Type::kDouble ||
+        type == Type::kBoolean || type == Type::kVarchar;
 }
 
 inline bool is_valid_identifier(std::string_view value) noexcept {

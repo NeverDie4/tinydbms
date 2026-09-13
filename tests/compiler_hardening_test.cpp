@@ -37,6 +37,11 @@ private:
     int case_count_{0};
 };
 
+struct ExpectedLocation {
+    int line;
+    int column;
+};
+
 CompileResult compile_sql(std::string sql, CatalogView catalog) {
     return compile(CompileRequest{std::move(sql), catalog});
 }
@@ -50,11 +55,11 @@ const Plan* plan_of(TestContext& test, const CompileResult& result) {
 const CompileError* error_of(
     TestContext& test,
     const CompileResult& result,
-    CompileErrorKind expected_kind) {
+    CompileStage expected_stage) {
     const auto* error = std::get_if<CompileError>(&result.outcome);
     test.expect(error != nullptr, "expected compile error");
     if (error != nullptr) {
-        test.expect(error->kind == expected_kind, "error kind");
+        test.expect(error->stage == expected_stage, "error stage");
     }
     return error;
 }
@@ -63,8 +68,8 @@ void expect_location(TestContext& test, const CompileError* error, int line, int
     if (error == nullptr) {
         return;
     }
-    test.expect(error->location.line == line, "error line");
-    test.expect(error->location.column == column, "error column");
+    test.expect(error->source.begin.line == line, "error line");
+    test.expect(error->source.begin.column == column, "error column");
 }
 
 const ProjectNode* project_of(TestContext& test, const Plan* plan) {
@@ -122,7 +127,7 @@ void expect_split(
     TestContext& test,
     std::string_view input,
     const std::vector<std::string_view>& sql,
-    const std::vector<SourceLocation>& locations) {
+    const std::vector<ExpectedLocation>& locations) {
     const auto result = split_statements(input);
     const auto* statements = std::get_if<std::vector<SplitStatement>>(&result.outcome);
     test.expect(statements != nullptr, "split success");
@@ -136,8 +141,8 @@ void expect_split(
     }
     for (std::size_t index = 0; index < statements->size(); ++index) {
         test.expect((*statements)[index].sql == sql[index], "split SQL");
-        test.expect((*statements)[index].start.line == locations[index].line, "split line");
-        test.expect((*statements)[index].start.column == locations[index].column, "split column");
+        test.expect((*statements)[index].source.begin.line == locations[index].line, "split line");
+        test.expect((*statements)[index].source.begin.column == locations[index].column, "split column");
     }
 }
 
@@ -207,10 +212,10 @@ void test_splitter(TestContext& test) {
             for (std::size_t index = 0; index < first->size(); ++index) {
                 test.expect((*next)[index].sql == (*first)[index].sql, "repeated split SQL");
                 test.expect(
-                    (*next)[index].start.line == (*first)[index].start.line,
+                    (*next)[index].source.begin.line == (*first)[index].source.begin.line,
                     "repeated split line");
                 test.expect(
-                    (*next)[index].start.column == (*first)[index].start.column,
+                    (*next)[index].source.begin.column == (*first)[index].source.begin.column,
                     "repeated split column");
             }
         }
@@ -244,7 +249,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
     test.begin_case("invalid leading underscore");
     expect_location(
         test,
-        error_of(test, compile_sql("SELECT _abc FROM lexical;", catalog), CompileErrorKind::kLex),
+        error_of(test, compile_sql("SELECT _abc FROM lexical;", catalog), CompileStage::kLex),
         1,
         8);
 
@@ -259,38 +264,54 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT " + identifier_65 + " FROM long_names;", catalog),
-            CompileErrorKind::kLex),
+            CompileStage::kLex),
         1,
         8);
 
-    test.begin_case("integer boundaries");
-    plan_of(test, compile_sql("SELECT id FROM numbers WHERE 0 <= 2147483647;", catalog));
+    test.begin_case("integer boundaries and leading zeros");
+    for (const std::string_view literal : {
+             "0", "1", "2147483646", "2147483647", "2147483648", "2147483649",
+             "9223372036854775806", "9223372036854775807",
+             "0000000000000000000000001", "0002147483647", "0002147483648",
+             "0009223372036854775807"}) {
+        plan_of(
+            test,
+            compile_sql(
+                "SELECT id FROM numbers WHERE 0 <= " + std::string{literal} + ";",
+                catalog));
+    }
 
-    test.begin_case("negative integer and INT32_MIN");
-    plan_of(test, compile_sql("SELECT id FROM numbers WHERE id >= -2147483648;", catalog));
-    plan_of(test, compile_sql("INSERT INTO numbers VALUES (-1),(-2147483648);", catalog));
+    test.begin_case("negative integers are lex errors");
+    error_of(
+        test,
+        compile_sql("SELECT id FROM numbers WHERE id >= -1;", catalog),
+        CompileStage::kLex);
+    error_of(
+        test,
+        compile_sql("SELECT id FROM numbers WHERE id >= -2147483648;", catalog),
+        CompileStage::kLex);
 
-    test.begin_case("positive integer overflow is semantic error");
+    test.begin_case("INT64 overflow is lex error");
     expect_location(
         test,
         error_of(
             test,
-            compile_sql("SELECT id FROM numbers WHERE id = 2147483648;", catalog),
-            CompileErrorKind::kSemantic),
+            compile_sql("SELECT id FROM numbers WHERE id = 9223372036854775808;", catalog),
+            CompileStage::kLex),
         1,
         35);
 
-    test.begin_case("negative integer overflow is semantic error");
+    test.begin_case("leading-zero INT64 overflow is lex error");
     expect_location(
         test,
         error_of(
             test,
-            compile_sql("SELECT id FROM numbers WHERE id = -2147483649;", catalog),
-            CompileErrorKind::kSemantic),
+            compile_sql("SELECT id FROM numbers WHERE id = 0009223372036854775808;", catalog),
+            CompileStage::kLex),
         1,
         35);
 
-    test.begin_case("very long integer is stable semantic error");
+    test.begin_case("very long integer is stable lex error");
     expect_location(
         test,
         error_of(
@@ -298,7 +319,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
             compile_sql(
                 "SELECT id FROM numbers WHERE id = 999999999999999999999999999999;",
                 catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kLex),
         1,
         35);
 
@@ -330,7 +351,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
     test.begin_case("multiline unterminated string location");
     expect_location(
         test,
-        error_of(test, compile_sql("'abc\ndef", catalog), CompileErrorKind::kLex),
+        error_of(test, compile_sql("'abc\ndef", catalog), CompileStage::kLex),
         1,
         1);
 
@@ -342,7 +363,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
     error_of(
         test,
         compile_sql("INSERT INTO strings VALUES ('" + too_long + "');", catalog),
-        CompileErrorKind::kLex);
+        CompileStage::kLex);
 
     test.begin_case("comment adjacency");
     plan_of(test, compile_sql("SELECT/**/a FROM lexical;", catalog));
@@ -371,7 +392,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT id\nFROM student\nWHERE @ = 1;", catalog),
-            CompileErrorKind::kLex),
+            CompileStage::kLex),
         3,
         7);
 
@@ -381,7 +402,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT id\nFROM student\nWHERE age = ;", catalog),
-            CompileErrorKind::kSyntax),
+            CompileStage::kSyntax),
         3,
         13);
 
@@ -391,7 +412,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT id\nFROM student\nWHERE unknown = 1;", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         3,
         7);
 
@@ -401,14 +422,14 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT id\r\nFROM student\r\nWHERE unknown = 1;", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         3,
         7);
 
     test.begin_case("UTF-8 byte column after literal");
     expect_location(
         test,
-        error_of(test, compile_sql("'中' @", catalog), CompileErrorKind::kLex),
+        error_of(test, compile_sql("'中' @", catalog), CompileStage::kLex),
         1,
         7);
 }
@@ -420,6 +441,10 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "INSERT INTO student(aGe,ID,NaMe) VALUES (20,1,'Alice'),(21,2,'Bob');",
         "SELECT id,name,age FROM student;",
         "SELECT * FROM student WHERE id = 1;",
+        "SELECT COUNT(*),COUNT(age),SUM(age),AVG(age),MIN(name),MAX(age) FROM student;",
+        "SELECT name,COUNT(*) FROM student WHERE age > 0 GROUP BY name ORDER BY name;",
+        "SELECT COUNT(*) FROM table_a JOIN table_b ON table_a.id=table_b.score "
+        "GROUP BY table_a.id;",
         "DELETE FROM student;",
         "DELETE FROM student WHERE name != 'Alice';",
     };
@@ -437,11 +462,19 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "SELECT *,id FROM student;",
         "SELECT id,* FROM student;",
         "SELECT id,,age FROM student;",
+        "SELECT SUM(*) FROM student;",
+        "SELECT COUNT(1) FROM student;",
+        "SELECT SUM(age = 1) FROM student;",
+        "SELECT COUNT(DISTINCT age) FROM student;",
+        "SELECT COUNT(*) FROM student GROUP age;",
+        "SELECT COUNT(*) FROM student GROUP BY age,;",
+        "SELECT COUNT(*) FROM student GROUP BY 1;",
+        "SELECT COUNT(*) FROM student HAVING COUNT(*) > 0;",
         "DELETE FROM student WHERE;",
     };
     for (const std::string_view sql : invalid_syntax) {
         test.begin_case("invalid parser form");
-        error_of(test, compile_sql(std::string{sql}, catalog), CompileErrorKind::kSyntax);
+        error_of(test, compile_sql(std::string{sql}, catalog), CompileStage::kSyntax);
     }
 
     test.begin_case("projection error precedes predicate error");
@@ -450,7 +483,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT unknown FROM student WHERE another_unknown = 1;", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         1,
         8);
 
@@ -460,7 +493,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("SELECT id FROM unknown WHERE x = 1;", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         1,
         16);
 
@@ -470,7 +503,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("INSERT INTO student(unknown,id,id) VALUES ('bad');", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         1,
         21);
 
@@ -480,7 +513,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql("INSERT INTO student(id,id,age) VALUES (1,2,3);", catalog),
-            CompileErrorKind::kSemantic),
+            CompileStage::kSemantic),
         1,
         24);
 
@@ -488,7 +521,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
     const auto row_priority = compile_sql(
         "INSERT INTO student VALUES (1,'ok',20),(2,'short'),(3,4,30);",
         catalog);
-    const auto* row_error = error_of(test, row_priority, CompileErrorKind::kSemantic);
+    const auto* row_error = error_of(test, row_priority, CompileStage::kSemantic);
     expect_location(test, row_error, 1, 41);
     if (row_error != nullptr) {
         test.expect(row_error->message.find("count") != std::string::npos, "row count reported first");
@@ -498,25 +531,25 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
     error_of(
         test,
         compile_sql("INSERT INTO student(id,name) VALUES (1,'Alice');", catalog),
-        CompileErrorKind::kSemantic);
+        CompileStage::kSemantic);
 
     test.begin_case("INSERT too few values rejected");
     error_of(
         test,
         compile_sql("INSERT INTO student(id,name,age) VALUES (1,'Alice');", catalog),
-        CompileErrorKind::kSemantic);
+        CompileStage::kSemantic);
 
     test.begin_case("INSERT too many values rejected");
     error_of(
         test,
         compile_sql("INSERT INTO student(id,name,age) VALUES (1,'Alice',20,100);", catalog),
-        CompileErrorKind::kSemantic);
+        CompileStage::kSemantic);
 
     test.begin_case("INSERT reordered first type error");
     const auto reordered_error = compile_sql(
         "INSERT INTO student(name,age,id) VALUES (1,20,'Alice');",
         catalog);
-    const auto* type_error = error_of(test, reordered_error, CompileErrorKind::kSemantic);
+    const auto* type_error = error_of(test, reordered_error, CompileStage::kSemantic);
     if (type_error != nullptr) {
         test.expect(type_error->message.find("name") != std::string::npos, "first target column reported");
     }
@@ -526,12 +559,39 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "SELECT id FROM student WHERE 1;",
         "SELECT id FROM student WHERE id = '1';",
         "SELECT id FROM student WHERE name > 'A';",
-        "SELECT id FROM student WHERE (id = 1) = (age = 2);",
     };
     for (const std::string_view sql : invalid_predicates) {
         test.begin_case("invalid predicate semantics");
-        error_of(test, compile_sql(std::string{sql}, catalog), CompileErrorKind::kSemantic);
+        error_of(test, compile_sql(std::string{sql}, catalog), CompileStage::kSemantic);
     }
+
+    const std::vector<std::string_view> invalid_aggregates{
+        "SELECT name,COUNT(*) FROM student;",
+        "SELECT name,age,COUNT(*) FROM student GROUP BY name;",
+        "SELECT * FROM student GROUP BY name;",
+        "SELECT SUM(name) FROM student;",
+        "SELECT AVG(name) FROM student;",
+        "SELECT COUNT(*) FROM student GROUP BY missing;",
+        "SELECT COUNT(*) FROM table_a JOIN student ON table_a.id=student.id GROUP BY id;",
+        "SELECT COUNT(*) FROM student WHERE COUNT(*) = 1;",
+        "DELETE FROM student WHERE COUNT(*) = 1;",
+        "UPDATE student SET age=1 WHERE COUNT(*) = 1;",
+    };
+    for (const std::string_view sql : invalid_aggregates) {
+        test.begin_case("invalid aggregate semantics or placement");
+        const CompileResult result = compile_sql(std::string{sql}, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr, "aggregate form rejected");
+        if (error != nullptr) {
+            test.expect(
+                error->stage == CompileStage::kSyntax ||
+                    error->stage == CompileStage::kSemantic,
+                "aggregate rejection is syntax or semantic");
+        }
+    }
+
+    test.begin_case("BOOLEAN equality predicate accepted");
+    plan_of(test, compile_sql("SELECT id FROM student WHERE (id = 1) = (age = 2);", catalog));
 
     test.begin_case("duplicate SELECT projection retained");
     const auto duplicate = compile_sql("SELECT id,id FROM student;", catalog);
@@ -544,7 +604,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
     error_of(
         test,
         compile_sql("SELECT score FROM table_a;", catalog),
-        CompileErrorKind::kSemantic);
+        CompileStage::kSemantic);
 
     test.begin_case("non-contiguous TableId retained");
     const auto id_result = compile_sql("SELECT id FROM student;", catalog);
@@ -555,7 +615,7 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
     test.begin_case("empty Catalog CREATE and SELECT");
     const CatalogView empty{std::span<const TableMeta>{}};
     plan_of(test, compile_sql("CREATE TABLE empty_ok(id INT);", empty));
-    error_of(test, compile_sql("SELECT * FROM student;", empty), CompileErrorKind::kSemantic);
+    error_of(test, compile_sql("SELECT * FROM student;", empty), CompileStage::kSemantic);
 }
 
 void test_expression_plans(TestContext& test, CatalogView catalog) {
@@ -669,26 +729,29 @@ void test_plan_invariants(TestContext& test, CatalogView catalog) {
 }
 
 void test_public_defense_and_state(TestContext& test, CatalogView catalog, std::vector<TableMeta>& tables) {
-    const std::vector<std::pair<std::string_view, CompileErrorKind>> invalid_inputs{
-        {"", CompileErrorKind::kSyntax},
-        {"   \t\r\n", CompileErrorKind::kSyntax},
-        {"-- abc", CompileErrorKind::kSyntax},
-        {"/* abc */", CompileErrorKind::kSyntax},
-        {"/* abc", CompileErrorKind::kLex},
-        {"'abc", CompileErrorKind::kLex},
-        {"SELECT * FROM student; DELETE FROM student;", CompileErrorKind::kSyntax},
-        {";", CompileErrorKind::kSyntax},
+    const std::vector<std::pair<std::string_view, CompileStage>> invalid_inputs{
+        {"", CompileStage::kSyntax},
+        {"   \t\r\n", CompileStage::kSyntax},
+        {"-- abc", CompileStage::kSyntax},
+        {"/* abc */", CompileStage::kSyntax},
+        {"/* abc", CompileStage::kLex},
+        {"'abc", CompileStage::kLex},
+        {"SELECT * FROM student; DELETE FROM student;", CompileStage::kSyntax},
+        {";", CompileStage::kSyntax},
     };
-    for (const auto& [sql, kind] : invalid_inputs) {
+    for (const auto& [sql, stage] : invalid_inputs) {
         test.begin_case("public compile defensive input");
-        error_of(test, compile_sql(std::string{sql}, catalog), kind);
+        error_of(test, compile_sql(std::string{sql}, catalog), stage);
     }
 
-    test.begin_case("unsupported UPDATE remains rejected");
-    test.expect(
-        std::holds_alternative<CompileError>(
-            compile_sql("UPDATE student SET id = 1;", catalog).outcome),
-        "UPDATE rejected");
+    test.begin_case("UPDATE is accepted without changing unsupported statements");
+    const CompileResult update=compile_sql("UPDATE student SET id = 1;",catalog);
+    const Plan* update_plan=std::get_if<Plan>(&update.outcome);
+    test.expect(update_plan!=nullptr && std::holds_alternative<UpdatePlan>(update_plan->kind),
+                "UPDATE accepted");
+    test.expect(std::holds_alternative<CompileError>(
+                    compile_sql("DROP TABLE student;",catalog).outcome),
+                "unsupported DROP remains rejected");
 
     test.begin_case("ten repeated compiles agree");
     for (int iteration = 0; iteration < 10; ++iteration) {
@@ -725,11 +788,11 @@ void test_public_defense_and_state(TestContext& test, CatalogView catalog, std::
     }
 
     test.begin_case("valid compile after lex error");
-    error_of(test, compile_sql("SELECT @ FROM student;", catalog), CompileErrorKind::kLex);
+    error_of(test, compile_sql("SELECT @ FROM student;", catalog), CompileStage::kLex);
     plan_of(test, compile_sql("SELECT id FROM student;", catalog));
 
     test.begin_case("valid compile after semantic error");
-    error_of(test, compile_sql("SELECT missing FROM student;", catalog), CompileErrorKind::kSemantic);
+    error_of(test, compile_sql("SELECT missing FROM student;", catalog), CompileStage::kSemantic);
     plan_of(test, compile_sql("SELECT id FROM student;", catalog));
 }
 
@@ -790,7 +853,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         excessive_not += "NOT ";
     }
     excessive_not += "id = 1;";
-    error_of(test, compile_sql(std::move(excessive_not), catalog), CompileErrorKind::kSyntax);
+    error_of(test, compile_sql(std::move(excessive_not), catalog), CompileStage::kSyntax);
 
     test.begin_case("deep NOT nesting is rejected");
     std::string deep_not = "SELECT id FROM numbers WHERE ";
@@ -798,7 +861,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         deep_not += "NOT ";
     }
     deep_not += "id = 1;";
-    error_of(test, compile_sql(std::move(deep_not), catalog), CompileErrorKind::kSyntax);
+    error_of(test, compile_sql(std::move(deep_not), catalog), CompileStage::kSyntax);
 
     test.begin_case("deep left-associated expression is rejected");
     std::string deep_and = "SELECT id FROM numbers WHERE id = 1";
@@ -806,7 +869,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         deep_and += " AND id = 1";
     }
     deep_and += ';';
-    error_of(test, compile_sql(std::move(deep_and), catalog), CompileErrorKind::kSyntax);
+    error_of(test, compile_sql(std::move(deep_and), catalog), CompileStage::kSyntax);
 
     test.begin_case("expression complexity exact AND boundary is accepted");
     std::string maximum_and = "SELECT id FROM numbers WHERE ";
@@ -828,7 +891,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         excessive_and += "id = 1";
     }
     excessive_and += ';';
-    error_of(test, compile_sql(std::move(excessive_and), catalog), CompileErrorKind::kSyntax);
+    error_of(test, compile_sql(std::move(excessive_and), catalog), CompileStage::kSyntax);
 
     test.begin_case("SQL text length boundary");
     std::string maximum_sql = "SELECT * FROM student";
@@ -849,7 +912,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
         error_of(
             test,
             compile_sql(oversized_sql, catalog),
-            CompileErrorKind::kLex),
+            CompileStage::kLex),
         1,
         1);
 
@@ -858,9 +921,9 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
     const auto* split_error = std::get_if<CompileError>(&oversized_split.outcome);
     test.expect(split_error != nullptr, "oversized split error");
     if (split_error != nullptr) {
-        test.expect(split_error->kind == CompileErrorKind::kLex, "oversized split error kind");
-        test.expect(split_error->location.line == 1, "oversized split error line");
-        test.expect(split_error->location.column == 1, "oversized split error column");
+        test.expect(split_error->stage == CompileStage::kLex, "oversized split error stage");
+        test.expect(split_error->source.begin.line == 1, "oversized split error line");
+        test.expect(split_error->source.begin.column == 1, "oversized split error column");
     }
 }
 

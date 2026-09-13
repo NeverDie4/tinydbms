@@ -24,7 +24,7 @@ struct Temp {
     ~Temp(){std::error_code e;std::filesystem::remove_all(path,e);}
 };
 TableMeta meta(TableId id=0){return {id,"records",{{"s",Type::kVarchar}}};}
-RecordId rid(PageId p,SlotId s=0,std::uint16_t g=1){return RecordId{(std::uint64_t{p}<<32)|(std::uint64_t{g}<<16)|s};}
+RecordId rid(PageId p,tinydbms::storage::internal::SlotId s=0,std::uint16_t g=1){return RecordId{(std::uint64_t{p}<<32)|(std::uint64_t{g}<<16)|s};}
 struct Fixture {
     Temp temp;
     std::unique_ptr<FileManager> files;

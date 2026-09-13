@@ -15,17 +15,22 @@ CursorError map(const HeapTableError& e) {
     return {CursorErrorKind::kCorrupt,"unknown HeapTable error"};
 }
 }
-CursorResult<CursorId> CursorRegistry::create(const TableMeta& meta) {
-    HeapTable table(meta,files_,pool_);
+CursorResult<CursorId> CursorRegistry::create(const TableMeta& meta, RowFormat format) {
+    HeapTable table(meta,format,files_,pool_);
     auto position=table.begin_scan();
     if(position.error)return {std::nullopt,map(*position.error)};
     auto& next=next_id();
     if(!next)return {std::nullopt,CursorError{CursorErrorKind::kInvalidArgument,"CursorId space exhausted"}};
     const CursorId id=*next;
     // Successful insertion precedes issuance. Optional exhaustion is not an ID sentinel.
-    entries_.emplace(id,Entry{meta,CursorState{meta.table_id,*position.value,CursorStatus::kActive,std::nullopt}});
+    entries_.emplace(
+        id,Entry{meta,format,
+                 CursorState{meta.table_id,*position.value,CursorStatus::kActive,std::nullopt}});
     if(id==std::numeric_limits<CursorId>::max())next.reset();else next=id+1;
     return {id,std::nullopt};
+}
+CursorResult<CursorId> CursorRegistry::create(const TableMeta& meta) {
+    return create(meta,RowFormat::kV1);
 }
 CursorResult<CursorState> CursorRegistry::lookup(CursorId id) const {
     auto found=entries_.find(id);
@@ -39,7 +44,7 @@ CursorResult<Record> CursorRegistry::next_record(CursorId id) {
     auto& state=entry.state;
     if(state.status==CursorStatus::kEof)return {std::nullopt,std::nullopt};
     if(state.status==CursorStatus::kFailed)return {std::nullopt,state.saved_error};
-    HeapTable table(entry.meta,files_,pool_);
+    HeapTable table(entry.meta,entry.format,files_,pool_);
     auto record=table.next_record(state.position);
     if(record.error) {
         state.saved_error=map(*record.error);

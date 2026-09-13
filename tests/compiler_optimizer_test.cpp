@@ -2,6 +2,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -55,11 +56,44 @@ BoundStatement optimize_twice_sql(std::string_view sql, CatalogView catalog) {
     return optimize(optimize_sql(sql, catalog));
 }
 
-std::string format_bound_plan(BoundStatement statement) {
+template <typename StatementType>
+Plan plan_statement(StatementType statement, CatalogView catalog) {
+    if constexpr (
+        std::is_same_v<StatementType, BoundSelect> ||
+        std::is_same_v<StatementType, BoundDelete> ||
+        std::is_same_v<StatementType, BoundUpdate>) {
+        PlannerResult planned = generate_plan(std::move(statement), catalog);
+        return std::get<Plan>(std::move(planned.outcome));
+    } else {
+        return generate_plan(std::move(statement));
+    }
+}
+
+std::string format_bound_plan(BoundStatement statement, CatalogView catalog) {
     const Plan plan = std::visit(
-        [](auto&& value) { return generate_plan(std::move(value)); },
+        [catalog](auto&& value) {
+            return plan_statement(std::move(value), catalog);
+        },
         std::move(statement.kind));
     return format_plan(plan);
+}
+
+bool has_student_mapping(const std::vector<ScanColumn>& columns) {
+    return columns.size() == 3 &&
+           columns[0].column_id == 0U && columns[0].output_slot == 0U &&
+           columns[1].column_id == 1U && columns[1].output_slot == 1U &&
+           columns[2].column_id == 2U && columns[2].output_slot == 2U;
+}
+
+const ScanColumn* scan_column_for_slot(
+    const std::vector<ScanColumn>& columns,
+    SlotId slot_id) {
+    for (const ScanColumn& column : columns) {
+        if (column.output_slot == slot_id) {
+            return &column;
+        }
+    }
+    return nullptr;
 }
 
 void expect_trace(
@@ -184,6 +218,13 @@ void test_constant_comparisons(TestContext& test, CatalogView catalog) {
         "1 <= 1",
         "2 > 1",
         "2 >= 2",
+        "2147483648 > 1",
+        "2147483647 < 2147483648",
+        "9223372036854775807 = 9223372036854775807",
+        "1.0 = 1",
+        "1.5 > 1",
+        "2147483648 < 2147483648.5",
+        "9007199254740993 = 9007199254740992.0",
         "'A' = 'A'",
         "'A' != 'B'",
     };
@@ -202,6 +243,15 @@ void test_constant_comparisons(TestContext& test, CatalogView catalog) {
     test.expect(
         select != nullptr && has_compare(binary_of(select->predicate.get()), CmpOp::kNe),
         "constant FALSE keeps original comparison");
+
+    const BoundStatement mixed_false = optimize_sql(
+        "SELECT id FROM student WHERE 1 = 2147483648;",
+        catalog);
+    const BoundSelect* mixed_select = select_of(test, mixed_false);
+    test.expect(
+        mixed_select != nullptr && mixed_select->predicate != nullptr &&
+            has_compare(binary_of(mixed_select->predicate.get()), CmpOp::kEq),
+        "mixed INT/BIGINT constant FALSE retained");
 }
 
 void test_and_rules(TestContext& test, CatalogView catalog) {
@@ -510,7 +560,7 @@ void test_planner_compatibility(TestContext& test, CatalogView catalog) {
             "SELECT id FROM student WHERE NOT NOT age > 18;",
             catalog);
         auto select = std::get<BoundSelect>(std::move(statement.kind));
-        const Plan plan = generate_plan(std::move(select));
+        const Plan plan = plan_statement(std::move(select), catalog);
         const auto* query = std::get_if<QueryPlan>(&plan.kind);
         const auto* project = query == nullptr || query->root == nullptr
             ? nullptr
@@ -521,22 +571,37 @@ void test_planner_compatibility(TestContext& test, CatalogView catalog) {
         const auto* comparison = filter == nullptr
             ? nullptr
             : std::get_if<Binary>(&filter->predicate.kind);
-        test.expect(project != nullptr && project->outputs == std::vector<ColumnId>{0U}, "D17 Project output");
+        test.expect(project != nullptr && project->outputs == std::vector<SlotId>{0U}, "D17 Project output");
         test.expect(filter != nullptr && comparison != nullptr, "D17 optimized SELECT has Filter comparison");
         test.expect(
             comparison != nullptr && std::get_if<CmpOp>(&comparison->op) != nullptr &&
                 *std::get_if<CmpOp>(&comparison->op) == CmpOp::kGt,
             "D17 optimized SELECT comparison");
+        const auto* scan = filter == nullptr || filter->child == nullptr
+            ? nullptr
+            : std::get_if<SeqScanNode>(&filter->child->kind);
+        test.expect(scan != nullptr && has_student_mapping(scan->columns),
+                    "D17 optimized SELECT reaches mapped SeqScan");
+        const auto* column = comparison == nullptr || comparison->lhs == nullptr
+            ? nullptr
+            : std::get_if<ColumnRef>(&comparison->lhs->kind);
+        const ScanColumn* mapped_column = column == nullptr || scan == nullptr
+            ? nullptr
+            : scan_column_for_slot(scan->columns, column->slot_id);
         test.expect(
-            filter != nullptr && filter->child != nullptr &&
-                std::holds_alternative<SeqScanNode>(filter->child->kind),
-            "D17 optimized SELECT reaches SeqScan");
+            column != nullptr && column->slot_id == 2U && mapped_column != nullptr &&
+                mapped_column->column_id == 2U,
+            "D17 predicate SlotId resolves through scan mapping");
+        test.expect(
+            query != nullptr && project != nullptr && query->outputs.size() == 1 &&
+                query->outputs[0].slot_id == project->outputs[0],
+            "D17 QueryOutput matches Project position");
 
         BoundStatement true_statement = optimize_sql(
             "SELECT id FROM student WHERE NOT NOT (1 = 1);",
             catalog);
         auto true_select = std::get<BoundSelect>(std::move(true_statement.kind));
-        const Plan true_plan = generate_plan(std::move(true_select));
+        const Plan true_plan = plan_statement(std::move(true_select), catalog);
         const auto* true_query = std::get_if<QueryPlan>(&true_plan.kind);
         const auto* true_project = true_query == nullptr || true_query->root == nullptr
             ? nullptr
@@ -545,28 +610,47 @@ void test_planner_compatibility(TestContext& test, CatalogView catalog) {
             true_project != nullptr && true_project->child != nullptr &&
                 std::holds_alternative<SeqScanNode>(true_project->child->kind),
             "D17 TRUE SELECT omits Filter");
+        const auto* true_scan = true_project == nullptr || true_project->child == nullptr
+            ? nullptr
+            : std::get_if<SeqScanNode>(&true_project->child->kind);
+        test.expect(
+            true_scan != nullptr && has_student_mapping(true_scan->columns),
+            "D17 TRUE SELECT keeps mapped SeqScan");
     }
     {
         BoundStatement statement = optimize_sql(
             "DELETE FROM student WHERE NOT NOT id = 1;",
             catalog);
         auto deletion = std::get<BoundDelete>(std::move(statement.kind));
-        const Plan plan = generate_plan(std::move(deletion));
+        const Plan plan = plan_statement(std::move(deletion), catalog);
         const auto* delete_plan = std::get_if<DeletePlan>(&plan.kind);
         const auto* comparison = delete_plan == nullptr || !delete_plan->predicate.has_value()
             ? nullptr
             : std::get_if<Binary>(&delete_plan->predicate->kind);
         test.expect(delete_plan != nullptr && delete_plan->table_id == 7U, "D18 DELETE TableId");
         test.expect(
+            delete_plan != nullptr && has_student_mapping(delete_plan->input_columns),
+            "D18 DELETE input mapping");
+        test.expect(
             comparison != nullptr && std::get_if<CmpOp>(&comparison->op) != nullptr &&
                 *std::get_if<CmpOp>(&comparison->op) == CmpOp::kEq,
             "D18 optimized DELETE comparison");
+        const auto* delete_column = comparison == nullptr || comparison->lhs == nullptr
+            ? nullptr
+            : std::get_if<ColumnRef>(&comparison->lhs->kind);
+        const ScanColumn* delete_mapping = delete_plan == nullptr || delete_column == nullptr
+            ? nullptr
+            : scan_column_for_slot(delete_plan->input_columns, delete_column->slot_id);
+        test.expect(
+            delete_column != nullptr && delete_mapping != nullptr &&
+                delete_mapping->column_id == 0U,
+            "D18 predicate SlotId resolves through input mapping");
 
         BoundStatement true_statement = optimize_sql(
             "DELETE FROM student WHERE NOT NOT (1 = 1);",
             catalog);
         auto true_deletion = std::get<BoundDelete>(std::move(true_statement.kind));
-        const Plan true_plan = generate_plan(std::move(true_deletion));
+        const Plan true_plan = plan_statement(std::move(true_deletion), catalog);
         const auto* true_delete = std::get_if<DeletePlan>(&true_plan.kind);
         test.expect(
             true_delete != nullptr && !true_delete->predicate.has_value(),
@@ -849,6 +933,94 @@ void test_rule_identity_and_trace(TestContext& test, CatalogView catalog) {
     }
 }
 
+void test_order_by_preservation(TestContext& test, CatalogView catalog) {
+    OptimizationResult result = optimize_with_trace_sql(
+        "SELECT name FROM student WHERE 1 = 1 ORDER BY age DESC,id;",
+        catalog);
+    const BoundSelect* select = select_of(test, result.statement);
+    test.expect(select != nullptr && select->predicate == nullptr,
+                "ORDER BY optimizer: TRUE predicate removed");
+    test.expect(select != nullptr && select->order_by.size() == 2U,
+                "ORDER BY optimizer: keys preserved");
+    if (select != nullptr && select->order_by.size() == 2U) {
+        test.expect(select->order_by[0].column.table_id == 7U &&
+                        select->order_by[0].column.column_id == 2U &&
+                        select->order_by[0].direction == SortDirection::kDesc,
+                    "ORDER BY optimizer: age c2 DESC preserved");
+        test.expect(select->order_by[1].column.table_id == 7U &&
+                        select->order_by[1].column.column_id == 0U &&
+                        select->order_by[1].direction == SortDirection::kAsc,
+                    "ORDER BY optimizer: id c0 ASC preserved");
+    }
+    expect_trace(
+        test,
+        result.trace,
+        {OptimizationRule::kConstantComparison,
+         OptimizationRule::kRedundantTruePredicateElimination},
+        "ORDER BY optimizer: existing trace order unchanged");
+    const std::string plan = format_bound_plan(std::move(result.statement), catalog);
+    test.expect(
+        plan ==
+            "Project outputs=[s1]\n"
+            "└── Sort keys=[s2 DESC,s0 ASC]\n"
+            "    └── SeqScan table_id=7 columns=[c0->s0,c1->s1,c2->s2]\n",
+        "ORDER BY optimizer: planned topology");
+}
+
+void test_join_condition_optimization(TestContext& test, CatalogView catalog) {
+    OptimizationResult result = optimize_with_trace_sql(
+        "SELECT student.id FROM student JOIN flags ON 1=1 WHERE 1=1;",
+        catalog);
+    expect_trace(
+        test,
+        result.trace,
+        {OptimizationRule::kConstantComparison,
+         OptimizationRule::kConstantComparison,
+         OptimizationRule::kRedundantTruePredicateElimination},
+        "JOIN ON and WHERE trace order");
+    const std::string plan = format_bound_plan(std::move(result.statement), catalog);
+    test.expect(
+        plan.find("InnerJoin\n") != std::string::npos &&
+            plan.find("Filter\n") == std::string::npos,
+        "JOIN ON TRUE remains an InnerJoin while root WHERE TRUE is removed");
+}
+
+void test_aggregate_preservation(TestContext& test, CatalogView catalog) {
+    OptimizationResult result = optimize_with_trace_sql(
+        "SELECT name,COUNT(*),SUM(age) FROM student WHERE 1=1 "
+        "GROUP BY name ORDER BY name;",
+        catalog);
+    const BoundSelect* select = select_of(test, result.statement);
+    test.expect(select != nullptr && select->predicate == nullptr,
+                "aggregate optimizer: TRUE WHERE removed");
+    test.expect(select != nullptr && select->items.size() == 3U,
+                "aggregate optimizer: SELECT items preserved");
+    test.expect(select != nullptr && select->group_by.size() == 1U &&
+                    select->group_by[0].table_id == 7U &&
+                    select->group_by[0].column_id == 1U,
+                "aggregate optimizer: group key preserved");
+    test.expect(select != nullptr && select->order_by.size() == 1U,
+                "aggregate optimizer: ORDER BY preserved");
+    if (select != nullptr && select->items.size() == 3U) {
+        const auto* count = std::get_if<BoundAggregateCall>(&select->items[1]);
+        const auto* sum = std::get_if<BoundAggregateCall>(&select->items[2]);
+        test.expect(count != nullptr && count->kind == AggregateKind::kCount &&
+                        !count->argument.has_value(),
+                    "aggregate optimizer: COUNT star preserved");
+        test.expect(sum != nullptr && sum->kind == AggregateKind::kSum &&
+                        sum->argument.has_value() &&
+                        sum->argument->table_id == 7U &&
+                        sum->argument->column_id == 2U,
+                    "aggregate optimizer: SUM argument preserved");
+    }
+    expect_trace(
+        test,
+        result.trace,
+        {OptimizationRule::kConstantComparison,
+         OptimizationRule::kRedundantTruePredicateElimination},
+        "aggregate optimizer: existing trace unchanged");
+}
+
 void test_trace_idempotence_and_behavior(TestContext& test, CatalogView catalog) {
     {
         OptimizationResult first = optimize_with_trace_sql(
@@ -898,9 +1070,160 @@ void test_trace_idempotence_and_behavior(TestContext& test, CatalogView catalog)
     BoundStatement regular = optimize_sql(sql, catalog);
     OptimizationResult traced = optimize_with_trace_sql(sql, catalog);
     test.expect(
-        format_bound_plan(std::move(regular)) ==
-            format_bound_plan(std::move(traced.statement)),
+        format_bound_plan(std::move(regular), catalog) ==
+            format_bound_plan(std::move(traced.statement), catalog),
         "optimize and optimize_with_trace produce identical plan");
+}
+
+void test_boolean_literals(TestContext& test, CatalogView catalog) {
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT active FROM flags WHERE TRUE;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kRedundantTruePredicateElimination},
+            "literal TRUE root trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        test.expect(select != nullptr && select->predicate == nullptr,
+                    "literal TRUE removes root predicate");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT active FROM flags WHERE FALSE;", catalog);
+        expect_trace(test, result.trace, {}, "literal FALSE root trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        const auto* literal = select == nullptr || select->predicate == nullptr
+            ? nullptr
+            : std::get_if<BoundLiteral>(&select->predicate->kind);
+        const auto* value = literal == nullptr
+            ? nullptr
+            : std::get_if<bool>(&literal->value.data);
+        test.expect(value != nullptr && !*value, "literal FALSE predicate retained");
+    }
+    for (const std::string_view sql : {
+             "SELECT active FROM flags WHERE TRUE = TRUE;",
+             "SELECT active FROM flags WHERE TRUE != FALSE;"}) {
+        OptimizationResult result = optimize_with_trace_sql(sql, catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kConstantComparison,
+             OptimizationRule::kRedundantTruePredicateElimination},
+            "BOOLEAN constant comparison trace");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT active FROM flags WHERE TRUE AND FALSE;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kBooleanSimplification},
+            "BOOLEAN AND trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        test.expect(select != nullptr && select->predicate != nullptr,
+                    "TRUE AND FALSE remains false predicate");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT active FROM flags WHERE TRUE OR FALSE;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kBooleanSimplification,
+             OptimizationRule::kRedundantTruePredicateElimination},
+            "BOOLEAN OR trace");
+    }
+}
+
+void test_unknown_truth_value(TestContext& test, CatalogView catalog) {
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT id FROM student WHERE NULL;", catalog);
+        expect_trace(test, result.trace, {}, "literal UNKNOWN root trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        const auto* literal = select == nullptr || select->predicate == nullptr
+            ? nullptr
+            : std::get_if<BoundLiteral>(&select->predicate->kind);
+        test.expect(
+            literal != nullptr && std::holds_alternative<std::monostate>(literal->value.data),
+            "literal UNKNOWN root retained");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT id FROM student WHERE TRUE AND NULL;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kBooleanSimplification},
+            "TRUE AND UNKNOWN trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        const auto* literal = select == nullptr || select->predicate == nullptr
+            ? nullptr
+            : std::get_if<BoundLiteral>(&select->predicate->kind);
+        test.expect(
+            literal != nullptr && std::holds_alternative<std::monostate>(literal->value.data),
+            "TRUE AND UNKNOWN remains UNKNOWN");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT id FROM student WHERE FALSE OR NULL;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kBooleanSimplification},
+            "FALSE OR UNKNOWN trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        test.expect(select != nullptr && select->predicate != nullptr,
+                    "FALSE OR UNKNOWN root retained");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT id FROM student WHERE NULL AND age > 18;", catalog);
+        expect_trace(test, result.trace, {}, "UNKNOWN with nonconstant is not simplified");
+        const BoundSelect* select = select_of(test, result.statement);
+        test.expect(select != nullptr && select->predicate != nullptr,
+                    "UNKNOWN with nonconstant retained");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "SELECT id FROM student WHERE NULL = NULL;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kConstantComparison},
+            "NULL comparison trace");
+        const BoundSelect* select = select_of(test, result.statement);
+        test.expect(select != nullptr && select->predicate != nullptr,
+                    "NULL comparison folds to retained UNKNOWN");
+    }
+}
+
+void test_update_predicates(TestContext& test, CatalogView catalog) {
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "UPDATE student SET age=20 WHERE 1=1;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kConstantComparison,
+             OptimizationRule::kRedundantTruePredicateElimination},
+            "UPDATE TRUE trace");
+        const auto* update = std::get_if<BoundUpdate>(&result.statement.kind);
+        test.expect(update != nullptr && update->predicate == nullptr,
+                    "UPDATE TRUE predicate removed");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "UPDATE student SET age=20 WHERE NULL;", catalog);
+        expect_trace(test, result.trace, {}, "UPDATE UNKNOWN trace");
+        const auto* update = std::get_if<BoundUpdate>(&result.statement.kind);
+        test.expect(update != nullptr && update->predicate != nullptr,
+                    "UPDATE UNKNOWN predicate retained");
+    }
+    {
+        OptimizationResult result = optimize_with_trace_sql(
+            "UPDATE student SET age=20 WHERE age>18 AND TRUE;", catalog);
+        expect_trace(
+            test, result.trace,
+            {OptimizationRule::kBooleanSimplification},
+            "UPDATE AND TRUE trace");
+        const auto* update = std::get_if<BoundUpdate>(&result.statement.kind);
+        test.expect(update != nullptr && update->predicate != nullptr,
+                    "UPDATE simplified predicate retained");
+    }
 }
 
 void test_rule_registry(TestContext& test, CatalogView catalog) {
@@ -1012,6 +1335,9 @@ int main() {
             ColumnMeta{"id", Type::kInt},
             ColumnMeta{"name", Type::kVarchar},
             ColumnMeta{"age", Type::kInt},
+        }},
+        TableMeta{8U, "flags", {
+            ColumnMeta{"active", Type::kBoolean},
         }}
     };
     const CatalogView catalog{tables};
@@ -1028,7 +1354,13 @@ int main() {
     test_passthrough(test, catalog);
     test_rule_identity_and_trace(test, catalog);
     test_trace_idempotence_and_behavior(test, catalog);
+    test_boolean_literals(test, catalog);
+    test_unknown_truth_value(test, catalog);
+    test_update_predicates(test, catalog);
     test_rule_registry(test, catalog);
+    test_order_by_preservation(test, catalog);
+    test_join_condition_optimization(test, catalog);
+    test_aggregate_preservation(test, catalog);
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " optimizer test assertion(s) failed\n";

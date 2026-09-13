@@ -101,14 +101,35 @@ RenderResult render_script_result(
     const tinydbms::core::ExecuteScriptResult& result,
     CliEnvironment& environment) {
     RenderResult aggregate;
-    for (const auto& outcome : result.outcomes) {
-        const RenderResult current =
-            render_execute_result(outcome, environment.output, environment.error);
+    for (const auto& statement : result.statements) {
+        if (statement.status == tinydbms::core::StatementStatus::kAnalysisOnly) {
+            environment.output << "ANALYSIS ONLY\n";
+            aggregate.output_ok = aggregate.output_ok && static_cast<bool>(environment.output);
+            if (!aggregate.output_ok) {
+                break;
+            }
+            continue;
+        }
+        if (!statement.outcome.has_value()) {
+            const tinydbms::core::Error malformed{
+                tinydbms::core::ErrorKind::kInternal,
+                std::nullopt,
+                "statement result is missing its outcome"};
+            aggregate.output_ok = write_error(malformed, environment.error);
+            aggregate.had_error = true;
+            break;
+        }
+        const RenderResult current = render_execute_result(
+            *statement.outcome, environment.output, environment.error);
         aggregate.output_ok = aggregate.output_ok && current.output_ok;
         aggregate.had_error = aggregate.had_error || current.had_error;
         if (!current.output_ok) {
             break;
         }
+    }
+    if (aggregate.output_ok && result.script_error.has_value()) {
+        aggregate.output_ok = write_error(*result.script_error, environment.error);
+        aggregate.had_error = true;
     }
     return aggregate;
 }
@@ -157,13 +178,10 @@ bool run_repl(
 
         const tinydbms::core::ExecuteScriptResult result =
             session.execute_script(tinydbms::core::ExecuteScriptRequest{std::move(line)});
-        for (const auto& outcome : result.outcomes) {
-            const RenderResult rendered =
-                render_execute_result(outcome, environment.output, environment.error);
-            failed = failed || rendered.had_error || !rendered.output_ok;
-            if (!rendered.output_ok) {
-                return false;
-            }
+        const RenderResult rendered = render_script_result(result, environment);
+        failed = failed || rendered.had_error || !rendered.output_ok;
+        if (!rendered.output_ok) {
+            return false;
         }
     }
 }

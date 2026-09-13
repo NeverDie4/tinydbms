@@ -25,6 +25,24 @@ using tinydbms::compiler::internal::format_plan;
 constexpr std::uint32_t kSeed = 20260910U;
 constexpr std::size_t kGuaranteedCount = 1000;
 constexpr std::size_t kGeneralCount = 3000;
+constexpr std::uint32_t kBigIntOverflowSeed = 20260912U;
+constexpr std::size_t kBigIntOverflowCount = 250;
+constexpr std::uint32_t kDoubleInvalidSeed = 20260914U;
+constexpr std::size_t kDoubleInvalidCount = 300;
+constexpr std::uint32_t kBooleanInvalidSeed = 20260916U;
+constexpr std::size_t kBooleanInvalidCount = 300;
+constexpr std::uint32_t kNullInvalidSeed = 20260918U;
+constexpr std::size_t kNullInvalidCount = 400;
+constexpr std::uint32_t kUpdateInvalidSeed = 20260920U;
+constexpr std::size_t kUpdateInvalidCount = 500;
+constexpr std::uint32_t kOrderByInvalidSeed = 20260922U;
+constexpr std::size_t kOrderByInvalidCount = 500;
+constexpr std::uint32_t kJoinInvalidSeed = 20260924U;
+constexpr std::size_t kJoinInvalidCount = 600;
+constexpr std::uint32_t kAggregateInvalidSeed = 20260926U;
+constexpr std::size_t kAggregateInvalidCount = 700;
+constexpr std::uint32_t kDiagnosticsSeed = 20260927U;
+constexpr std::size_t kDiagnosticsCount = 1200;
 
 enum class MutationKind {
     kMissingSemicolon,
@@ -72,7 +90,7 @@ struct GuaranteedCase {
     MutationKind kind;
     std::string original;
     std::string mutated;
-    std::optional<CompileErrorKind> expected_kind;
+    std::optional<CompileStage> expected_stage;
 };
 
 struct GeneralCase {
@@ -238,67 +256,67 @@ struct GuaranteedStageCounts {
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM " + table.table_name,
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kIllegalCharacter:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT @ " + int_name + " FROM " + table.table_name + ';',
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kUnclosedString:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Alice';",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Alice;",
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kUnclosedBlockComment:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM " + table.table_name +
                         "; /* unfinished",
-                    CompileErrorKind::kLex};
+                    CompileStage::kLex};
         case MutationKind::kMissingSelectFrom:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + ' ' + table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + ' ' + valid_row(engine, table) + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingDeleteFrom:
             return {kind,
                     "DELETE FROM " + table.table_name + ';',
                     "DELETE " + table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kMissingCreateTable:
             return {kind,
                     "CREATE TABLE " + create_name + "(a INT);",
                     "CREATE " + create_name + "(a INT);",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kDuplicateDelimiter:
             return {kind,
                     "SELECT " + int_name + ',' + text_name + " FROM " +
                         table.table_name + ';',
                     "SELECT " + int_name + ",," + text_name + " FROM " +
                         table.table_name + ';',
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kBrokenLeftParenthesis:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1);",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " > 1 AND " + int_name + " = 1);",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kBrokenRightParenthesis:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1);",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE (" +
                         int_name + " > 1 AND " + int_name + " = 1;",
-                    CompileErrorKind::kSyntax};
+                    CompileStage::kSyntax};
         case MutationKind::kDoubleEqual:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
@@ -324,26 +342,26 @@ struct GuaranteedStageCounts {
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT " + int_name + " FROM fuzz_unknown_table;",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kUnknownColumn:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     "SELECT fuzz_unknown_column FROM " + table.table_name + ';',
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTypeMismatch:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 1;",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 'abc';",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kVarcharOrdering:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " = 'Tom';",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         text_name + " > 'Tom';",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kPartialInsertColumns:
             return {kind,
                     "INSERT INTO " + table.table_name + '(' +
@@ -352,7 +370,7 @@ struct GuaranteedStageCounts {
                     "INSERT INTO " + table.table_name + '(' +
                         table.columns[0].name + ',' + table.columns[1].name +
                         ") VALUES (1,'Alice');",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kDuplicateInsertColumn:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
@@ -360,37 +378,38 @@ struct GuaranteedStageCounts {
                     "INSERT INTO " + table.table_name + '(' +
                         table.columns[0].name + ',' + table.columns[0].name + ',' +
                         table.columns[2].name + ") VALUES (1,2,3);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTooFewInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES (1,'Alice');",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kTooManyInsertValues:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES (1,'Alice',20,100);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kWrongInsertType:
             return {kind,
                     "INSERT INTO " + table.table_name + " VALUES " +
                         valid_row(engine, table) + ';',
                     "INSERT INTO " + table.table_name + " VALUES ('wrong','Alice',20);",
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kNonBoolWhere:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + " = 1;",
                     "SELECT " + int_name + " FROM " + table.table_name + " WHERE " +
                         int_name + ';',
-                    CompileErrorKind::kSemantic};
+                    CompileStage::kSemantic};
         case MutationKind::kUnsupportedStatement:
             return {kind,
                     "SELECT " + int_name + " FROM " + table.table_name + ';',
                     iteration % 3 == 0
-                        ? "UPDATE " + table.table_name + " SET " + int_name + " = 1;"
+                        ? "SELECT " + int_name + " FROM " + table.table_name +
+                              " LIMIT 1;"
                         : (iteration % 3 == 1
                             ? "DROP TABLE " + table.table_name + ';'
                             : "ALTER TABLE " + table.table_name + " ADD x INT;"),
@@ -479,10 +498,10 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
 }
 
 [[nodiscard]] bool valid_error(const CompileError& error) {
-    const bool valid_kind = error.kind == CompileErrorKind::kLex ||
-                            error.kind == CompileErrorKind::kSyntax ||
-                            error.kind == CompileErrorKind::kSemantic;
-    return valid_kind && error.location.line >= 1 && error.location.column >= 1 &&
+    const bool valid_stage = error.stage == CompileStage::kLex ||
+                             error.stage == CompileStage::kSyntax ||
+                             error.stage == CompileStage::kSemantic;
+    return valid_stage && error.source.begin.line >= 1 && error.source.begin.column >= 1 &&
            !error.message.empty();
 }
 
@@ -493,6 +512,9 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
     }
     if (const auto* unary = std::get_if<Unary>(&expression.kind)) {
         return unary->operand != nullptr && valid_expression(*unary->operand);
+    }
+    if (const auto* null_test = std::get_if<NullTest>(&expression.kind)) {
+        return null_test->operand != nullptr && valid_expression(*null_test->operand);
     }
     return true;
 }
@@ -536,23 +558,68 @@ void apply_general_mutation(std::mt19937& engine, std::string& sql) {
     const auto* lhs_error = std::get_if<CompileError>(&lhs.outcome);
     const auto* rhs_error = std::get_if<CompileError>(&rhs.outcome);
     if (lhs_error != nullptr || rhs_error != nullptr) {
-        return lhs_error != nullptr && rhs_error != nullptr &&
-               lhs_error->kind == rhs_error->kind &&
-               lhs_error->location.line == rhs_error->location.line &&
-               lhs_error->location.column == rhs_error->location.column &&
-               lhs_error->message == rhs_error->message;
+        if (lhs_error == nullptr || rhs_error == nullptr ||
+            lhs_error->stage != rhs_error->stage ||
+            lhs_error->source.begin.line != rhs_error->source.begin.line ||
+            lhs_error->source.begin.column != rhs_error->source.begin.column ||
+            lhs_error->source.begin.byte_offset != rhs_error->source.begin.byte_offset ||
+            lhs_error->source.end.line != rhs_error->source.end.line ||
+            lhs_error->source.end.column != rhs_error->source.end.column ||
+            lhs_error->source.end.byte_offset != rhs_error->source.end.byte_offset ||
+            lhs_error->message != rhs_error->message ||
+            lhs_error->suggestion != rhs_error->suggestion ||
+            lhs_error->fix_it.has_value() != rhs_error->fix_it.has_value()) {
+            return false;
+        }
+        if (!lhs_error->fix_it.has_value()) {
+            return true;
+        }
+        return lhs_error->fix_it->range.begin.line == rhs_error->fix_it->range.begin.line &&
+               lhs_error->fix_it->range.begin.column == rhs_error->fix_it->range.begin.column &&
+               lhs_error->fix_it->range.end.line == rhs_error->fix_it->range.end.line &&
+               lhs_error->fix_it->range.end.column == rhs_error->fix_it->range.end.column &&
+               lhs_error->fix_it->replacement == rhs_error->fix_it->replacement;
     }
     return format_plan(std::get<Plan>(lhs.outcome)) ==
            format_plan(std::get<Plan>(rhs.outcome));
+}
+
+[[nodiscard]] std::size_t source_offset(
+    std::string_view source,
+    SourceLocation location) {
+    if (location.byte_offset <= source.size()) {
+        return location.byte_offset;
+    }
+    int line = 1;
+    int column = 1;
+    for (std::size_t offset = 0; offset < source.size(); ++offset) {
+        if (line == location.line && column == location.column) {
+            return offset;
+        }
+        if (source[offset] == '\n') {
+            ++line;
+            column = 1;
+        } else if (source[offset] != '\r') {
+            ++column;
+        }
+    }
+    return source.size();
+}
+
+[[nodiscard]] std::string apply_fix_it(std::string_view source, const FixIt& fix_it) {
+    const std::size_t begin = source_offset(source, fix_it.range.begin);
+    const std::size_t end = source_offset(source, fix_it.range.end);
+    return std::string{source.substr(0, begin)} + fix_it.replacement +
+        std::string{source.substr(end)};
 }
 
 void add_result(ResultCounts& counts, const CompileResult& result) {
     const auto* error = std::get_if<CompileError>(&result.outcome);
     if (error == nullptr) {
         ++counts.success;
-    } else if (error->kind == CompileErrorKind::kLex) {
+    } else if (error->stage == CompileStage::kLex) {
         ++counts.lex;
-    } else if (error->kind == CompileErrorKind::kSyntax) {
+    } else if (error->stage == CompileStage::kSyntax) {
         ++counts.syntax;
     } else {
         ++counts.semantic;
@@ -563,11 +630,11 @@ void add_result(ResultCounts& counts, const CompileResult& result) {
     const std::vector<GuaranteedCase>& cases) {
     GuaranteedStageCounts counts;
     for (const GuaranteedCase& item : cases) {
-        if (!item.expected_kind.has_value()) {
+        if (!item.expected_stage.has_value()) {
             ++counts.unspecified;
-        } else if (*item.expected_kind == CompileErrorKind::kLex) {
+        } else if (*item.expected_stage == CompileStage::kLex) {
             ++counts.lex;
-        } else if (*item.expected_kind == CompileErrorKind::kSyntax) {
+        } else if (*item.expected_stage == CompileStage::kSyntax) {
             ++counts.syntax;
         } else {
             ++counts.semantic;
@@ -611,6 +678,51 @@ void print_general_context(std::size_t iteration, const GeneralCase& item) {
     std::cerr << "seed=" << kSeed << " iteration=" << iteration
               << "\noriginal: " << item.original
               << "\nmutated: " << item.mutated << '\n';
+}
+
+[[nodiscard]] std::string generate_overflow_literal(std::mt19937& engine) {
+    const int length = random_int(engine, 20, 40);
+    std::string literal;
+    literal.reserve(static_cast<std::size_t>(length));
+    literal += static_cast<char>('1' + random_int(engine, 0, 8));
+    for (int index = 1; index < length; ++index) {
+        literal += static_cast<char>('0' + random_int(engine, 0, 9));
+    }
+    return literal;
+}
+
+[[nodiscard]] std::string generate_double_range_literal(std::mt19937& engine) {
+    const int length = random_int(engine, 310, 360);
+    std::string literal;
+    literal.reserve(static_cast<std::size_t>(length) + 2U);
+    literal += static_cast<char>('1' + random_int(engine, 0, 8));
+    for (int index = 1; index < length; ++index) {
+        literal += static_cast<char>('0' + random_int(engine, 0, 9));
+    }
+    literal += ".0";
+    return literal;
+}
+
+[[nodiscard]] std::string generate_invalid_double_syntax(
+    std::mt19937& engine,
+    std::size_t iteration) {
+    const std::string digits = std::to_string(random_int(engine, 1, 999999));
+    switch (iteration % 7U) {
+        case 0:
+            return '.' + digits;
+        case 1:
+            return digits + '.';
+        case 2:
+            return digits + "e3";
+        case 3:
+            return digits + ".0e3";
+        case 4:
+            return digits + "..0";
+        case 5:
+            return '-' + digits + ".5";
+        default:
+            return '+' + digits + ".5";
+    }
 }
 
 }  // namespace
@@ -682,13 +794,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "invalid CompileError\n";
             return 1;
         }
-        if (item.expected_kind.has_value() && error->kind != *item.expected_kind) {
+        if (item.expected_stage.has_value() && error->stage != *item.expected_stage) {
             print_guaranteed_context(iteration, item);
             std::cerr << "error stage mismatch: expected="
-                      << static_cast<int>(*item.expected_kind)
-                      << " actual=" << static_cast<int>(error->kind)
-                      << " location=" << error->location.line << ':'
-                      << error->location.column << " message=" << error->message << '\n';
+                      << static_cast<int>(*item.expected_stage)
+                      << " actual=" << static_cast<int>(error->stage)
+                      << " location=" << error->source.begin.line << ':'
+                      << error->source.begin.column << " message=" << error->message << '\n';
             return 1;
         }
         if (iteration % 113 == 0) {
@@ -758,6 +870,402 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::mt19937 overflow_engine{kBigIntOverflowSeed};
+    for (std::size_t iteration = 0; iteration < kBigIntOverflowCount; ++iteration) {
+        const std::string literal = generate_overflow_literal(overflow_engine);
+        const CompileResult result = compile(CompileRequest{
+            "INSERT INTO student VALUES (" + literal + ",'Alice',20);",
+            catalog
+        });
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || error->stage != CompileStage::kLex) {
+            std::cerr << "BIGINT overflow seed=" << kBigIntOverflowSeed
+                      << " iteration=" << iteration << " literal=" << literal
+                      << " did not produce Lex Error\n";
+            return 1;
+        }
+    }
+
+
+    std::mt19937 double_engine{kDoubleInvalidSeed};
+    std::size_t double_syntax_count = 0;
+    std::size_t double_range_count = 0;
+    for (std::size_t iteration = 0; iteration < kDoubleInvalidCount; ++iteration) {
+        const bool range_case = iteration % 5U == 0U;
+        const std::string literal = range_case
+            ? generate_double_range_literal(double_engine)
+            : generate_invalid_double_syntax(double_engine, iteration);
+        const CompileResult result = compile(CompileRequest{
+            "SELECT id FROM student WHERE id = " + literal + ";",
+            catalog
+        });
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr ||
+            (range_case &&
+             (error->stage != CompileStage::kLex ||
+              error->message != "floating literal out of range"))) {
+            std::cerr << "DOUBLE invalid seed=" << kDoubleInvalidSeed
+                      << " iteration=" << iteration << " literal=" << literal
+                      << " did not produce the expected error\n";
+            return 1;
+        }
+        if (range_case) {
+            ++double_range_count;
+        } else {
+            ++double_syntax_count;
+        }
+    }
+
+    const std::vector<TableMeta> boolean_tables{
+        TableMeta{702U, "boolean_values", {
+            ColumnMeta{"flag", Type::kBoolean},
+            ColumnMeta{"small", Type::kInt},
+            ColumnMeta{"large", Type::kBigInt},
+            ColumnMeta{"measure", Type::kDouble},
+            ColumnMeta{"label", Type::kVarchar},
+        }}
+    };
+    const CatalogView boolean_catalog{std::span<const TableMeta>{boolean_tables}};
+    static constexpr std::array<std::string_view, 15> boolean_invalid_sql{
+        "SELECT flag FROM boolean_values WHERE flag < TRUE;",
+        "SELECT flag FROM boolean_values WHERE flag <= FALSE;",
+        "SELECT flag FROM boolean_values WHERE TRUE > flag;",
+        "SELECT flag FROM boolean_values WHERE FALSE >= flag;",
+        "SELECT flag FROM boolean_values WHERE flag = 1;",
+        "SELECT flag FROM boolean_values WHERE flag = 2147483648;",
+        "SELECT flag FROM boolean_values WHERE flag = 1.5;",
+        "SELECT flag FROM boolean_values WHERE flag = 'true';",
+        "INSERT INTO boolean_values VALUES (1,1,1,1.0,'x');",
+        "INSERT INTO boolean_values VALUES ('true',1,1,1.0,'x');",
+        "INSERT INTO boolean_values VALUES (TRUE,TRUE,1,1.0,'x');",
+        "INSERT INTO boolean_values VALUES (TRUE,1,TRUE,1.0,'x');",
+        "INSERT INTO boolean_values VALUES (TRUE,1,1,TRUE,'x');",
+        "INSERT INTO boolean_values VALUES (TRUE,1,1,1.0,TRUE);",
+        "SELECT flag FROM boolean_values WHERE 1 OR FALSE;",
+    };
+    std::mt19937 boolean_engine{kBooleanInvalidSeed};
+    std::size_t boolean_semantic_count = 0;
+    for (std::size_t iteration = 0; iteration < kBooleanInvalidCount; ++iteration) {
+        const std::size_t offset = random_index(boolean_engine, boolean_invalid_sql.size());
+        const std::string_view sql = boolean_invalid_sql[
+            (iteration + offset) % boolean_invalid_sql.size()];
+        const CompileResult result = compile(CompileRequest{std::string{sql}, boolean_catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || error->stage != CompileStage::kSemantic) {
+            std::cerr << "BOOLEAN invalid seed=" << kBooleanInvalidSeed
+                      << " iteration=" << iteration << "\nSQL: " << sql
+                      << "\nexpected Semantic Error\n";
+            return 1;
+        }
+        ++boolean_semantic_count;
+    }
+
+    const std::vector<TableMeta> null_tables{
+        TableMeta{703U, "nullable_values", {
+            ColumnMeta{"id", Type::kInt, false},
+            ColumnMeta{"note", Type::kVarchar, true},
+        }}
+    };
+    const CatalogView null_catalog{std::span<const TableMeta>{null_tables}};
+    static constexpr std::array<std::string_view, 11> null_invalid_sql{
+        "CREATE TABLE bad(id INT NOT);",
+        "CREATE TABLE bad(id INT NULL NULL);",
+        "CREATE TABLE bad(id INT NOT NULL NULL);",
+        "CREATE TABLE bad(id INT NULL NOT NULL);",
+        "CREATE TABLE bad(NULL INT);",
+        "CREATE TABLE bad(IS INT);",
+        "SELECT id FROM nullable_values WHERE note IS;",
+        "SELECT id FROM nullable_values WHERE note IS NOT;",
+        "SELECT id FROM nullable_values WHERE note IS TRUE;",
+        "SELECT id FROM nullable_values WHERE note IS NOT FALSE;",
+        "INSERT INTO nullable_values VALUES (NULL,'bad');",
+    };
+    std::mt19937 null_engine{kNullInvalidSeed};
+    for (std::size_t iteration = 0; iteration < kNullInvalidCount; ++iteration) {
+        const std::string_view sql =
+            null_invalid_sql[random_index(null_engine, null_invalid_sql.size())];
+        const CompileResult result = compile(CompileRequest{std::string{sql}, null_catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || !valid_error(*error)) {
+            std::cerr << "NULL invalid seed=" << kNullInvalidSeed
+                      << " iteration=" << iteration << "\nSQL: " << sql
+                      << "\nexpected compile error\n";
+            return 1;
+        }
+        const CompileResult repeated = compile(CompileRequest{std::string{sql}, null_catalog});
+        if (!same_result(result, repeated)) {
+            std::cerr << "NULL invalid determinism failure: seed=" << kNullInvalidSeed
+                      << " iteration=" << iteration << '\n';
+            return 1;
+        }
+    }
+
+    const std::vector<TableMeta> update_tables{
+        TableMeta{704U,"update_values",{
+            {"id",Type::kInt,false},{"big_id",Type::kBigInt,false},
+            {"measure",Type::kDouble,false},{"active",Type::kBoolean,true},
+            {"note",Type::kVarchar,true}}}};
+    const CatalogView update_catalog{std::span<const TableMeta>{update_tables}};
+    static constexpr std::array<std::string_view,22> update_invalid_sql{
+        "UPDATE;",
+        "UPDATE update_values;",
+        "UPDATE update_values SET;",
+        "UPDATE update_values SET id;",
+        "UPDATE update_values SET id=;",
+        "UPDATE update_values SET id=1,;",
+        "UPDATE update_values SET id=1,,note='x';",
+        "UPDATE update_values SET id=1 WHERE;",
+        "UPDATE update_values SET id=big_id;",
+        "UPDATE update_values SET id=1,note=;",
+        "UPDATE missing SET id=1;",
+        "UPDATE update_values SET missing=1;",
+        "UPDATE update_values SET id=1,id=2;",
+        "UPDATE update_values SET id='x';",
+        "UPDATE update_values SET id=NULL;",
+        "UPDATE update_values SET id=2147483648;",
+        "UPDATE update_values SET big_id=1.5;",
+        "UPDATE update_values SET big_id=TRUE;",
+        "UPDATE update_values SET active=1;",
+        "UPDATE update_values SET note=TRUE;",
+        "UPDATE update_values SET id=1 WHERE id;",
+        "UPDATE update_values SET id=1 WHERE missing=1;"};
+    std::mt19937 update_engine{kUpdateInvalidSeed};
+    for(std::size_t iteration=0;iteration<kUpdateInvalidCount;++iteration) {
+        const std::string_view sql=update_invalid_sql[
+            random_index(update_engine,update_invalid_sql.size())];
+        const CompileResult result=compile(CompileRequest{std::string{sql},update_catalog});
+        const auto* error=std::get_if<CompileError>(&result.outcome);
+        if(error==nullptr || !valid_error(*error)) {
+            std::cerr<<"UPDATE invalid seed="<<kUpdateInvalidSeed
+                     <<" iteration="<<iteration<<"\nSQL: "<<sql
+                     <<"\nexpected compile error\n";return 1;
+        }
+        const CompileResult repeated=compile(CompileRequest{std::string{sql},update_catalog});
+        if(!same_result(result,repeated)) {
+            std::cerr<<"UPDATE invalid determinism failure: seed="<<kUpdateInvalidSeed
+                     <<" iteration="<<iteration<<'\n';return 1;
+        }
+    }
+
+    static constexpr std::array<std::string_view, 20> order_by_invalid_sql{
+        "SELECT id FROM student ORDER;",
+        "SELECT id FROM student ORDER id;",
+        "SELECT id FROM student ORDER BY;",
+        "SELECT id FROM student ORDER BY id,;",
+        "SELECT id FROM student ORDER BY ,id;",
+        "SELECT id FROM student ORDER BY id ASC DESC;",
+        "SELECT id FROM student ORDER BY id DESC ASC;",
+        "SELECT id FROM student ORDER BY 1;",
+        "SELECT id FROM student ORDER BY TRUE;",
+        "SELECT id FROM student ORDER BY NULL;",
+        "SELECT id FROM student ORDER BY 1.5;",
+        "SELECT id FROM student ORDER BY *;",
+        "SELECT id FROM student ORDER BY id = 1;",
+        "SELECT id FROM student ORDER BY student.*;",
+        "SELECT id FROM student ORDER BY id NULLS FIRST;",
+        "SELECT id FROM student ORDER BY id COLLATE binary;",
+        "SELECT id FROM student ORDER BY missing;",
+        "SELECT id FROM student ORDER BY id WHERE id=1;",
+        "DELETE FROM student ORDER BY id;",
+        "UPDATE student SET age=1 ORDER BY id;"};
+    std::mt19937 order_invalid_engine{kOrderByInvalidSeed};
+    for (std::size_t iteration = 0; iteration < kOrderByInvalidCount; ++iteration) {
+        const std::string_view sql = order_by_invalid_sql[
+            random_index(order_invalid_engine, order_by_invalid_sql.size())];
+        const CompileResult result = compile(CompileRequest{std::string{sql}, catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || !valid_error(*error)) {
+            std::cerr << "ORDER BY invalid seed=" << kOrderByInvalidSeed
+                      << " iteration=" << iteration << "\nSQL: " << sql
+                      << "\nexpected compile error\n";
+            return 1;
+        }
+        const CompileResult repeated = compile(CompileRequest{std::string{sql}, catalog});
+        if (!same_result(result, repeated)) {
+            std::cerr << "ORDER BY invalid determinism failure: seed="
+                      << kOrderByInvalidSeed << " iteration=" << iteration << '\n';
+            return 1;
+        }
+    }
+
+    const std::vector<TableMeta> join_tables{
+        TableMeta{800U, "lhs_values", {
+            {"id", Type::kInt, false}, {"shared", Type::kVarchar, true},
+            {"left_only", Type::kInt, false}}},
+        TableMeta{801U, "rhs_values", {
+            {"id", Type::kInt, true}, {"shared", Type::kVarchar, false},
+            {"right_only", Type::kInt, false}}},
+        TableMeta{802U, "third_values", {{"id", Type::kInt, false}}}};
+    const CatalogView join_catalog{std::span<const TableMeta>{join_tables}};
+    static constexpr std::array<std::string_view, 25> join_invalid_sql{
+        "SELECT lhs_values.id FROM lhs_values JOIN;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values;",
+        "SELECT lhs_values.id FROM lhs_values INNER rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values LEFT JOIN rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values RIGHT JOIN rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values FULL JOIN rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values CROSS JOIN rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values NATURAL JOIN rhs_values;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values USING(id);",
+        "SELECT lhs_values.id FROM lhs_values,rhs_values;",
+        "SELECT lhs_values.* FROM lhs_values JOIN rhs_values ON TRUE;",
+        "SELECT l.id FROM lhs_values l JOIN rhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values r ON TRUE;",
+        "SELECT missing.id FROM lhs_values JOIN rhs_values ON TRUE;",
+        "SELECT rhs_values.missing FROM lhs_values JOIN rhs_values ON TRUE;",
+        "SELECT id FROM lhs_values JOIN rhs_values ON lhs_values.id=rhs_values.id;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON id=id;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON TRUE WHERE shared='x';",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON TRUE ORDER BY shared;",
+        "SELECT lhs_values.id FROM lhs_values JOIN lhs_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON rhs_values.right_only;",
+        "SELECT lhs_values.id FROM lhs_values JOIN missing ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON third_values.id=rhs_values.id JOIN third_values ON TRUE;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON lhs_values.=rhs_values.id;",
+        "SELECT lhs_values.id FROM lhs_values JOIN rhs_values ON lhs_values.id=rhs_values.;"};
+    std::mt19937 join_invalid_engine{kJoinInvalidSeed};
+    for (std::size_t iteration = 0; iteration < kJoinInvalidCount; ++iteration) {
+        const std::string_view sql = join_invalid_sql[
+            random_index(join_invalid_engine, join_invalid_sql.size())];
+        const CompileResult result = compile(CompileRequest{std::string{sql}, join_catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || !valid_error(*error)) {
+            std::cerr << "JOIN invalid seed=" << kJoinInvalidSeed
+                      << " iteration=" << iteration << "\nSQL: " << sql
+                      << "\nexpected compile error\n";
+            return 1;
+        }
+        const CompileResult repeated = compile(CompileRequest{std::string{sql}, join_catalog});
+        if (!same_result(result, repeated)) {
+            std::cerr << "JOIN invalid determinism failure: seed=" << kJoinInvalidSeed
+                      << " iteration=" << iteration << '\n';
+            return 1;
+        }
+    }
+
+    const std::vector<TableMeta> aggregate_tables{
+        TableMeta{900U, "aggregate_values", {
+            {"id", Type::kInt, false}, {"big_id", Type::kBigInt, true},
+            {"measure", Type::kDouble, true}, {"active", Type::kBoolean, true},
+            {"note", Type::kVarchar, true}}},
+        TableMeta{901U, "aggregate_rhs", {
+            {"id", Type::kInt, false}, {"amount", Type::kInt, true}}}};
+    const CatalogView aggregate_catalog{std::span<const TableMeta>{aggregate_tables}};
+    static constexpr std::array<std::string_view, 38> aggregate_invalid_sql{
+        "SELECT SUM(*) FROM aggregate_values;",
+        "SELECT AVG(*) FROM aggregate_values;",
+        "SELECT COUNT() FROM aggregate_values;",
+        "SELECT COUNT(1) FROM aggregate_values;",
+        "SELECT SUM(id,id) FROM aggregate_values;",
+        "SELECT COUNT(DISTINCT id) FROM aggregate_values;",
+        "SELECT SUM(id+id) FROM aggregate_values;",
+        "SELECT SUM(COUNT(id)) FROM aggregate_values;",
+        "SELECT COUNT(*) total FROM aggregate_values;",
+        "SELECT COUNT(*) AS total FROM aggregate_values;",
+        "SELECT COUNT(*) FROM aggregate_values HAVING COUNT(*)>0;",
+        "SELECT COUNT(*) OVER () FROM aggregate_values;",
+        "SELECT note,COUNT(*) FROM aggregate_values;",
+        "SELECT note,id,COUNT(*) FROM aggregate_values GROUP BY note;",
+        "SELECT * FROM aggregate_values GROUP BY note;",
+        "SELECT * FROM aggregate_values GROUP BY note,active;",
+        "SELECT note,COUNT(*) FROM aggregate_values GROUP BY active;",
+        "SELECT note,COUNT(*) FROM aggregate_values GROUP BY note ORDER BY id;",
+        "SELECT COUNT(*) FROM aggregate_values GROUP BY missing;",
+        "SELECT COUNT(*) FROM aggregate_values JOIN aggregate_rhs "
+        "ON aggregate_values.id=aggregate_rhs.id GROUP BY id;",
+        "SELECT SUM(active) FROM aggregate_values;",
+        "SELECT SUM(note) FROM aggregate_values;",
+        "SELECT AVG(active) FROM aggregate_values;",
+        "SELECT AVG(note) FROM aggregate_values;",
+        "SELECT MIN(active) FROM aggregate_values;",
+        "SELECT MAX(active) FROM aggregate_values;",
+        "SELECT SUM(missing) FROM aggregate_values;",
+        "SELECT COUNT(missing.id) FROM aggregate_values;",
+        "SELECT COUNT(aggregate_rhs.amount) FROM aggregate_values;",
+        "SELECT id FROM aggregate_values WHERE COUNT(*)=1;",
+        "SELECT id FROM aggregate_values JOIN aggregate_rhs ON COUNT(*)=1;",
+        "DELETE FROM aggregate_values WHERE COUNT(*)=1;",
+        "UPDATE aggregate_values SET id=COUNT(*);",
+        "SELECT COUNT(*) FROM aggregate_values GROUP BY COUNT(*);",
+        "SELECT COUNT(*) FROM aggregate_values GROUP BY 1;",
+        "SELECT COUNT(*) FROM aggregate_values GROUP id;",
+        "SELECT COUNT(*) FROM aggregate_values GROUP BY id,;",
+        "SELECT COUNT(*) FROM aggregate_values GROUP BY;"};
+    std::mt19937 aggregate_invalid_engine{kAggregateInvalidSeed};
+    for (std::size_t iteration = 0; iteration < kAggregateInvalidCount; ++iteration) {
+        const std::string_view sql = aggregate_invalid_sql[
+            random_index(aggregate_invalid_engine, aggregate_invalid_sql.size())];
+        const CompileResult result = compile(CompileRequest{std::string{sql}, aggregate_catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || !valid_error(*error)) {
+            std::cerr << "Aggregate invalid seed=" << kAggregateInvalidSeed
+                      << " iteration=" << iteration << "\nSQL: " << sql
+                      << "\nexpected compile error\n";
+            return 1;
+        }
+        const CompileResult repeated =
+            compile(CompileRequest{std::string{sql}, aggregate_catalog});
+        if (!same_result(result, repeated)) {
+            std::cerr << "Aggregate invalid determinism failure: seed="
+                      << kAggregateInvalidSeed << " iteration=" << iteration << '\n';
+            return 1;
+        }
+    }
+
+    struct DiagnosticCase {
+        std::string_view category;
+        std::string_view sql;
+        bool expects_suggestion;
+        bool expects_fix_it;
+    };
+    static constexpr std::array diagnostic_cases{
+        DiagnosticCase{"keyword", "SELETC id FROM student;", true, true},
+        DiagnosticCase{"comma", "SELECT id name FROM student;", false, true},
+        DiagnosticCase{"right_parenthesis", "SELECT COUNT(* FROM student;", false, true},
+        DiagnosticCase{"semicolon", "SELECT id FROM student", false, true},
+        DiagnosticCase{"table", "SELECT * FROM studnet;", true, false},
+        DiagnosticCase{"column", "SELECT naem FROM student;", true, false},
+        DiagnosticCase{"qualified", "SELECT student.naem FROM student;", true, false},
+        DiagnosticCase{"far", "SELECT * FROM completely_unrelated;", false, false},
+    };
+    std::array<std::size_t, diagnostic_cases.size()> diagnostic_counts{};
+    std::mt19937 diagnostics_engine{kDiagnosticsSeed};
+    for (std::size_t iteration = 0; iteration < kDiagnosticsCount; ++iteration) {
+        const std::size_t category =
+            (iteration + random_index(diagnostics_engine, diagnostic_cases.size())) %
+            diagnostic_cases.size();
+        ++diagnostic_counts[category];
+        const DiagnosticCase& item = diagnostic_cases[category];
+        const CompileResult result = compile(CompileRequest{std::string{item.sql}, catalog});
+        const CompileResult repeated = compile(CompileRequest{std::string{item.sql}, catalog});
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        if (error == nullptr || !valid_error(*error) || !same_result(result, repeated) ||
+            error->suggestion.has_value() != item.expects_suggestion ||
+            error->fix_it.has_value() != item.expects_fix_it) {
+            std::cerr << "Diagnostics fuzz seed=" << kDiagnosticsSeed
+                      << " iteration=" << iteration << " category=" << item.category
+                      << "\nSQL: " << item.sql << "\nunexpected diagnostic\n";
+            return 1;
+        }
+        if (error->fix_it.has_value()) {
+            const std::size_t begin = source_offset(item.sql, error->fix_it->range.begin);
+            const std::size_t end = source_offset(item.sql, error->fix_it->range.end);
+            if (begin > end || end > item.sql.size()) {
+                std::cerr << "Diagnostics fuzz invalid FixIt range: seed="
+                          << kDiagnosticsSeed << " iteration=" << iteration << '\n';
+                return 1;
+            }
+            const std::string corrected = apply_fix_it(item.sql, *error->fix_it);
+            const CompileResult fixed = compile(CompileRequest{corrected, catalog});
+            if (!std::holds_alternative<Plan>(fixed.outcome)) {
+                std::cerr << "Diagnostics fuzz FixIt did not compile: seed="
+                          << kDiagnosticsSeed << " iteration=" << iteration
+                          << "\nSQL: " << item.sql << "\nfixed: " << corrected << '\n';
+                return 1;
+            }
+        }
+    }
+
     if (argc == 2 && std::string_view{argv[1]} == "--stats") {
         std::cout << "seed=" << kSeed
                   << " guaranteed_total=" << corpus.guaranteed.size()
@@ -774,6 +1282,32 @@ int main(int argc, char* argv[]) {
                   << " lex=" << general_results.lex
                   << " syntax=" << general_results.syntax
                   << " semantic=" << general_results.semantic << '\n';
+        std::cout << "bigint_overflow_seed=" << kBigIntOverflowSeed
+                  << " bigint_overflow_total=" << kBigIntOverflowCount
+                  << "\ndouble_invalid_seed=" << kDoubleInvalidSeed
+                  << " double_invalid_total=" << kDoubleInvalidCount
+                  << " syntax_invalid=" << double_syntax_count
+                  << " range_invalid=" << double_range_count
+                  << "\nboolean_invalid_seed=" << kBooleanInvalidSeed
+                  << " boolean_invalid_total=" << kBooleanInvalidCount
+                  << " semantic_invalid=" << boolean_semantic_count
+                  << "\nnull_invalid_seed=" << kNullInvalidSeed
+                  << " null_invalid_total=" << kNullInvalidCount
+                  << "\nupdate_invalid_seed=" << kUpdateInvalidSeed
+                  << " update_invalid_total=" << kUpdateInvalidCount
+                  << "\norder_by_invalid_seed=" << kOrderByInvalidSeed
+                  << " order_by_invalid_total=" << kOrderByInvalidCount
+                  << "\njoin_invalid_seed=" << kJoinInvalidSeed
+                  << " join_invalid_total=" << kJoinInvalidCount
+                  << "\naggregate_invalid_seed=" << kAggregateInvalidSeed
+                  << " aggregate_invalid_total=" << kAggregateInvalidCount
+                  << "\ndiagnostics_seed=" << kDiagnosticsSeed
+                  << " diagnostics_total=" << kDiagnosticsCount;
+        for (std::size_t index = 0; index < diagnostic_cases.size(); ++index) {
+            std::cout << ' ' << diagnostic_cases[index].category << '='
+                      << diagnostic_counts[index];
+        }
+        std::cout << '\n';
     }
     return 0;
 }

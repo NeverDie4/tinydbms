@@ -23,6 +23,7 @@ struct State {
     std::size_t close_cursor_calls = 0;
     std::size_t insert_calls = 0;
     std::size_t delete_calls = 0;
+    std::size_t update_calls = 0;
 
     std::vector<std::string> call_order;
     std::vector<TableMeta> tables;
@@ -35,6 +36,7 @@ struct State {
     std::optional<storage::CloseCursorRequest> last_close_cursor_request;
     std::optional<storage::InsertRequest> last_insert_request;
     std::optional<storage::DeleteRequest> last_delete_request;
+    std::optional<storage::UpdateRequest> last_update_request;
     std::optional<storage::StorageError> open_error;
     std::optional<storage::StorageError> close_error;
     std::optional<storage::StorageError> list_tables_error;
@@ -48,6 +50,7 @@ struct State {
     std::optional<storage::CloseCursorResult> close_cursor_result;
     std::optional<storage::InsertResult> insert_result;
     std::optional<storage::DeleteResult> delete_result;
+    std::optional<storage::UpdateResult> update_result;
     storage::CursorId active_cursor = 0;
     std::optional<TableId> active_table_id;
     storage::CursorId next_cursor_id = 1;
@@ -90,6 +93,7 @@ void set_scan_results(std::deque<storage::ScanNextResult> results);
 void set_close_cursor_result(storage::CloseCursorResult result);
 void set_insert_result(storage::InsertResult result);
 void set_delete_result(storage::DeleteResult result);
+void set_update_result(storage::UpdateResult result);
 void set_throw_on_open(bool enabled);
 void set_throw_after_open(bool enabled);
 void set_throw_before_close(bool enabled);

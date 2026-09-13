@@ -112,6 +112,21 @@ struct DeleteResult {
     std::optional<StorageError> error;
 };
 
+struct UpdateRow {
+    RecordId rid;
+    std::vector<Value> values;
+};
+
+struct UpdateRequest {
+    TableId table_id;
+    std::vector<UpdateRow> rows;
+};
+
+struct UpdateResult {
+    std::uint64_t updated_count;
+    std::optional<StorageError> error;
+};
+
 OpenStorageResult open_storage(const OpenStorageRequest& request);
 CloseStorageResult close_storage(const CloseStorageRequest& request);
 ListTablesResult list_tables(const ListTablesRequest& request);
@@ -121,6 +136,7 @@ ScanNextResult scan_next(const ScanNextRequest& request);
 CloseCursorResult close_cursor(const CloseCursorRequest& request);
 InsertResult insert(const InsertRequest& request);
 DeleteResult delete_records(const DeleteRequest& request);  // 避开 C++ delete 关键字
+UpdateResult update_rows(const UpdateRequest& request);
 
 }  // namespace tinydbms::storage
 
