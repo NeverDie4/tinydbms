@@ -263,34 +263,50 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
         1,
         8);
 
-    test.begin_case("integer boundaries");
-    plan_of(test, compile_sql("SELECT id FROM numbers WHERE 0 <= 2147483647;", catalog));
+    test.begin_case("integer boundaries and leading zeros");
+    for (const std::string_view literal : {
+             "0", "1", "2147483646", "2147483647", "2147483648", "2147483649",
+             "9223372036854775806", "9223372036854775807",
+             "0000000000000000000000001", "0002147483647", "0002147483648",
+             "0009223372036854775807"}) {
+        plan_of(
+            test,
+            compile_sql(
+                "SELECT id FROM numbers WHERE 0 <= " + std::string{literal} + ";",
+                catalog));
+    }
 
-    test.begin_case("negative integer and INT32_MIN");
-    plan_of(test, compile_sql("SELECT id FROM numbers WHERE id >= -2147483648;", catalog));
-    plan_of(test, compile_sql("INSERT INTO numbers VALUES (-1),(-2147483648);", catalog));
+    test.begin_case("negative integers are lex errors");
+    error_of(
+        test,
+        compile_sql("SELECT id FROM numbers WHERE id >= -1;", catalog),
+        CompileErrorKind::kLex);
+    error_of(
+        test,
+        compile_sql("SELECT id FROM numbers WHERE id >= -2147483648;", catalog),
+        CompileErrorKind::kLex);
 
-    test.begin_case("positive integer overflow is semantic error");
+    test.begin_case("INT64 overflow is lex error");
     expect_location(
         test,
         error_of(
             test,
-            compile_sql("SELECT id FROM numbers WHERE id = 2147483648;", catalog),
-            CompileErrorKind::kSemantic),
+            compile_sql("SELECT id FROM numbers WHERE id = 9223372036854775808;", catalog),
+            CompileErrorKind::kLex),
         1,
         35);
 
-    test.begin_case("negative integer overflow is semantic error");
+    test.begin_case("leading-zero INT64 overflow is lex error");
     expect_location(
         test,
         error_of(
             test,
-            compile_sql("SELECT id FROM numbers WHERE id = -2147483649;", catalog),
-            CompileErrorKind::kSemantic),
+            compile_sql("SELECT id FROM numbers WHERE id = 0009223372036854775808;", catalog),
+            CompileErrorKind::kLex),
         1,
         35);
 
-    test.begin_case("very long integer is stable semantic error");
+    test.begin_case("very long integer is stable lex error");
     expect_location(
         test,
         error_of(
@@ -298,7 +314,7 @@ void test_lexical_and_locations(TestContext& test, CatalogView catalog) {
             compile_sql(
                 "SELECT id FROM numbers WHERE id = 999999999999999999999999999999;",
                 catalog),
-            CompileErrorKind::kSemantic),
+            CompileErrorKind::kLex),
         1,
         35);
 
@@ -420,6 +436,10 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "INSERT INTO student(aGe,ID,NaMe) VALUES (20,1,'Alice'),(21,2,'Bob');",
         "SELECT id,name,age FROM student;",
         "SELECT * FROM student WHERE id = 1;",
+        "SELECT COUNT(*),COUNT(age),SUM(age),AVG(age),MIN(name),MAX(age) FROM student;",
+        "SELECT name,COUNT(*) FROM student WHERE age > 0 GROUP BY name ORDER BY name;",
+        "SELECT COUNT(*) FROM table_a JOIN table_b ON table_a.id=table_b.score "
+        "GROUP BY table_a.id;",
         "DELETE FROM student;",
         "DELETE FROM student WHERE name != 'Alice';",
     };
@@ -437,6 +457,14 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "SELECT *,id FROM student;",
         "SELECT id,* FROM student;",
         "SELECT id,,age FROM student;",
+        "SELECT SUM(*) FROM student;",
+        "SELECT COUNT(1) FROM student;",
+        "SELECT SUM(age = 1) FROM student;",
+        "SELECT COUNT(DISTINCT age) FROM student;",
+        "SELECT COUNT(*) FROM student GROUP age;",
+        "SELECT COUNT(*) FROM student GROUP BY age,;",
+        "SELECT COUNT(*) FROM student GROUP BY 1;",
+        "SELECT COUNT(*) FROM student HAVING COUNT(*) > 0;",
         "DELETE FROM student WHERE;",
     };
     for (const std::string_view sql : invalid_syntax) {
@@ -526,12 +554,39 @@ void test_parser_and_semantics(TestContext& test, CatalogView catalog) {
         "SELECT id FROM student WHERE 1;",
         "SELECT id FROM student WHERE id = '1';",
         "SELECT id FROM student WHERE name > 'A';",
-        "SELECT id FROM student WHERE (id = 1) = (age = 2);",
     };
     for (const std::string_view sql : invalid_predicates) {
         test.begin_case("invalid predicate semantics");
         error_of(test, compile_sql(std::string{sql}, catalog), CompileErrorKind::kSemantic);
     }
+
+    const std::vector<std::string_view> invalid_aggregates{
+        "SELECT name,COUNT(*) FROM student;",
+        "SELECT name,age,COUNT(*) FROM student GROUP BY name;",
+        "SELECT * FROM student GROUP BY name;",
+        "SELECT SUM(name) FROM student;",
+        "SELECT AVG(name) FROM student;",
+        "SELECT COUNT(*) FROM student GROUP BY missing;",
+        "SELECT COUNT(*) FROM table_a JOIN student ON table_a.id=student.id GROUP BY id;",
+        "SELECT COUNT(*) FROM student WHERE COUNT(*) = 1;",
+        "DELETE FROM student WHERE COUNT(*) = 1;",
+        "UPDATE student SET age=1 WHERE COUNT(*) = 1;",
+    };
+    for (const std::string_view sql : invalid_aggregates) {
+        test.begin_case("invalid aggregate semantics or placement");
+        const CompileResult result = compile_sql(std::string{sql}, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr, "aggregate form rejected");
+        if (error != nullptr) {
+            test.expect(
+                error->kind == CompileErrorKind::kSyntax ||
+                    error->kind == CompileErrorKind::kSemantic,
+                "aggregate rejection is syntax or semantic");
+        }
+    }
+
+    test.begin_case("BOOLEAN equality predicate accepted");
+    plan_of(test, compile_sql("SELECT id FROM student WHERE (id = 1) = (age = 2);", catalog));
 
     test.begin_case("duplicate SELECT projection retained");
     const auto duplicate = compile_sql("SELECT id,id FROM student;", catalog);
@@ -684,11 +739,14 @@ void test_public_defense_and_state(TestContext& test, CatalogView catalog, std::
         error_of(test, compile_sql(std::string{sql}, catalog), kind);
     }
 
-    test.begin_case("unsupported UPDATE remains rejected");
-    test.expect(
-        std::holds_alternative<CompileError>(
-            compile_sql("UPDATE student SET id = 1;", catalog).outcome),
-        "UPDATE rejected");
+    test.begin_case("UPDATE is accepted without changing unsupported statements");
+    const CompileResult update=compile_sql("UPDATE student SET id = 1;",catalog);
+    const Plan* update_plan=std::get_if<Plan>(&update.outcome);
+    test.expect(update_plan!=nullptr && std::holds_alternative<UpdatePlan>(update_plan->kind),
+                "UPDATE accepted");
+    test.expect(std::holds_alternative<CompileError>(
+                    compile_sql("DROP TABLE student;",catalog).outcome),
+                "unsupported DROP remains rejected");
 
     test.begin_case("ten repeated compiles agree");
     for (int iteration = 0; iteration < 10; ++iteration) {

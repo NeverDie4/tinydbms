@@ -50,6 +50,17 @@ const DeleteAst* expect_delete(TestContext& test, std::string_view name, const P
     return deletion;
 }
 
+const UpdateAst* expect_update(TestContext& test, std::string_view name, const ParseResult& result) {
+    const auto* statement = std::get_if<StatementAst>(&result.outcome);
+    test.expect(statement != nullptr, std::string{name} + ": parse success");
+    if (statement == nullptr) {
+        return nullptr;
+    }
+    const auto* update = std::get_if<UpdateAst>(&statement->kind);
+    test.expect(update != nullptr, std::string{name} + ": update AST");
+    return update;
+}
+
 void expect_error(
     TestContext& test,
     std::string_view name,
@@ -118,6 +129,58 @@ int main() {
     expect_error(test, "extra close paren", "DELETE FROM t WHERE a = 1)", {1, 26}, "';'");
     expect_error(test, "missing semicolon", "DELETE FROM t WHERE a = 1", {1, 26}, "';'");
     expect_error(test, "trailing token", "DELETE FROM t; abc", {1, 16}, "end of statement");
+
+    {
+        const auto result = parse_sql(
+            test,
+            "update multiple",
+            "UpDaTe Users SeT name='alice',active=FALSE,note=NULL WHERE id=2;");
+        const auto* update = expect_update(test, "update multiple", result);
+        if (update != nullptr) {
+            test.expect(update->table_name == "users", "update multiple: normalized table");
+            test.expect(update->assignments.size() == 3U, "update multiple: assignment count");
+            if (update->assignments.size() == 3U) {
+                test.expect(update->assignments[0].column_name == "name", "update multiple: order 0");
+                test.expect(
+                    std::get<std::string>(update->assignments[0].literal.value.data) == "alice",
+                    "update multiple: string literal");
+                test.expect(update->assignments[1].column_name == "active", "update multiple: order 1");
+                test.expect(
+                    !std::get<bool>(update->assignments[1].literal.value.data),
+                    "update multiple: boolean literal");
+                test.expect(
+                    std::holds_alternative<std::monostate>(
+                        update->assignments[2].literal.value.data),
+                    "update multiple: NULL literal");
+            }
+            test.expect(update->predicate != nullptr, "update multiple: predicate");
+        }
+    }
+    {
+        const auto result = parse_sql(test, "update all", "UPDATE users SET active=TRUE;");
+        const auto* update = expect_update(test, "update all", result);
+        test.expect(update != nullptr && update->assignments.size() == 1U,
+                    "update all: one assignment");
+        test.expect(update != nullptr && update->predicate == nullptr,
+                    "update all: no predicate");
+    }
+    for (const auto& [name, sql] : {
+             std::pair{"update only", "UPDATE;"},
+             std::pair{"missing set", "UPDATE t;"},
+             std::pair{"empty set", "UPDATE t SET;"},
+             std::pair{"missing equals", "UPDATE t SET a;"},
+             std::pair{"missing target", "UPDATE t SET = 1;"},
+             std::pair{"missing literal", "UPDATE t SET a =;"},
+             std::pair{"trailing comma", "UPDATE t SET a = 1,;"},
+             std::pair{"missing comma", "UPDATE t SET a = 1 b = 2;"},
+             std::pair{"column rhs", "UPDATE t SET a = b;"},
+             std::pair{"where without set", "UPDATE t WHERE id=1;"},
+             std::pair{"empty update where", "UPDATE t SET a=1 WHERE;"}}) {
+        const auto result = parse_sql(test, name, sql);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->kind == CompileErrorKind::kSyntax,
+                    std::string{name} + ": syntax error");
+    }
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " delete parser assertion(s) failed\n";

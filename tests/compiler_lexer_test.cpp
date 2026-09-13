@@ -138,7 +138,7 @@ int main() {
     expect_tokens(
         test,
         "keywords",
-        "CREATE TABLE INSERT INTO VALUES SELECT FROM WHERE DELETE AND OR NOT INT VARCHAR",
+        "CREATE TABLE INSERT INTO VALUES SELECT FROM JOIN INNER ON WHERE ORDER BY GROUP COUNT SUM AVG MIN MAX ASC DESC DELETE UPDATE SET AND OR NOT IS NULL INT BIGINT DOUBLE BOOLEAN VARCHAR TRUE FALSE",
         {
             {TokenKind::kCreate, "create"},
             {TokenKind::kTable, "table"},
@@ -147,19 +147,85 @@ int main() {
             {TokenKind::kValues, "values"},
             {TokenKind::kSelect, "select"},
             {TokenKind::kFrom, "from"},
+            {TokenKind::kJoin, "join"},
+            {TokenKind::kInner, "inner"},
+            {TokenKind::kOn, "on"},
             {TokenKind::kWhere, "where"},
+            {TokenKind::kOrder, "order"},
+            {TokenKind::kBy, "by"},
+            {TokenKind::kGroup, "group"},
+            {TokenKind::kCount, "count"},
+            {TokenKind::kSum, "sum"},
+            {TokenKind::kAvg, "avg"},
+            {TokenKind::kMin, "min"},
+            {TokenKind::kMax, "max"},
+            {TokenKind::kAsc, "asc"},
+            {TokenKind::kDesc, "desc"},
             {TokenKind::kDelete, "delete"},
+            {TokenKind::kUpdate, "update"},
+            {TokenKind::kSet, "set"},
             {TokenKind::kAnd, "and"},
             {TokenKind::kOr, "or"},
             {TokenKind::kNot, "not"},
+            {TokenKind::kIs, "is"},
+            {TokenKind::kNull, "null"},
             {TokenKind::kInt, "int"},
+            {TokenKind::kBigInt, "bigint"},
+            {TokenKind::kDouble, "double"},
+            {TokenKind::kBoolean, "boolean"},
             {TokenKind::kVarchar, "varchar"},
+            {TokenKind::kTrue, "true"},
+            {TokenKind::kFalse, "false"},
         });
     expect_tokens(
         test,
         "keyword case",
-        "SeLeCt FROM where",
-        {{TokenKind::kSelect, "select"}, {TokenKind::kFrom, "from"}, {TokenKind::kWhere, "where"}});
+        "SeLeCt FROM JoIn InNeR oN where OrDeR By aSc DeSc",
+        {{TokenKind::kSelect, "select"}, {TokenKind::kFrom, "from"},
+         {TokenKind::kJoin, "join"}, {TokenKind::kInner, "inner"},
+         {TokenKind::kOn, "on"}, {TokenKind::kWhere, "where"}, {TokenKind::kOrder, "order"},
+         {TokenKind::kBy, "by"}, {TokenKind::kAsc, "asc"},
+         {TokenKind::kDesc, "desc"}});
+    expect_tokens(
+        test,
+        "aggregate keyword case",
+        "GrOuP CoUnT SuM AvG MiN MaX",
+        {{TokenKind::kGroup, "group"}, {TokenKind::kCount, "count"},
+         {TokenKind::kSum, "sum"}, {TokenKind::kAvg, "avg"},
+         {TokenKind::kMin, "min"}, {TokenKind::kMax, "max"}});
+    expect_tokens(
+        test,
+        "BIGINT keyword case",
+        "BIGINT bigint BigInt",
+        {{TokenKind::kBigInt, "bigint"}, {TokenKind::kBigInt, "bigint"}, {TokenKind::kBigInt, "bigint"}});
+    expect_tokens(
+        test,
+        "DOUBLE keyword case",
+        "DOUBLE double Double",
+        {{TokenKind::kDouble, "double"}, {TokenKind::kDouble, "double"}, {TokenKind::kDouble, "double"}});
+    expect_tokens(
+        test,
+        "BOOLEAN keyword and literal case",
+        "BOOLEAN boolean Boolean TRUE true TrUe FALSE false FaLsE",
+        {{TokenKind::kBoolean, "boolean"}, {TokenKind::kBoolean, "boolean"},
+         {TokenKind::kBoolean, "boolean"}, {TokenKind::kTrue, "true"},
+         {TokenKind::kTrue, "true"}, {TokenKind::kTrue, "true"},
+         {TokenKind::kFalse, "false"}, {TokenKind::kFalse, "false"},
+         {TokenKind::kFalse, "false"}});
+    expect_tokens(
+        test,
+        "NULL and IS keyword case",
+        "NULL null NuLl IS is Is",
+        {{TokenKind::kNull, "null"}, {TokenKind::kNull, "null"},
+         {TokenKind::kNull, "null"}, {TokenKind::kIs, "is"},
+         {TokenKind::kIs, "is"}, {TokenKind::kIs, "is"}});
+    expect_tokens(
+        test,
+        "UPDATE and SET keyword case",
+        "UPDATE update UpDaTe SET set SeT",
+        {{TokenKind::kUpdate, "update"}, {TokenKind::kUpdate, "update"},
+         {TokenKind::kUpdate, "update"}, {TokenKind::kSet, "set"},
+         {TokenKind::kSet, "set"}, {TokenKind::kSet, "set"}});
     expect_tokens(
         test,
         "identifiers",
@@ -180,34 +246,77 @@ int main() {
     expect_tokens(
         test,
         "integers",
-        "0 123 2147483647",
+        "0 123 2147483647 2147483648 9223372036854775807 0009223372036854775807",
         {
             {TokenKind::kIntegerLiteral, "0"},
             {TokenKind::kIntegerLiteral, "123"},
             {TokenKind::kIntegerLiteral, "2147483647"},
+            {TokenKind::kIntegerLiteral, "2147483648"},
+            {TokenKind::kIntegerLiteral, "9223372036854775807"},
+            {TokenKind::kIntegerLiteral, "0009223372036854775807"},
+        });
+    expect_lex_error(
+        test,
+        "negative integer",
+        "-1",
+        {1, 1},
+        "invalid character");
+    expect_lex_error(
+        test,
+        "INT32_MIN spelling rejected",
+        "-2147483648",
+        {1, 1},
+        "invalid character");
+    expect_lex_error(test, "unary plus rejected", "+1", {1, 1}, "invalid character");
+    expect_lex_error(
+        test,
+        "INT64 overflow",
+        "9223372036854775808",
+        {1, 1},
+        "integer literal out of range");
+    expect_lex_error(
+        test,
+        "leading zero INT64 overflow",
+        "0009223372036854775808",
+        {1, 1},
+        "integer literal out of range");
+    expect_lex_error(
+        test,
+        "very long integer overflow",
+        "999999999999999999999999",
+        {1, 1},
+        "integer literal out of range");
+    expect_tokens(
+        test,
+        "double literals",
+        "0.0 1.0 12.5 00012.500 2147483648.0 9223372036854775807.0",
+        {
+            {TokenKind::kDoubleLiteral, "0.0"},
+            {TokenKind::kDoubleLiteral, "1.0"},
+            {TokenKind::kDoubleLiteral, "12.5"},
+            {TokenKind::kDoubleLiteral, "00012.500"},
+            {TokenKind::kDoubleLiteral, "2147483648.0"},
+            {TokenKind::kDoubleLiteral, "9223372036854775807.0"},
         });
     expect_tokens(
         test,
-        "negative integers",
-        "-1 -2147483648",
+        "dot remains independent",
+        ".5 1. abc.def",
         {
-            {TokenKind::kIntegerLiteral, "-1"},
-            {TokenKind::kIntegerLiteral, "-2147483648"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIntegerLiteral, "5"},
+            {TokenKind::kIntegerLiteral, "1"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIdentifier, "abc"},
+            {TokenKind::kDot, "."},
+            {TokenKind::kIdentifier, "def"},
         });
     expect_lex_error(
         test,
-        "positive integer overflow",
-        "2147483648",
+        "double overflow",
+        "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.0",
         {1, 1},
-        "integer",
-        CompileErrorKind::kSemantic);
-    expect_lex_error(
-        test,
-        "negative integer overflow",
-        "-2147483649",
-        {1, 1},
-        "integer",
-        CompileErrorKind::kSemantic);
+        "floating literal out of range");
 
     expect_tokens(test, "string", "'Alice'", {{TokenKind::kStringLiteral, "Alice"}});
     expect_tokens(test, "empty string", "''", {{TokenKind::kStringLiteral, ""}});

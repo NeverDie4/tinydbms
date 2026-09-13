@@ -21,10 +21,16 @@ namespace tinydbms::storage {
 namespace {
 
 enum class Lifecycle { kClosed, kOpen, kClosing };
+enum class MetadataFormat { kV1, kV2 };
+struct StoredTable {
+    TableMeta metadata;
+    internal::RowFormat row_format;
+};
 struct StorageState {
     Lifecycle lifecycle = Lifecycle::kClosed;
+    MetadataFormat metadata_format = MetadataFormat::kV2;
     std::filesystem::path data_dir;
-    std::vector<TableMeta> tables;
+    std::vector<StoredTable> tables;
     std::unique_ptr<internal::FileManager> file_manager;
     std::unique_ptr<internal::BufferPool> buffer_pool; // Destroyed before FileManager.
     std::unique_ptr<internal::CursorRegistry> cursors; // Destroyed before borrowed resources.
@@ -118,17 +124,37 @@ std::filesystem::path temporary_metadata_path() {
     return state.data_dir / "storage.meta.tmp";
 }
 
-std::optional<std::string_view> type_name(Type type) {
+std::optional<std::string_view> v1_type_name(Type type) {
     switch (type) {
         case Type::kInt:
             return "INT32";
+        case Type::kVarchar:
+            return "VARCHAR";
+        case Type::kBigInt:
+        case Type::kDouble:
+        case Type::kBoolean:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string_view> v2_type_name(Type type) {
+    switch (type) {
+        case Type::kInt:
+            return "INT32";
+        case Type::kBigInt:
+            return "INT64";
+        case Type::kDouble:
+            return "DOUBLE";
+        case Type::kBoolean:
+            return "BOOLEAN";
         case Type::kVarchar:
             return "VARCHAR";
     }
     return std::nullopt;
 }
 
-std::optional<Type> parse_type(std::string_view name) {
+std::optional<Type> parse_v1_type(std::string_view name) {
     if (name == "INT32" || name == "INT") {
         return Type::kInt;
     }
@@ -138,14 +164,39 @@ std::optional<Type> parse_type(std::string_view name) {
     return std::nullopt;
 }
 
-bool is_normalized_identifier(std::string_view name);
-bool has_valid_columns(const std::vector<ColumnMeta>& columns);
+std::optional<Type> parse_v2_type(std::string_view name) {
+    if (name == "INT32") {
+        return Type::kInt;
+    }
+    if (name == "INT64") {
+        return Type::kBigInt;
+    }
+    if (name == "DOUBLE") {
+        return Type::kDouble;
+    }
+    if (name == "BOOLEAN") {
+        return Type::kBoolean;
+    }
+    if (name == "VARCHAR") {
+        return Type::kVarchar;
+    }
+    return std::nullopt;
+}
 
-bool read_metadata(std::ifstream& input, std::vector<TableMeta>& tables, bool& unsupported_schema) {
+bool is_normalized_identifier(std::string_view name);
+bool has_valid_columns(
+    const std::vector<ColumnMeta>& columns, internal::RowFormat row_format);
+
+bool read_metadata(
+    std::ifstream& input, std::vector<StoredTable>& tables,
+    MetadataFormat& metadata_format, bool& unsupported_schema) {
     std::string line;
-    if (!std::getline(input, line) || line != "TINYDBMS_STORAGE_V1") {
+    if (!std::getline(input, line)) {
         return false;
     }
+    const bool is_v1 = line == "TINYDBMS_STORAGE_V1";
+    if (!is_v1 && line != "TINYDBMS_STORAGE_V2") return false;
+    metadata_format = is_v1 ? MetadataFormat::kV1 : MetadataFormat::kV2;
     while (std::getline(input, line)) {
         if (line == "END") {
             // Only whitespace may follow the final marker; never ignore extra tables/data.
@@ -157,15 +208,23 @@ bool read_metadata(std::ifstream& input, std::vector<TableMeta>& tables, bool& u
         std::istringstream table_stream(line);
         std::string marker;
         std::string id_token, extra;
+        std::string row_format_token;
         TableMeta table;
         if (!(table_stream >> marker >> id_token >> table.table_name) || marker != "TABLE" ||
-            (table_stream >> extra) || !is_normalized_identifier(table.table_name)) {
+            (!is_v1 && !(table_stream >> row_format_token)) || (table_stream >> extra) ||
+            !is_normalized_identifier(table.table_name)) {
             return false;
+        }
+        internal::RowFormat row_format = internal::RowFormat::kV1;
+        if (!is_v1) {
+            if (row_format_token == "V2") row_format = internal::RowFormat::kV2;
+            else if (row_format_token != "V1") return false;
         }
         const auto parsed_id=std::from_chars(id_token.data(),id_token.data()+id_token.size(),table.table_id);
         if (parsed_id.ec!=std::errc{} || parsed_id.ptr!=id_token.data()+id_token.size()) return false;
         for (const auto& existing:tables)
-            if (existing.table_id==table.table_id || existing.table_name==table.table_name) return false;
+            if (existing.metadata.table_id==table.table_id ||
+                existing.metadata.table_name==table.table_name) return false;
         bool ended=false;
         while (std::getline(input, line)) {
             if (line == "ENDTABLE") {
@@ -174,22 +233,47 @@ bool read_metadata(std::ifstream& input, std::vector<TableMeta>& tables, bool& u
             }
             std::istringstream column_stream(line);
             std::string type;
+            std::string nullability;
             ColumnMeta column;
-            if (!(column_stream >> marker >> type >> column.name) || marker != "COLUMN" || (column_stream >> extra)) {
+            if (!(column_stream >> marker >> type) || marker != "COLUMN" ||
+                (!is_v1 && !(column_stream >> nullability)) ||
+                !(column_stream >> column.name) || (column_stream >> extra)) {
                 return false;
             }
-            const auto parsed_type = parse_type(type);
+            const auto parsed_type = is_v1 ? parse_v1_type(type) : parse_v2_type(type);
             if (!parsed_type.has_value()) {
-                unsupported_schema = type == "INT64" || type == "FLOAT" || type == "DOUBLE" || type == "BOOL";
+                unsupported_schema = is_v1 &&
+                    (type == "INT64" || type == "FLOAT" || type == "DOUBLE" ||
+                     type == "BOOL" || type == "BOOLEAN");
                 return false;
             }
             column.type = *parsed_type;
+            if (!is_v1) {
+                if (nullability == "NULLABLE") column.nullable = true;
+                else if (nullability != "NOT_NULL") return false;
+            }
             table.columns.push_back(std::move(column));
         }
-        if (!ended || table.columns.empty() || !has_valid_columns(table.columns)) {
+        if (!ended || table.columns.empty()) {
             return false;
         }
-        tables.push_back(std::move(table));
+        bool schema_supported = true;
+        for (const ColumnMeta& column : table.columns) {
+            const bool type_supported = column.type == Type::kInt ||
+                column.type == Type::kVarchar ||
+                (row_format == internal::RowFormat::kV2 &&
+                 (column.type == Type::kBigInt || column.type == Type::kDouble ||
+                  column.type == Type::kBoolean));
+            if ((row_format == internal::RowFormat::kV1 && column.nullable) ||
+                !type_supported) {
+                schema_supported = false;
+            }
+        }
+        if (!schema_supported || !has_valid_columns(table.columns,row_format)) {
+            unsupported_schema = !schema_supported;
+            return false;
+        }
+        tables.push_back(StoredTable{std::move(table),row_format});
     }
     return false;
 }
@@ -207,17 +291,32 @@ std::optional<StorageError> write_metadata() {
         if (!output) {
             return error(StorageErrorKind::kIoError, "cannot write temporary storage metadata");
         }
-        output << "TINYDBMS_STORAGE_V1\n";
-        for (const TableMeta& table : state.tables) {
-            output << "TABLE " << table.table_id << ' ' << table.table_name << "\n";
+        output << (state.metadata_format == MetadataFormat::kV1
+                       ? "TINYDBMS_STORAGE_V1\n"
+                       : "TINYDBMS_STORAGE_V2\n");
+        for (const StoredTable& stored : state.tables) {
+            const TableMeta& table = stored.metadata;
+            output << "TABLE " << table.table_id << ' ' << table.table_name;
+            if (state.metadata_format == MetadataFormat::kV2) {
+                output << (stored.row_format == internal::RowFormat::kV1 ? " V1\n" : " V2\n");
+            } else {
+                output << '\n';
+            }
             for (const ColumnMeta& column : table.columns) {
-                const auto name = type_name(column.type);
+                const auto name = state.metadata_format == MetadataFormat::kV1
+                    ? v1_type_name(column.type) : v2_type_name(column.type);
                 if (!name.has_value()) {
                     output.close();
                     std::filesystem::remove(temporary_path, filesystem_error);
                     return error(StorageErrorKind::kInvalidRequest, "unknown column type");
                 }
-                output << "COLUMN " << *name << ' ' << column.name << "\n";
+                output << "COLUMN " << *name;
+                if (state.metadata_format == MetadataFormat::kV2) {
+                    output << (column.nullable ? " NULLABLE " : " NOT_NULL ");
+                } else {
+                    output << ' ';
+                }
+                output << column.name << "\n";
             }
             output << "ENDTABLE\n";
         }
@@ -252,8 +351,8 @@ std::optional<StorageError> write_metadata() {
 }
 
 bool has_table_name(std::string_view name) {
-    for (const TableMeta& table : state.tables) {
-        if (table.table_name == name) {
+    for (const StoredTable& table : state.tables) {
+        if (table.metadata.table_name == name) {
             return true;
         }
     }
@@ -277,9 +376,17 @@ bool is_normalized_identifier(std::string_view name) {
     return true;
 }
 
-bool has_valid_columns(const std::vector<ColumnMeta>& columns) {
+bool has_valid_columns(
+    const std::vector<ColumnMeta>& columns, internal::RowFormat row_format) {
     for (std::size_t index = 0; index < columns.size(); ++index) {
-        if (!is_normalized_identifier(columns[index].name) || !type_name(columns[index].type).has_value()) {
+        const Type type = columns[index].type;
+        const bool supported = type == Type::kInt || type == Type::kVarchar ||
+            (row_format == internal::RowFormat::kV2 &&
+             (type == Type::kBigInt || type == Type::kDouble ||
+              type == Type::kBoolean));
+        if (!is_normalized_identifier(columns[index].name) ||
+            (row_format == internal::RowFormat::kV1 && columns[index].nullable) ||
+            !supported) {
             return false;
         }
         for (std::size_t other = 0; other < index; ++other) {
@@ -291,9 +398,9 @@ bool has_valid_columns(const std::vector<ColumnMeta>& columns) {
     return true;
 }
 
-const TableMeta* find_table(TableId table_id) {
-    for (const TableMeta& table : state.tables) {
-        if (table.table_id == table_id) {
+const StoredTable* find_table(TableId table_id) {
+    for (const StoredTable& table : state.tables) {
+        if (table.metadata.table_id == table_id) {
             return &table;
         }
     }
@@ -341,7 +448,8 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
                 return {error(StorageErrorKind::kIoError,"cannot open storage.meta")};
             }
             bool unsupported_schema = false;
-            if (!read_metadata(input, state.tables, unsupported_schema)) {
+            if (!read_metadata(
+                    input,state.tables,state.metadata_format,unsupported_schema)) {
                 const bool io_failed=input.bad();
                 state.data_dir.clear();
                 return {error(io_failed ? StorageErrorKind::kIoError
@@ -397,8 +505,9 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
             reset_state();
             return {mapped};
         }
-        for (const TableMeta& table : state.tables) {
-            auto opened_table = (*file_manager.value)->open_table_file(table.table_id);
+        for (const StoredTable& table : state.tables) {
+            auto opened_table =
+                (*file_manager.value)->open_table_file(table.metadata.table_id);
             if (!opened_table.value.has_value()) {
                 const auto mapped = file_error(*opened_table.error, true);
                 reset_state();
@@ -469,7 +578,10 @@ ListTablesResult list_tables(const ListTablesRequest&) {
         if (state.lifecycle != Lifecycle::kOpen) {
             return {{}, error(StorageErrorKind::kInvalidRequest, "storage is not open")};
         }
-        return {state.tables, std::nullopt};
+        std::vector<TableMeta> tables;
+        tables.reserve(state.tables.size());
+        for (const StoredTable& table : state.tables) tables.push_back(table.metadata);
+        return {std::move(tables), std::nullopt};
     } catch (...) {
         return {{}, unexpected_exception_error()};
     }
@@ -481,7 +593,7 @@ CreateTableResult create_table(const CreateTableRequest& request) {
             return {error(StorageErrorKind::kInvalidRequest, "storage is not open")};
         }
         if (!is_normalized_identifier(request.table_name) || request.columns.empty() ||
-            !has_valid_columns(request.columns)) {
+            !has_valid_columns(request.columns,internal::RowFormat::kV2)) {
             return {error(StorageErrorKind::kInvalidRequest, "invalid table definition")};
         }
         if (find_table(request.table_id) != nullptr || has_table_name(request.table_name)) {
@@ -493,9 +605,14 @@ CreateTableResult create_table(const CreateTableRequest& request) {
             return {file_error(*created_file.error, true)};
         }
 
-        state.tables.push_back(TableMeta{request.table_id, request.table_name, request.columns});
+        const MetadataFormat previous_format = state.metadata_format;
+        state.metadata_format = MetadataFormat::kV2;
+        state.tables.push_back(StoredTable{
+            TableMeta{request.table_id, request.table_name, request.columns},
+            internal::RowFormat::kV2});
         if (const auto write_error = write_metadata(); write_error.has_value()) {
             state.tables.pop_back();
+            state.metadata_format = previous_format;
             if (const auto rollback_error = state.file_manager->remove_table_file(request.table_id);
                 rollback_error.has_value()) {
                 return {error(StorageErrorKind::kIoError,
@@ -519,7 +636,7 @@ OpenTableResult open_table(const OpenTableRequest& request) {
         if (table == nullptr) {
             return {std::nullopt, error(StorageErrorKind::kTableNotFound, "table does not exist")};
         }
-        auto result=state.cursors->create(*table);
+        auto result=state.cursors->create(table->metadata,table->row_format);
         return {result.value,data_error(result.error)};
     } catch (...) {
         return {std::nullopt, unexpected_exception_error()};
@@ -555,7 +672,8 @@ InsertResult insert(const InsertRequest& request) {
             return {{}, error(StorageErrorKind::kInvalidRequest, "insert batch is empty")};
         if(state.cursors->has_cursor(request.table_id))
             return {{},error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
         auto result=heap.insert_batch(request.rows);
         return {std::move(result.record_ids),data_error(result.error)};
     } catch (...) {
@@ -571,11 +689,29 @@ DeleteResult delete_records(const DeleteRequest& request) {
         if(request.rids.empty())return {};
         if(state.cursors->has_cursor(request.table_id))
             return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
         auto result=heap.delete_batch(request.rids);
         return {result.deleted_count,data_error(result.error)};
     } catch (...) {
         return {0, unexpected_exception_error()};
+    }
+}
+
+UpdateResult update_rows(const UpdateRequest& request) {
+    try {
+        if(auto e=require_data_open())return {0,std::move(e)};
+        const auto* table=find_table(request.table_id);
+        if(!table)return {0,error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(request.rows.empty())return {};
+        if(state.cursors->has_cursor(request.table_id))
+            return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
+        auto result=heap.update_batch(request.rows);
+        return {result.updated_count,data_error(result.error)};
+    } catch (...) {
+        return {0,unexpected_exception_error()};
     }
 }
 

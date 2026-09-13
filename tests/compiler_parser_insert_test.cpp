@@ -98,6 +98,11 @@ const std::string* string_value(const InsertAst& insert, std::size_t row, std::s
     return std::get_if<std::string>(&insert.rows[row][column].value.data);
 }
 
+bool is_null_value(const InsertAst& insert, std::size_t row, std::size_t column) {
+    return row < insert.rows.size() && column < insert.rows[row].size() &&
+        std::holds_alternative<std::monostate>(insert.rows[row][column].value.data);
+}
+
 }  // namespace
 
 int main() {
@@ -177,6 +182,18 @@ int main() {
         if (insert != nullptr) {
             const auto* value = string_value(*insert, 0, 0);
             test.expect(value != nullptr && value->empty(), "empty string: empty value");
+        }
+    }
+
+    {
+        const auto result = parse_sql(
+            test,
+            "NULL literal",
+            "INSERT INTO t(id,name) VALUES (NULL,NuLl);");
+        const auto* insert = expect_insert(test, "NULL literal", result);
+        if (insert != nullptr) {
+            test.expect(is_null_value(*insert, 0, 0), "NULL literal: first value");
+            test.expect(is_null_value(*insert, 0, 1), "NULL literal: second value");
         }
     }
 

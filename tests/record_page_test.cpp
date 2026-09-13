@@ -28,6 +28,14 @@ int main() { try {
     auto get = RecordPage::get_record(page,1,meta,*a.value); check(get.value.has_value());
     check(get.value->rid.value == a.value->value);
     for (std::size_t i=0;i<values.size();++i) check(values[i].data == get.value->values[i].data);
+    auto grown=values; grown.back()=Value{std::string(200,'g')};
+    check(!RecordPage::replace_record(page,1,meta,*a.value,grown));
+    get=RecordPage::get_record(page,1,meta,*a.value); check(get.value.has_value());
+    check(get.value->rid.value==a.value->value && get.value->values[2].data==grown[2].data);
+    auto shrunk=values; shrunk.back()=Value{std::string{"s"}};
+    check(!RecordPage::replace_record(page,1,meta,*a.value,shrunk));
+    get=RecordPage::get_record(page,1,meta,*a.value); check(get.value.has_value());
+    check(get.value->rid.value==a.value->value && get.value->values[2].data==shrunk[2].data);
     auto snapshot=page.bytes;
     check(!RecordPage::get_record(page,2,meta,*a.value).value); check(page.bytes==snapshot);
     check(RecordPage::erase_record(page,2,*a.value).has_value()); check(page.bytes==snapshot);
@@ -47,6 +55,18 @@ int main() { try {
     check(SlottedPage::insert(full,3,std::vector<std::byte>(kMaxRecordPayloadBytes)).value.has_value());
     snapshot=full.bytes; auto no_space=RecordPage::insert_record(full,3,meta,values);
     check(no_space.error && no_space.error->kind==RecordPageErrorKind::kNoSpace); check(full.bytes==snapshot);
+    RawPage crowded; check(!RecordPage::initialize(crowded,6));
+    TableMeta text{0,"text",{{"s",Type::kVarchar}}};
+    auto small=RecordPage::insert_record(crowded,6,text,{Value{std::string{"x"}}});
+    check(small.value.has_value());
+    while(RecordPage::insert_record(
+              crowded,6,text,{Value{std::string(1024,'f')}}).value.has_value()) {}
+    snapshot=crowded.bytes;
+    auto grow_error=RecordPage::replace_record(
+        crowded,6,text,*small.value,{Value{std::string(1024,'g')}});
+    check(grow_error && grow_error->kind==RecordPageErrorKind::kNoSpace);
+    check(crowded.bytes==snapshot);
+    check(RecordPage::get_record(crowded,6,text,*small.value).value.has_value());
     RawPage corrupt; check(!RecordPage::initialize(corrupt,4));
     auto slot=SlottedPage::insert(corrupt,4,std::vector<std::byte>{std::byte{2}}); check(slot.value.has_value());
     auto rid=RecordIdCodec::encode({4,slot.value->slot_id,slot.value->generation});

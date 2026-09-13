@@ -1,11 +1,14 @@
 #include "lexer.hpp"
 
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace tinydbms::compiler::internal {
@@ -43,13 +46,35 @@ std::optional<TokenKind> keyword_kind(std::string_view value) {
         std::pair{"values"sv, TokenKind::kValues},
         std::pair{"select"sv, TokenKind::kSelect},
         std::pair{"from"sv, TokenKind::kFrom},
+        std::pair{"join"sv, TokenKind::kJoin},
+        std::pair{"inner"sv, TokenKind::kInner},
+        std::pair{"on"sv, TokenKind::kOn},
         std::pair{"where"sv, TokenKind::kWhere},
+        std::pair{"order"sv, TokenKind::kOrder},
+        std::pair{"by"sv, TokenKind::kBy},
+        std::pair{"group"sv, TokenKind::kGroup},
+        std::pair{"count"sv, TokenKind::kCount},
+        std::pair{"sum"sv, TokenKind::kSum},
+        std::pair{"avg"sv, TokenKind::kAvg},
+        std::pair{"min"sv, TokenKind::kMin},
+        std::pair{"max"sv, TokenKind::kMax},
+        std::pair{"asc"sv, TokenKind::kAsc},
+        std::pair{"desc"sv, TokenKind::kDesc},
         std::pair{"delete"sv, TokenKind::kDelete},
+        std::pair{"update"sv, TokenKind::kUpdate},
+        std::pair{"set"sv, TokenKind::kSet},
         std::pair{"and"sv, TokenKind::kAnd},
         std::pair{"or"sv, TokenKind::kOr},
         std::pair{"not"sv, TokenKind::kNot},
         std::pair{"int"sv, TokenKind::kInt},
+        std::pair{"bigint"sv, TokenKind::kBigInt},
+        std::pair{"double"sv, TokenKind::kDouble},
+        std::pair{"boolean"sv, TokenKind::kBoolean},
         std::pair{"varchar"sv, TokenKind::kVarchar},
+        std::pair{"true"sv, TokenKind::kTrue},
+        std::pair{"false"sv, TokenKind::kFalse},
+        std::pair{"null"sv, TokenKind::kNull},
+        std::pair{"is"sv, TokenKind::kIs},
     };
 
     for (const auto& [keyword, kind] : keywords) {
@@ -157,11 +182,10 @@ public:
                 continue;
             }
 
-            if (is_ascii_digit(current()) ||
-                (current() == '-' && is_ascii_digit(peek()))) {
-                const auto integer_error = scan_integer();
-                if (integer_error.has_value()) {
-                    return LexResult{std::move(*integer_error)};
+            if (is_ascii_digit(current())) {
+                const auto number_error = scan_number();
+                if (number_error.has_value()) {
+                    return LexResult{std::move(*number_error)};
                 }
                 continue;
             }
@@ -214,6 +238,9 @@ public:
                     break;
                 case '*':
                     add_single(TokenKind::kStar);
+                    break;
+                case '.':
+                    add_single(TokenKind::kDot);
                     break;
                 case '_':
                     return error(start, "invalid identifier start");
@@ -318,34 +345,54 @@ private:
         return std::nullopt;
     }
 
-    std::optional<CompileError> scan_integer() {
+    std::optional<CompileError> scan_number() {
         const SourceLocation start = location();
         const std::size_t begin = index_;
-        const bool negative = current() == '-';
-        if (negative) {
+        while (!at_end() && is_ascii_digit(current())) {
             advance();
         }
-        const std::uint32_t maximum = negative
-            ? static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) + 1U
-            : static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
-        std::uint32_t value = 0;
+
+        if (!at_end() && current() == '.' && is_ascii_digit(peek())) {
+            advance();
+            while (!at_end() && is_ascii_digit(current())) {
+                advance();
+            }
+            const std::string_view lexeme = sql_.substr(begin, index_ - begin);
+            double value = 0.0;
+            const char* const first = lexeme.data();
+            const char* const last = first + lexeme.size();
+            const auto [parsed_end, parse_error] =
+                std::from_chars(first, last, value, std::chars_format::fixed);
+            if (parse_error != std::errc{} || parsed_end != last || !std::isfinite(value)) {
+                return CompileError{
+                    CompileErrorKind::kLex,
+                    start,
+                    "floating literal out of range"
+                };
+            }
+            tokens_.push_back(Token{TokenKind::kDoubleLiteral, std::string{lexeme}, start});
+            return std::nullopt;
+        }
+
+        constexpr std::uint64_t maximum =
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        std::uint64_t value = 0;
         bool overflow = false;
 
-        while (!at_end() && is_ascii_digit(current())) {
-            const std::uint32_t digit = static_cast<std::uint32_t>(current() - '0');
+        for (std::size_t cursor = begin; cursor < index_; ++cursor) {
+            const std::uint64_t digit = static_cast<std::uint64_t>(sql_[cursor] - '0');
             if (!overflow && value > (maximum - digit) / 10U) {
                 overflow = true;
             } else if (!overflow) {
                 value = value * 10U + digit;
             }
-            advance();
         }
 
         if (overflow) {
             return CompileError{
-                CompileErrorKind::kSemantic,
+                CompileErrorKind::kLex,
                 start,
-                "integer literal exceeds int32 range"
+                "integer literal out of range"
             };
         }
 

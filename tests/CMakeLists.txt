@@ -78,6 +78,14 @@ target_include_directories(tinydbms.core_execution_test PRIVATE ${PROJECT_SOURCE
 target_link_libraries(tinydbms.core_execution_test PRIVATE tinydbms_core)
 add_test(NAME tinydbms.core_execution COMMAND $<TARGET_FILE:tinydbms.core_execution_test>)
 
+add_executable(tinydbms_sqlv2_release_stress_test sqlv2_release_stress_test.cpp)
+target_link_libraries(tinydbms_sqlv2_release_stress_test PRIVATE tinydbms_core)
+add_test(
+    NAME tinydbms.sqlv2_release_stress
+    COMMAND $<TARGET_FILE:tinydbms_sqlv2_release_stress_test>
+)
+set_tests_properties(tinydbms.sqlv2_release_stress PROPERTIES TIMEOUT 180)
+
 add_executable(tinydbms.storage_contract_test storage_contract_test.cpp)
 
 target_include_directories(tinydbms.storage_contract_test PRIVATE
@@ -216,6 +224,23 @@ target_include_directories(tinydbms_core_lifecycle_test PRIVATE
 add_test(
     NAME tinydbms.core_lifecycle
     COMMAND $<TARGET_FILE:tinydbms_core_lifecycle_test>
+)
+
+add_executable(tinydbms_core_script_recovery_fuzz_test
+    core_script_recovery_fuzz_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_core_script_recovery_fuzz_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+    NAME tinydbms.core_script_recovery_fuzz
+    COMMAND $<TARGET_FILE:tinydbms_core_script_recovery_fuzz_test>
 )
 
 add_executable(tinydbms_core_executor_test

@@ -112,7 +112,33 @@ Error make_error(ErrorKind kind, std::string message) {
 
 ExecuteScriptResult make_script(std::initializer_list<ExecuteResult> outcomes) {
     ExecuteScriptResult result;
-    result.outcomes.assign(outcomes.begin(), outcomes.end());
+    std::size_t index = 0;
+    for (const ExecuteResult& outcome : outcomes) {
+        tinydbms::core::StatementStatus status = tinydbms::core::StatementStatus::kExecuted;
+        if (const auto* error = std::get_if<Error>(&outcome.outcome); error != nullptr) {
+            status = error->kind == ErrorKind::kCompile
+                ? tinydbms::core::StatementStatus::kCompileError
+                : tinydbms::core::StatementStatus::kExecutionError;
+        } else if (const auto* command = std::get_if<CommandResult>(&outcome.outcome);
+                   command != nullptr && command->error.has_value()) {
+            status = tinydbms::core::StatementStatus::kExecutionError;
+        }
+        if (status == tinydbms::core::StatementStatus::kExecuted ||
+            status == tinydbms::core::StatementStatus::kExecutionError) {
+            ++result.executed_count;
+        }
+        if (!result.first_error_index.has_value() &&
+            (status == tinydbms::core::StatementStatus::kCompileError ||
+             status == tinydbms::core::StatementStatus::kExecutionError)) {
+            result.first_error_index = index;
+        }
+        result.statements.push_back(tinydbms::core::StatementResult{
+            index,
+            tinydbms::SourceRange{{1, 1}, {1, 1}},
+            status,
+            outcome});
+        ++index;
+    }
     return result;
 }
 
@@ -188,8 +214,18 @@ bool test_batch_rendering_and_lifecycle() {
         ExecuteResult{CommandResult{2, std::nullopt}},
         ExecuteResult{tinydbms::core::QueryResult{
             {tinydbms::core::ColumnHeader{"name", Type::kVarchar},
-             tinydbms::core::ColumnHeader{"count", Type::kInt}},
-            {{Value{std::string{"a\tb\n\\\r"}}, Value{std::int32_t{-3}}}}}},
+             tinydbms::core::ColumnHeader{"count", Type::kInt},
+             tinydbms::core::ColumnHeader{"large", Type::kBigInt},
+             tinydbms::core::ColumnHeader{"one", Type::kDouble},
+             tinydbms::core::ColumnHeader{"fraction", Type::kDouble},
+             tinydbms::core::ColumnHeader{"wide", Type::kDouble},
+             tinydbms::core::ColumnHeader{"active", Type::kBoolean},
+             tinydbms::core::ColumnHeader{"disabled", Type::kBoolean},
+             tinydbms::core::ColumnHeader{"missing", Type::kVarchar}},
+            {{Value{std::string{"a\tb\n\\\r"}}, Value{std::int32_t{-3}},
+              Value{std::int64_t{2147483648LL}}, Value{1.0}, Value{12.5},
+              Value{2147483648.0}, Value{true}, Value{false},
+              Value{std::monostate{}}}}}},
         ExecuteResult{Error{
             ErrorKind::kCompile,
             tinydbms::SourceLocation{2, 3},
@@ -209,11 +245,12 @@ bool test_batch_rendering_and_lifecycle() {
     CHECK(session.execute_texts.size() == 1);
     CHECK(session.execute_texts.front() == "first;\nsecond;");
     CHECK((session.calls == std::vector<std::string>{"open", "execute", "close"}));
-    std::string expected_output = "OK 2\nname\tcount\na";
+    std::string expected_output =
+        "OK 2\nname\tcount\tlarge\tone\tfraction\twide\tactive\tdisabled\tmissing\na";
     expected_output += "\\t";
     expected_output += "b\\n";
     expected_output.append(3, '\\');
-    expected_output += "r\t-3\n";
+    expected_output += "r\t-3\t2147483648\t1.0\t12.5\t2147483648.0\tTRUE\tFALSE\tNULL\n";
     CHECK(output == expected_output);
     CHECK(error == "ERROR compile 2:3 bad\\nmessage\n");
     CHECK(error.find("tinydbms>") == std::string::npos);
@@ -320,10 +357,9 @@ bool test_output_failure_still_closes() {
 
 bool test_malformed_query_result_is_rejected() {
     FakeSession session;
-    ExecuteScriptResult result;
-    result.outcomes.emplace_back(ExecuteResult{tinydbms::core::QueryResult{
+    ExecuteScriptResult result = make_script({ExecuteResult{tinydbms::core::QueryResult{
         {tinydbms::core::ColumnHeader{"id", Type::kInt}},
-        {{}}}});
+        {{}}}}});
     session.execute_results.push_back(std::move(result));
 
     std::string output;
@@ -332,6 +368,76 @@ bool test_malformed_query_result_is_rejected() {
     CHECK(output == "id\n");
     CHECK(error == "ERROR internal query result row width does not match column count\n");
     CHECK((session.calls == std::vector<std::string>{"open", "execute", "close"}));
+    return true;
+}
+
+bool test_analysis_only_is_rendered_without_success_command() {
+    FakeSession session;
+    ExecuteScriptResult result;
+    result.first_error_index = 0;
+    result.statements.push_back(tinydbms::core::StatementResult{
+        0,
+        tinydbms::SourceRange{{1, 1}, {1, 5}},
+        tinydbms::core::StatementStatus::kCompileError,
+        ExecuteResult{make_error(ErrorKind::kCompile, "bad statement")}});
+    result.statements.push_back(tinydbms::core::StatementResult{
+        1,
+        tinydbms::SourceRange{{1, 6}, {1, 12}},
+        tinydbms::core::StatementStatus::kAnalysisOnly,
+        std::nullopt});
+    session.execute_results.push_back(std::move(result));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms"}, "bad;valid;", false, output, error) == 1);
+    CHECK(output == "ANALYSIS ONLY\n");
+    CHECK(error == "ERROR compile bad statement\n");
+    return true;
+}
+
+bool test_statement_results_render_before_trailing_script_error() {
+    FakeSession session;
+    ExecuteScriptResult result = make_script({
+        ExecuteResult{CommandResult{1, std::nullopt}}});
+    result.script_error = make_error(ErrorKind::kInternal, "trailing script failure");
+    session.execute_results.push_back(std::move(result));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms"}, "statement;", false, output, error) == 1);
+    CHECK(output == "OK 1\n");
+    CHECK(error == "ERROR internal trailing script failure\n");
+    return true;
+}
+
+bool test_diagnostic_details_are_appended() {
+    FakeSession session;
+    session.execute_results.push_back(make_script({ExecuteResult{Error{
+        ErrorKind::kCompile,
+        tinydbms::SourceLocation{2, 1},
+        "expected statement",
+        "did you mean 'SELECT'?",
+        tinydbms::compiler::FixIt{
+            tinydbms::SourceRange{{2, 1}, {2, 7}}, "SELECT"}}}}));
+    session.execute_results.push_back(make_script({ExecuteResult{Error{
+        ErrorKind::kCompile,
+        tinydbms::SourceLocation{1, 23},
+        "expected ';' after SELECT statement",
+        std::nullopt,
+        tinydbms::compiler::FixIt{
+            tinydbms::SourceRange{{1, 23}, {1, 23}}, ";"}}}}));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms"}, "first\nsecond\n", true, output, error) == 1);
+    CHECK(output.empty());
+    CHECK(error.find(
+        "ERROR compile 2:1 expected statement\n"
+        "suggestion: did you mean 'SELECT'?\n"
+        "fix-it: replace [2:1,2:7) with \"SELECT\"\n") != std::string::npos);
+    CHECK(error.find(
+        "ERROR compile 1:23 expected ';' after SELECT statement\n"
+        "fix-it: insert \";\" at 1:23\n") != std::string::npos);
     return true;
 }
 
@@ -347,6 +453,9 @@ int main() {
         test_open_and_close_failures() &&
         test_exceptions_close_once_and_input_failure_closes() &&
         test_output_failure_still_closes() &&
-        test_malformed_query_result_is_rejected();
+        test_malformed_query_result_is_rejected() &&
+        test_analysis_only_is_rendered_without_success_command() &&
+        test_statement_results_render_before_trailing_script_error() &&
+        test_diagnostic_details_are_appended();
     return passed ? 0 : 1;
 }

@@ -71,6 +71,10 @@ const AstLiteralExpr* literal(const AstExpr* expression) {
     return expression == nullptr ? nullptr : std::get_if<AstLiteralExpr>(&expression->kind);
 }
 
+const AstNullTestExpr* null_test(const AstExpr* expression) {
+    return expression == nullptr ? nullptr : std::get_if<AstNullTestExpr>(&expression->kind);
+}
+
 bool has_compare(const AstBinaryExpr* expression, AstCompareOp expected) {
     if (expression == nullptr) {
         return false;
@@ -234,6 +238,30 @@ int main() {
         test.expect(value != nullptr && *value == "Alice", "string literal: value");
     }
 
+    {
+        const auto result = parse_sql(test, "NULL literal", "SELECT * FROM t WHERE NULL;");
+        const auto* value = literal(predicate(test, "NULL literal", result));
+        test.expect(
+            value != nullptr && std::holds_alternative<std::monostate>(value->value.data),
+            "NULL literal: monostate");
+    }
+    {
+        const auto result = parse_sql(test, "IS NULL", "SELECT * FROM t WHERE name IS NULL;");
+        const auto* test_node = null_test(predicate(test, "IS NULL", result));
+        test.expect(test_node != nullptr, "IS NULL: dedicated AST node");
+        if (test_node != nullptr) {
+            test.expect(test_node->op == AstNullTestOp::kIsNull, "IS NULL: op");
+            test.expect(identifier(test_node->operand.get()) != nullptr, "IS NULL: operand");
+        }
+    }
+    {
+        const auto result = parse_sql(test, "IS NOT NULL", "SELECT * FROM t WHERE name IS NOT NULL;");
+        const auto* test_node = null_test(predicate(test, "IS NOT NULL", result));
+        test.expect(
+            test_node != nullptr && test_node->op == AstNullTestOp::kIsNotNull,
+            "IS NOT NULL: dedicated AST node");
+    }
+
     expect_expression_success(test, "type mismatch comparison", "age = 'abc'");
     expect_expression_success(test, "varchar ordering", "name > 'Alice'");
     expect_expression_success(test, "non boolean and", "1 AND 2");
@@ -250,6 +278,8 @@ int main() {
     expect_expression_error(test, "double compare", "a = = 1", {1, 27});
     expect_expression_error(test, "missing compare rhs", "a !=", {1, 27});
     expect_expression_error(test, "double or", "a = 1 OR OR b = 2", {1, 32});
+    expect_expression_error(test, "IS missing NULL", "a IS", {1, 27});
+    expect_expression_error(test, "IS NOT missing NULL", "a IS NOT", {1, 31});
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " expression parser assertion(s) failed\n";

@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -30,6 +31,32 @@ static_assert(!std::is_copy_constructible_v<SplitStatementsResult>);
 
 static_assert(std::is_move_constructible_v<core::Database>);
 static_assert(!std::is_copy_constructible_v<core::Database>);
+static_assert(std::is_same_v<SlotId, std::uint32_t>);
+static_assert(std::is_same_v<decltype(ColumnRef::slot_id), SlotId>);
+static_assert(std::is_same_v<decltype(ScanColumn::column_id), ColumnId>);
+static_assert(std::is_same_v<decltype(ScanColumn::output_slot), SlotId>);
+static_assert(std::is_same_v<decltype(ProjectNode::outputs), std::vector<SlotId>>);
+static_assert(std::is_same_v<decltype(SortKey::slot_id), SlotId>);
+static_assert(std::is_same_v<decltype(SortKey::direction), SortDirection>);
+static_assert(std::is_same_v<decltype(SortNode::keys), std::vector<SortKey>>);
+static_assert(std::is_same_v<decltype(JoinNode::kind), JoinKind>);
+static_assert(std::is_same_v<decltype(JoinNode::condition), Expr>);
+static_assert(std::is_same_v<decltype(AggregateCall::kind), AggregateKind>);
+static_assert(std::is_same_v<decltype(AggregateCall::input_slot), std::optional<SlotId>>);
+static_assert(std::is_same_v<decltype(AggregateCall::output_slot), SlotId>);
+static_assert(std::is_same_v<decltype(AggregateCall::output_type), Type>);
+static_assert(std::is_same_v<decltype(AggregateNode::group_keys), std::vector<SlotId>>);
+static_assert(std::is_same_v<decltype(AggregateNode::aggregates), std::vector<AggregateCall>>);
+static_assert(std::is_same_v<decltype(QueryOutput::slot_id), SlotId>);
+static_assert(std::is_same_v<decltype(UpdateAssignment::column_id), ColumnId>);
+static_assert(std::is_same_v<decltype(UpdateAssignment::value), Value>);
+static_assert(std::is_same_v<decltype(FixIt::range), SourceRange>);
+static_assert(std::is_same_v<decltype(FixIt::replacement), std::string>);
+static_assert(std::is_same_v<decltype(CompileError::suggestion), std::optional<std::string>>);
+static_assert(std::is_same_v<decltype(CompileError::fix_it), std::optional<FixIt>>);
+
+static_assert(static_cast<int>(Type::kInt) == 0);
+static_assert(static_cast<int>(Type::kVarchar) == 1);
 
 // 公开 API 必须存在且签名正确；这里只做类型检查，不产生链接依赖。
 static_assert(std::is_same_v<
@@ -48,6 +75,22 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(std::declval<core::Database&>().execute_script(std::declval<const core::ExecuteScriptRequest&>())),
     core::ExecuteScriptResult>);
+static_assert(std::is_same_v<decltype(core::StatementResult::statement_index), std::size_t>);
+static_assert(std::is_same_v<decltype(core::StatementResult::source_range), SourceRange>);
+static_assert(std::is_same_v<decltype(core::StatementResult::status), core::StatementStatus>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::outcome),
+    std::optional<core::ExecuteResult>>);
+static_assert(std::is_same_v<
+    decltype(core::ExecuteScriptResult::statements),
+    std::vector<core::StatementResult>>);
+static_assert(std::is_same_v<
+    decltype(core::ExecuteScriptResult::first_error_index),
+    std::optional<std::size_t>>);
+static_assert(std::is_same_v<decltype(core::ExecuteScriptResult::executed_count), std::size_t>);
+static_assert(std::is_same_v<
+    decltype(core::ExecuteScriptResult::script_error),
+    std::optional<core::Error>>);
 
 static_assert(std::is_same_v<
     decltype(storage::open_storage(std::declval<const storage::OpenStorageRequest&>())),
@@ -76,6 +119,9 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(storage::delete_records(std::declval<const storage::DeleteRequest&>())),
     storage::DeleteResult>);
+static_assert(std::is_same_v<
+    decltype(storage::update_rows(std::declval<const storage::UpdateRequest&>())),
+    storage::UpdateResult>);
 
 }  // namespace
 
@@ -84,28 +130,139 @@ int main() {
     using namespace tinydbms::compiler;
 
     // 构造一棵可编译的最小查询树，验证递归类型与移动语义可用。
-    auto lhs = std::make_unique<Expr>(ColumnRef{0});
+    auto lhs = std::make_unique<Expr>(ColumnRef{SlotId{7}});
     auto rhs = std::make_unique<Expr>(Literal{Value{std::int32_t{1}}});
     Expr predicate{Binary{CmpOp::kEq, std::move(lhs), std::move(rhs)}};
+    Expr null_test_expression{NullTest{
+        NullTestOp::kIsNull,
+        std::make_unique<Expr>(ColumnRef{SlotId{7}})}};
 
-    PlanNode scan{SeqScanNode{0}};
+    const std::vector<ScanColumn> scan_columns{{ColumnId{0}, SlotId{7}}};
+    PlanNode scan{SeqScanNode{TableId{0}, scan_columns}};
     FilterNode filter{std::move(predicate), std::make_unique<PlanNode>(std::move(scan))};
     PlanNode filtered{std::move(filter)};
-    ProjectNode project{std::vector<ColumnId>{0}, std::make_unique<PlanNode>(std::move(filtered))};
+    SortNode sort{
+        std::vector<SortKey>{SortKey{SlotId{7}, SortDirection::kDesc}},
+        std::make_unique<PlanNode>(std::move(filtered))};
+    PlanNode sorted{std::move(sort)};
+    ProjectNode project{
+        std::vector<SlotId>{SlotId{7}},
+        std::make_unique<PlanNode>(std::move(sorted))};
     PlanNode projected{std::move(project)};
-    QueryPlan query{std::make_unique<PlanNode>(std::move(projected))};
+    const std::vector<QueryOutput> query_outputs{
+        QueryOutput{SlotId{7}, "id", Type::kInt, false}};
+    QueryPlan query{std::make_unique<PlanNode>(std::move(projected)), query_outputs};
+
+    PlanNode join_plan{JoinNode{
+        JoinKind::kInner,
+        Expr{Literal{Value{true}}},
+        std::make_unique<PlanNode>(SeqScanNode{
+            TableId{0}, std::vector<ScanColumn>{{ColumnId{0}, SlotId{0}}}}),
+        std::make_unique<PlanNode>(SeqScanNode{
+            TableId{1}, std::vector<ScanColumn>{{ColumnId{0}, SlotId{1}}}})}};
+    PlanNode aggregate_plan{AggregateNode{
+        std::vector<SlotId>{SlotId{0}},
+        std::vector<AggregateCall>{AggregateCall{
+            AggregateKind::kCount,
+            std::nullopt,
+            SlotId{2},
+            Type::kBigInt,
+            false}},
+        std::make_unique<PlanNode>(SeqScanNode{
+            TableId{0}, std::vector<ScanColumn>{{ColumnId{0}, SlotId{0}}}})}};
+
+    const DeletePlan deletion{
+        TableId{0},
+        scan_columns,
+        std::nullopt};
+    const Value contract_int_value{std::int32_t{1}};
+    const UpdatePlan update{
+        TableId{0},
+        scan_columns,
+        std::vector<UpdateAssignment>{
+            UpdateAssignment{ColumnId{0}, Value{std::int32_t{2}}}},
+        std::nullopt};
+    const storage::UpdateRequest update_request{
+        TableId{0},
+        std::vector<storage::UpdateRow>{
+            storage::UpdateRow{storage::RecordId{1}, std::vector<Value>{contract_int_value}}}};
 
     Plan plan{std::move(query)};
     CompileResult ok{std::move(plan)};
-    CompileResult err{CompileError{CompileErrorKind::kSyntax, SourceLocation{1, 1}, "syntax error"}};
+    const CompileError legacy_error{
+        CompileErrorKind::kSyntax,
+        SourceLocation{1, 1},
+        "syntax error"};
+    const FixIt replacement_fix{
+        SourceRange{SourceLocation{1, 1}, SourceLocation{1, 6}},
+        "SELECT"};
+    const FixIt insertion_fix{
+        SourceRange{SourceLocation{1, 20}, SourceLocation{1, 20}},
+        ";"};
+    const FixIt deletion_fix{
+        SourceRange{SourceLocation{1, 7}, SourceLocation{1, 8}},
+        ""};
+    const CompileError rich_error{
+        CompileErrorKind::kSyntax,
+        SourceLocation{1, 1},
+        "unexpected token",
+        std::optional<std::string>{"did you mean SELECT?"},
+        std::optional<FixIt>{replacement_fix}};
+    CompileResult err{legacy_error};
 
     storage::Record record{storage::RecordId{1}, std::vector<Value>{}};
     core::ExecuteResult result;
     result.outcome = core::CommandResult{0, std::nullopt};
 
+    const Value null_value{std::monostate{}};
+    const Value int_value{std::int32_t{1}};
+    const Value bigint_value{std::int64_t{2}};
+    const Value double_value{3.5};
+    const Value boolean_value{true};
+    const Value string_value{std::string{"value"}};
+    const ColumnMeta legacy_column{"id", Type::kInt};
+    const ColumnMeta nullable_column{"name", Type::kVarchar, true};
+    const SourceRange range{SourceLocation{2, 3}, SourceLocation{4, 5}};
+
+    const bool common_contract =
+        Type::kBigInt != Type::kInt &&
+        Type::kDouble != Type::kInt &&
+        Type::kBoolean != Type::kInt &&
+        std::get<NullTest>(null_test_expression.kind).op == NullTestOp::kIsNull &&
+        std::holds_alternative<std::monostate>(null_value.data) &&
+        std::holds_alternative<std::int32_t>(int_value.data) &&
+        std::holds_alternative<std::int64_t>(bigint_value.data) &&
+        std::holds_alternative<double>(double_value.data) &&
+        std::holds_alternative<bool>(boolean_value.data) &&
+        std::holds_alternative<std::string>(string_value.data) &&
+        !legacy_column.nullable && nullable_column.nullable &&
+        range.begin.line == 2 && range.begin.column == 3 &&
+        range.end.line == 4 && range.end.column == 5 &&
+        !legacy_error.suggestion.has_value() &&
+        !legacy_error.fix_it.has_value() &&
+        replacement_fix.range.begin.line == 1 &&
+        replacement_fix.range.begin.column == 1 &&
+        replacement_fix.range.end.line == 1 &&
+        replacement_fix.range.end.column == 6 &&
+        replacement_fix.replacement == "SELECT" &&
+        insertion_fix.range.begin.line == insertion_fix.range.end.line &&
+        insertion_fix.range.begin.column == insertion_fix.range.end.column &&
+        insertion_fix.replacement == ";" &&
+        deletion_fix.range.begin.line == deletion_fix.range.end.line &&
+        deletion_fix.range.begin.column < deletion_fix.range.end.column &&
+        deletion_fix.replacement.empty() &&
+        rich_error.suggestion == std::optional<std::string>{"did you mean SELECT?"} &&
+        rich_error.fix_it.has_value() &&
+        rich_error.fix_it->replacement == "SELECT";
+
     (void)ok;
     (void)err;
     (void)record;
     (void)result;
-    return 0;
+    (void)join_plan;
+    (void)aggregate_plan;
+    (void)deletion;
+    (void)update;
+    (void)update_request;
+    return common_contract ? 0 : 1;
 }

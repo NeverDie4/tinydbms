@@ -125,13 +125,43 @@ int main() {
         "NOT id = 1",
         "id = 1 OR age >= 18 AND name != 'Tom'",
         "(id = 1 OR age = 18) AND name = 'Alice'",
+        "(id = 1) = (age = 2)",
         "1 < 2",
         "'A' = 'B'",
+        "NULL",
+        "NULL = NULL",
+        "id = NULL",
+        "NULL != name",
+        "name IS NULL",
+        "name IS NOT NULL",
+        "TRUE AND NULL",
+        "FALSE OR NULL",
+        "NOT NULL",
     };
     for (const std::string_view expression : valid_expressions) {
         const std::string sql = "SELECT * FROM student WHERE " + std::string{expression} + ";";
         const SemanticResult result = analyze_sql(test, expression, sql, catalog);
         expect_predicate(test, expression, result);
+    }
+
+    {
+        const SemanticResult result = analyze_sql(
+            test,
+            "bound NULL test",
+            "SELECT * FROM student WHERE name IS NOT NULL;",
+            catalog);
+        const BoundExpr* root = expect_predicate(test, "bound NULL test", result);
+        const auto* null_test = root == nullptr
+            ? nullptr
+            : std::get_if<BoundNullTestExpr>(&root->kind);
+        test.expect(
+            null_test != nullptr && null_test->op == NullTestOp::kIsNotNull,
+            "bound NULL test: dedicated node");
+        const auto* column = null_test == nullptr || !null_test->operand
+            ? nullptr
+            : std::get_if<BoundColumnRef>(&null_test->operand->kind);
+        test.expect(column != nullptr && column->column_id == 1U,
+                    "bound NULL test: source ColumnId");
     }
 
     {
@@ -181,7 +211,7 @@ int main() {
     expect_error(test, "invalid AND", "1 AND 2", catalog, {1, 31}, "AND");
     expect_error(test, "invalid OR", "id OR age", catalog, {1, 32}, "OR");
     expect_error(test, "invalid NOT", "NOT 123", catalog, {1, 29}, "NOT");
-    expect_error(test, "BOOL comparison", "(id = 1) = (age = 2)", catalog, {1, 38}, "BOOL");
+    expect_error(test, "VARCHAR NULL ordering", "name < NULL", catalog, {1, 34}, "VARCHAR");
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " expression semantic test assertion(s) failed\n";

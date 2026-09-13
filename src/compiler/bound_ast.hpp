@@ -2,6 +2,7 @@
 #define TINYDBMS_COMPILER_BOUND_AST_HPP
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -12,6 +13,7 @@
 namespace tinydbms::compiler::internal {
 
 struct BoundColumnRef {
+    TableId table_id;
     ColumnId column_id;
 };
 
@@ -48,18 +50,36 @@ struct BoundUnaryExpr {
     BoundExprPtr operand;
 };
 
+struct BoundNullTestExpr {
+    BoundNullTestExpr(NullTestOp op, BoundExprPtr operand);
+    ~BoundNullTestExpr();
+    BoundNullTestExpr(BoundNullTestExpr&&) noexcept;
+    BoundNullTestExpr& operator=(BoundNullTestExpr&&) noexcept;
+    BoundNullTestExpr(const BoundNullTestExpr&) = delete;
+    BoundNullTestExpr& operator=(const BoundNullTestExpr&) = delete;
+
+    NullTestOp op;
+    BoundExprPtr operand;
+};
+
 struct BoundExpr {
     BoundExpr(BoundColumnRef column);
     BoundExpr(BoundLiteral literal);
     BoundExpr(BoundBinaryExpr binary);
     BoundExpr(BoundUnaryExpr unary);
+    BoundExpr(BoundNullTestExpr null_test);
     ~BoundExpr();
     BoundExpr(BoundExpr&&) noexcept;
     BoundExpr& operator=(BoundExpr&&) noexcept;
     BoundExpr(const BoundExpr&) = delete;
     BoundExpr& operator=(const BoundExpr&) = delete;
 
-    std::variant<BoundColumnRef, BoundLiteral, BoundBinaryExpr, BoundUnaryExpr> kind;
+    std::variant<
+        BoundColumnRef,
+        BoundLiteral,
+        BoundBinaryExpr,
+        BoundUnaryExpr,
+        BoundNullTestExpr> kind;
 };
 
 inline BoundBinaryExpr::BoundBinaryExpr(CmpOp op_, BoundExprPtr lhs_, BoundExprPtr rhs_)
@@ -79,10 +99,17 @@ inline BoundUnaryExpr::~BoundUnaryExpr() = default;
 inline BoundUnaryExpr::BoundUnaryExpr(BoundUnaryExpr&&) noexcept = default;
 inline BoundUnaryExpr& BoundUnaryExpr::operator=(BoundUnaryExpr&&) noexcept = default;
 
+inline BoundNullTestExpr::BoundNullTestExpr(NullTestOp op_, BoundExprPtr operand_)
+    : op{op_}, operand{std::move(operand_)} {}
+inline BoundNullTestExpr::~BoundNullTestExpr() = default;
+inline BoundNullTestExpr::BoundNullTestExpr(BoundNullTestExpr&&) noexcept = default;
+inline BoundNullTestExpr& BoundNullTestExpr::operator=(BoundNullTestExpr&&) noexcept = default;
+
 inline BoundExpr::BoundExpr(BoundColumnRef value) : kind{std::move(value)} {}
 inline BoundExpr::BoundExpr(BoundLiteral value) : kind{std::move(value)} {}
 inline BoundExpr::BoundExpr(BoundBinaryExpr value) : kind{std::move(value)} {}
 inline BoundExpr::BoundExpr(BoundUnaryExpr value) : kind{std::move(value)} {}
+inline BoundExpr::BoundExpr(BoundNullTestExpr value) : kind{std::move(value)} {}
 inline BoundExpr::~BoundExpr() = default;
 inline BoundExpr::BoundExpr(BoundExpr&&) noexcept = default;
 inline BoundExpr& BoundExpr::operator=(BoundExpr&&) noexcept = default;
@@ -98,10 +125,32 @@ struct BoundInsert {
     std::vector<std::vector<Value>> rows;
 };
 
+struct BoundSortKey {
+    BoundColumnRef column;
+    SortDirection direction;
+};
+
+struct BoundAggregateCall {
+    AggregateKind kind;
+    std::optional<BoundColumnRef> argument;
+    Type output_type;
+    bool nullable;
+};
+
+using BoundSelectItem = std::variant<BoundColumnRef, BoundAggregateCall>;
+
+struct BoundJoin {
+    TableId table_id;
+    BoundExprPtr condition;
+};
+
 struct BoundSelect {
     TableId table_id;
-    std::vector<ColumnId> outputs;
+    std::vector<BoundJoin> joins;
+    std::vector<BoundSelectItem> items;
     BoundExprPtr predicate;
+    std::vector<BoundColumnRef> group_by;
+    std::vector<BoundSortKey> order_by;
 };
 
 struct BoundDelete {
@@ -109,8 +158,19 @@ struct BoundDelete {
     BoundExprPtr predicate;
 };
 
+struct BoundUpdateAssignment {
+    ColumnId column_id;
+    Value value;
+};
+
+struct BoundUpdate {
+    TableId table_id;
+    std::vector<BoundUpdateAssignment> assignments;
+    BoundExprPtr predicate;
+};
+
 struct BoundStatement {
-    std::variant<BoundCreateTable, BoundInsert, BoundSelect, BoundDelete> kind;
+    std::variant<BoundCreateTable, BoundInsert, BoundSelect, BoundDelete, BoundUpdate> kind;
 };
 
 }  // namespace tinydbms::compiler::internal

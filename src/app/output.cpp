@@ -1,5 +1,7 @@
 #include "output.hpp"
 
+#include <array>
+#include <charconv>
 #include <cstdint>
 #include <optional>
 #include <ostream>
@@ -10,6 +12,19 @@
 
 namespace tinydbms::app {
 namespace {
+
+std::string double_text(double value) {
+    std::array<char, 64> buffer{};
+    const auto [end, error] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (error != std::errc{}) {
+        return "<unsupported DOUBLE value>";
+    }
+    std::string result(buffer.data(), end);
+    if (result.find_first_of(".eE") == std::string::npos) {
+        result += ".0";
+    }
+    return result;
+}
 
 std::string_view error_kind_name(tinydbms::core::ErrorKind kind) noexcept {
     using tinydbms::core::ErrorKind;
@@ -30,9 +45,17 @@ std::string value_text(const tinydbms::Value& value) {
     return std::visit(
         [](const auto& item) -> std::string {
             using Item = std::decay_t<decltype(item)>;
-            if constexpr (std::is_same_v<Item, std::int32_t>) {
+            if constexpr (std::is_same_v<Item, std::monostate>) {
+                return "NULL";
+            } else if constexpr (std::is_same_v<Item, std::int32_t>) {
                 return std::to_string(item);
-            } else {
+            } else if constexpr (std::is_same_v<Item, std::int64_t>) {
+                return std::to_string(item);
+            } else if constexpr (std::is_same_v<Item, double>) {
+                return double_text(item);
+            } else if constexpr (std::is_same_v<Item, bool>) {
+                return item ? "TRUE" : "FALSE";
+            } else if constexpr (std::is_same_v<Item, std::string>) {
                 return item;
             }
         },
@@ -99,6 +122,21 @@ bool write_error(const tinydbms::core::Error& error, std::ostream& output) {
         output << ' ' << error.location->line << ':' << error.location->column;
     }
     output << ' ' << escape_text(error.message) << '\n';
+    if (error.suggestion.has_value()) {
+        output << "suggestion: " << escape_text(*error.suggestion) << '\n';
+    }
+    if (error.fix_it.has_value()) {
+        const tinydbms::SourceRange& range = error.fix_it->range;
+        if (range.begin.line == range.end.line &&
+            range.begin.column == range.end.column) {
+            output << "fix-it: insert \"" << escape_text(error.fix_it->replacement)
+                   << "\" at " << range.begin.line << ':' << range.begin.column << '\n';
+        } else {
+            output << "fix-it: replace [" << range.begin.line << ':' << range.begin.column
+                   << ',' << range.end.line << ':' << range.end.column << ") with \""
+                   << escape_text(error.fix_it->replacement) << "\"\n";
+        }
+    }
     return static_cast<bool>(output);
 }
 

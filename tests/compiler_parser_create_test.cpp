@@ -98,6 +98,7 @@ int main() {
             if (create->columns.size() == 1) {
                 test.expect(create->columns[0].name == "id", "single column: column name");
                 test.expect(create->columns[0].type == Type::kInt, "single column: column type");
+                test.expect(create->columns[0].nullable, "single column: default nullable");
             }
         }
     }
@@ -127,6 +128,19 @@ int main() {
     }
 
     expect_create(test, "whitespace", parse_sql(test, "whitespace", "CREATE   TABLE   t ( id INT ) ;"));
+
+    {
+        const auto result = parse_sql(
+            test,
+            "nullability modifiers",
+            "CREATE TABLE t(a INT NULL,b VARCHAR NOT NULL,c BOOLEAN);");
+        const auto* create = expect_create(test, "nullability modifiers", result);
+        if (create != nullptr && create->columns.size() == 3) {
+            test.expect(create->columns[0].nullable, "NULL modifier: nullable");
+            test.expect(!create->columns[1].nullable, "NOT NULL modifier: non-nullable");
+            test.expect(create->columns[2].nullable, "omitted modifier: nullable");
+        }
+    }
 
     {
         const std::string sql =
@@ -164,14 +178,30 @@ int main() {
     expect_syntax_error(test, "missing table name", "CREATE TABLE;", {1, 13}, "identifier");
     expect_syntax_error(test, "missing left paren", "CREATE TABLE t;", {1, 15}, "'('");
     expect_syntax_error(test, "empty columns", "CREATE TABLE t();", {1, 16}, "identifier");
-    expect_syntax_error(test, "missing type", "CREATE TABLE t(id);", {1, 18}, "INT or VARCHAR");
-    expect_syntax_error(test, "unsupported type", "CREATE TABLE t(id FLOAT);", {1, 19}, "INT or VARCHAR");
+    expect_syntax_error(
+        test,
+        "missing type",
+        "CREATE TABLE t(id);",
+        {1, 18},
+        "INT, BIGINT, DOUBLE, BOOLEAN, or VARCHAR");
+    expect_syntax_error(
+        test,
+        "unsupported type",
+        "CREATE TABLE t(id FLOAT);",
+        {1, 19},
+        "INT, BIGINT, DOUBLE, BOOLEAN, or VARCHAR");
     expect_syntax_error(test, "missing comma", "CREATE TABLE t(id INT name VARCHAR);", {1, 23}, "')'");
     expect_syntax_error(test, "trailing comma", "CREATE TABLE t(id INT,);", {1, 23}, "identifier");
     expect_syntax_error(test, "missing right paren", "CREATE TABLE t(id INT;", {1, 22}, "')'");
     expect_syntax_error(test, "extra right paren", "CREATE TABLE t(id INT))", {1, 23}, "';'");
     expect_syntax_error(test, "missing semicolon", "CREATE TABLE t(id INT)", {1, 23}, "';'");
     expect_syntax_error(test, "trailing token", "CREATE TABLE t(id INT); abc", {1, 25}, "end of statement");
+    expect_syntax_error(
+        test,
+        "NOT without NULL",
+        "CREATE TABLE t(id INT NOT);",
+        {1, 26},
+        "NULL");
     expect_syntax_error(test, "unsupported statement", "VALUES;", {1, 1}, "CREATE");
 
     {

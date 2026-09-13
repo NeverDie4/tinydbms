@@ -104,8 +104,16 @@ const std::int32_t* integer_value(const BoundInsert& insert, std::size_t row, st
     return std::get_if<std::int32_t>(&insert.rows[row][column].data);
 }
 
+const std::int64_t* bigint_value(const BoundInsert& insert, std::size_t row, std::size_t column) {
+    return std::get_if<std::int64_t>(&insert.rows[row][column].data);
+}
+
 const std::string* string_value(const BoundInsert& insert, std::size_t row, std::size_t column) {
     return std::get_if<std::string>(&insert.rows[row][column].data);
+}
+
+const bool* boolean_value(const BoundInsert& insert, std::size_t row, std::size_t column) {
+    return std::get_if<bool>(&insert.rows[row][column].data);
 }
 
 }  // namespace
@@ -120,6 +128,28 @@ int main() {
                 ColumnMeta{"id", Type::kInt},
                 ColumnMeta{"name", Type::kVarchar},
                 ColumnMeta{"age", Type::kInt},
+            }},
+        TableMeta{
+            8U,
+            "numeric_values",
+            {
+                ColumnMeta{"small_id", Type::kInt},
+                ColumnMeta{"big_id", Type::kBigInt},
+                ColumnMeta{"label", Type::kVarchar},
+            }},
+        TableMeta{
+            9U,
+            "flags",
+            {
+                ColumnMeta{"id", Type::kInt},
+                ColumnMeta{"active", Type::kBoolean},
+            }},
+        TableMeta{
+            10U,
+            "nullable_values",
+            {
+                ColumnMeta{"id", Type::kInt, false},
+                ColumnMeta{"note", Type::kVarchar, true},
             }}
     };
     const CatalogView catalog{tables};
@@ -238,6 +268,97 @@ int main() {
         catalog,
         {3, 4},
         "column 'name' expects VARCHAR, but INT found");
+
+    {
+        const auto result = analyze_sql(
+            test,
+            "BIGINT assignment widening",
+            "INSERT INTO numeric_values VALUES (1,1,'ok');",
+            catalog);
+        const auto* insert = expect_insert(test, "BIGINT assignment widening", result);
+        if (insert != nullptr) {
+            const auto* small = integer_value(*insert, 0, 0);
+            const auto* big = bigint_value(*insert, 0, 1);
+            test.expect(small != nullptr && *small == 1, "INT assignment remains int32");
+            test.expect(big != nullptr && *big == 1, "INT to BIGINT materializes int64");
+        }
+    }
+    {
+        const auto result = analyze_sql(
+            test,
+            "BIGINT literal assignment",
+            "INSERT INTO numeric_values VALUES (1,9223372036854775807,'ok');",
+            catalog);
+        const auto* insert = expect_insert(test, "BIGINT literal assignment", result);
+        if (insert != nullptr) {
+            const auto* big = bigint_value(*insert, 0, 1);
+            test.expect(
+                big != nullptr && *big == std::int64_t{9223372036854775807LL},
+                "BIGINT assignment preserves int64");
+        }
+    }
+    expect_semantic_error(
+        test,
+        "BIGINT to INT narrowing",
+        "INSERT INTO numeric_values VALUES (2147483648,1,'ok');",
+        catalog,
+        {1, 36},
+        "column 'small_id' expects INT, but BIGINT found");
+    expect_semantic_error(
+        test,
+        "VARCHAR to BIGINT",
+        "INSERT INTO numeric_values VALUES (1,'123','ok');",
+        catalog,
+        {1, 38},
+        "column 'big_id' expects BIGINT, but VARCHAR found");
+    expect_semantic_error(
+        test,
+        "BIGINT to VARCHAR",
+        "INSERT INTO numeric_values VALUES (1,2,2147483648);",
+        catalog,
+        {1, 40},
+        "column 'label' expects VARCHAR, but BIGINT found");
+
+    {
+        const auto result = analyze_sql(
+            test, "BOOLEAN assignment", "INSERT INTO flags VALUES (1,TRUE),(2,FALSE);", catalog);
+        const auto* insert = expect_insert(test, "BOOLEAN assignment", result);
+        if (insert != nullptr) {
+            const bool* first = boolean_value(*insert, 0, 1);
+            const bool* second = boolean_value(*insert, 1, 1);
+            test.expect(first != nullptr && *first, "TRUE remains bool true");
+            test.expect(second != nullptr && !*second, "FALSE remains bool false");
+        }
+    }
+    expect_semantic_error(
+        test, "BOOLEAN receives INT", "INSERT INTO flags VALUES (1,1);", catalog,
+        {1, 29}, "column 'active' expects BOOLEAN, but INT found");
+    expect_semantic_error(
+        test, "INT receives BOOLEAN", "INSERT INTO flags VALUES (TRUE,FALSE);", catalog,
+        {1, 27}, "column 'id' expects INT, but BOOLEAN found");
+    expect_semantic_error(
+        test, "BOOLEAN receives VARCHAR", "INSERT INTO flags VALUES (1,'true');", catalog,
+        {1, 29}, "column 'active' expects BOOLEAN, but VARCHAR found");
+
+    {
+        const auto result = analyze_sql(
+            test,
+            "nullable assignment",
+            "INSERT INTO nullable_values VALUES (1,NULL);",
+            catalog);
+        const auto* insert = expect_insert(test, "nullable assignment", result);
+        test.expect(
+            insert != nullptr &&
+                std::holds_alternative<std::monostate>(insert->rows[0][1].data),
+            "nullable assignment: NULL preserved");
+    }
+    expect_semantic_error(
+        test,
+        "NOT NULL violation",
+        "INSERT INTO nullable_values VALUES (NULL,'x');",
+        catalog,
+        {1, 37},
+        "NOT NULL");
 
     expect_semantic_error(
         test,

@@ -115,8 +115,10 @@ int main() {
             if (create->columns.size() == 2) {
                 test.expect(create->columns[0].name == "id", "empty catalog: first column");
                 test.expect(create->columns[0].type == Type::kInt, "empty catalog: first type");
+                test.expect(create->columns[0].nullable, "empty catalog: default nullable");
                 test.expect(create->columns[1].name == "name", "empty catalog: second column");
                 test.expect(create->columns[1].type == Type::kVarchar, "empty catalog: second type");
+                test.expect(create->columns[1].nullable, "empty catalog: second default nullable");
             }
         }
     }
@@ -139,6 +141,18 @@ int main() {
         test,
         "different columns",
         analyze_sql(test, "different columns", "CREATE TABLE t(id INT,name VARCHAR);", empty_catalog));
+    {
+        const SemanticResult result = analyze_sql(
+            test,
+            "explicit nullability",
+            "CREATE TABLE t(a INT NULL,b VARCHAR NOT NULL);",
+            empty_catalog);
+        const auto* create = expect_create(test, "explicit nullability", result);
+        if (create != nullptr && create->columns.size() == 2) {
+            test.expect(create->columns[0].nullable, "explicit NULL preserved");
+            test.expect(!create->columns[1].nullable, "explicit NOT NULL preserved");
+        }
+    }
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " CREATE semantic test assertion(s) failed\n";

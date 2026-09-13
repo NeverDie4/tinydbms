@@ -1,5 +1,6 @@
 #include "tinydbms/compiler.hpp"
 
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -176,12 +177,24 @@ CompileResult compile(const CompileRequest& request) {
         std::get<internal::BoundStatement>(std::move(analyzed.outcome));
     internal::BoundStatement optimized = internal::optimize(std::move(bound));
 
-    Plan plan = std::visit(
-        [](auto&& value) {
-            return internal::generate_plan(std::move(value));
+    internal::PlannerResult planned = std::visit(
+        [&request](auto&& value) -> internal::PlannerResult {
+            using StatementType = std::decay_t<decltype(value)>;
+            if constexpr (
+                std::is_same_v<StatementType, internal::BoundSelect> ||
+                std::is_same_v<StatementType, internal::BoundDelete> ||
+                std::is_same_v<StatementType, internal::BoundUpdate>) {
+                return internal::generate_plan(std::move(value), request.catalog);
+            } else {
+                return internal::PlannerResult{
+                    internal::generate_plan(std::move(value))};
+            }
         },
         std::move(optimized.kind));
-    return CompileResult{std::move(plan)};
+    if (auto* error = std::get_if<CompileError>(&planned.outcome)) {
+        return CompileResult{std::move(*error)};
+    }
+    return CompileResult{std::get<Plan>(std::move(planned.outcome))};
 }
 
 }

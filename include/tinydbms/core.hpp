@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "tinydbms/common.hpp"
+#include "tinydbms/compiler.hpp"
 
 namespace tinydbms::core {
 
@@ -36,6 +37,8 @@ struct Error {
     // 仅编译错误携带；已由 core 换算为整段输入的绝对位置
     std::optional<SourceLocation> location;
     std::string message;
+    std::optional<std::string> suggestion = std::nullopt;
+    std::optional<compiler::FixIt> fix_it = std::nullopt;
 };
 
 struct CommandResult {
@@ -65,9 +68,25 @@ struct ExecuteScriptRequest {
     std::string text;  // REPL 一行，或 stdin 批处理的整段文本
 };
 
+enum class StatementStatus {
+    kExecuted,
+    kCompileError,
+    kExecutionError,
+    kAnalysisOnly
+};
+
+struct StatementResult {
+    std::size_t statement_index;
+    SourceRange source_range;
+    StatementStatus status;
+    std::optional<ExecuteResult> outcome;
+};
+
 struct ExecuteScriptResult {
-    // 每条已尝试语句一个结果；遇到错误后停止，剩余语句不执行
-    std::vector<ExecuteResult> outcomes;
+    std::vector<StatementResult> statements;
+    std::optional<std::size_t> first_error_index;
+    std::size_t executed_count = 0;
+    std::optional<Error> script_error;
 };
 
 // core 对入口与测试暴露的有状态对象；每个实例持有自己的 Catalog 与生命周期状态

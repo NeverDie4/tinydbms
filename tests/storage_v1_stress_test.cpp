@@ -54,12 +54,16 @@ void run(std::size_t capacity,ReplacementPolicy policy,int count){
     check(expected[0].begin()->first==expected[1].begin()->first); // Same physical RID, distinct scope.
     std::size_t reused=0;
     for(TableId t=0;t<2;++t){
-        std::vector<RecordId> removed;std::map<std::pair<PageId,SlotId>,std::uint16_t> generations;
+        std::vector<RecordId> removed;
+        std::map<std::pair<PageId, tinydbms::storage::internal::SlotId>, std::uint16_t> generations;
         int ordinal=0;for(const auto& [id,values]:expected[t])if(ordinal++%2==0){
             removed.push_back({id});auto p=RecordIdCodec::decode({id});check(p.value.has_value());
             generations[{p.value->page_id,p.value->slot_id}]=p.value->generation;}
         auto deleted=delete_records({t,removed});check(!deleted.error && deleted.deleted_count==removed.size());
-        for(auto id:removed)expected[t].erase(id.value);verify(t,expected[t]);
+        for(auto id:removed) {
+            expected[t].erase(id.value);
+        }
+        verify(t,expected[t]);
         std::vector<std::vector<Value>> replacement;for(std::size_t i=0;i<removed.size();++i)replacement.push_back(row(count+static_cast<int>(i),t));
         auto inserted=insert({t,replacement});check(!inserted.error && inserted.rids.size()==replacement.size());
         for(std::size_t i=0;i<replacement.size();++i){auto id=inserted.rids[i];auto p=RecordIdCodec::decode(id);check(p.value.has_value());
@@ -90,7 +94,7 @@ void policy_demo(ReplacementPolicy policy){
     for(int i=0;i<3;++i)check((*made.value)->allocate_page().value.has_value());
     std::vector<std::string> events;
     auto pool=BufferPool::create(files,2,{},{},policy,[&](std::string_view event){events.emplace_back(event);});check(pool.value.has_value());
-    for(PageId id:{1,2,1,3,1}){auto guard=(*pool.value)->fetch_page({0,id});check(guard.value.has_value());}
+    for(PageId id:{PageId{1},PageId{2},PageId{1},PageId{3},PageId{1}}){auto guard=(*pool.value)->fetch_page({0,id});check(guard.value.has_value());}
     auto stats=(*pool.value)->stats();bool fifo=policy==ReplacementPolicy::kFifo;
     check(stats.fetch_count==5 && stats.hit_count==(fifo?1U:2U) && stats.miss_count==(fifo?4U:3U));
     check(stats.eviction_count==(fifo?2U:1U) && stats.dirty_flush_count==0);
@@ -100,6 +104,6 @@ void policy_demo(ReplacementPolicy policy){
 }
 }
 int main()try{for(auto policy:{ReplacementPolicy::kFifo,ReplacementPolicy::kLru}){
-    for(std::size_t capacity:{1,2,3})run(capacity,policy,capacity==1 && policy==ReplacementPolicy::kFifo?5000:600);
+    for(std::size_t capacity:{std::size_t{1},std::size_t{2},std::size_t{3}})run(capacity,policy,capacity==1 && policy==ReplacementPolicy::kFifo?5000:600);
     policy_demo(policy);}}
 catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
