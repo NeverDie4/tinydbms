@@ -72,6 +72,7 @@ core/CLI 的阶段设计入口：
 - [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
+- [GUI 设计（Qt6 可选前端）](docs/gui/GUI设计.md)
 
 ## 构建与验证
 
@@ -98,5 +99,19 @@ ctest --test-dir build/real-debug --output-on-failure
 `CREATE TABLE -> INSERT -> SELECT -> DELETE -> close -> reopen -> SELECT`、批处理停止、
 REPL 恢复、超大 SQL 边界、UTF-8 数据目录、编译与语义错误位置、storage 运行期错误和 open
 失败路径。
+
+可选的 Qt6 GUI（默认不参与构建，只有本机装了 Qt6 时才有意义）：
+
+```bash
+cmake --preset gui
+cmake --build build/gui-debug --target tinydbms-gui tinydbms_gui_ui_test
+./build/gui-debug/src/gui/tinydbms-gui
+ctest --test-dir build/gui-debug -L gui --output-on-failure
+```
+
+GUI 与 CLI 一样只调用 core 的公开 API，`TINYDBMS_BUILD_GUI` 默认为 `OFF`，未开启时不会查找
+Qt、也不会新增目标或测试。未启用 `TINYDBMS_ENABLE_REAL_MODULES` 时 GUI 使用不可用后端：窗口
+可以打开与调试，但不会伪造数据。接口与线程模型见
+[docs/gui/GUI设计.md](docs/gui/GUI设计.md)。
 
 开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/) 的分层与调用链，不复制其事务、日志或多引擎范围。

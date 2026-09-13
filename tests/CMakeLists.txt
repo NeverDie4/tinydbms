@@ -656,3 +656,38 @@ add_test(
     NAME tinydbms.compiler_fuzz_invalid
     COMMAND $<TARGET_FILE:tinydbms_compiler_fuzz_invalid_test>
 )
+
+if(TINYDBMS_BUILD_GUI)
+    # GUI 测试只使用 FakeBackend 与 UI 源文件，不链接 core，
+    # 因此 compiler 未完成契约适配时也能构建和运行。
+    # find_package 在这里重复调用是必要的：Qt 的 imported target 只在创建它的目录及其
+    # 子目录可见，tests/ 与 src/gui/ 是并列目录。第二次查找命中缓存，代价可忽略。
+    find_package(Qt6 6.3 REQUIRED COMPONENTS Widgets)
+
+    add_executable(tinydbms_gui_ui_test
+        gui_ui_test.cpp
+        fakes/gui_backend_fake.cpp
+        $<TARGET_OBJECTS:tinydbms_gui_objects>
+    )
+
+    target_include_directories(tinydbms_gui_ui_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/gui
+        ${PROJECT_SOURCE_DIR}/src/app
+        ${PROJECT_SOURCE_DIR}/tests
+    )
+
+    target_link_libraries(tinydbms_gui_ui_test PRIVATE
+        Qt6::Widgets
+    )
+
+    add_test(
+        NAME tinydbms.gui_ui
+        COMMAND $<TARGET_FILE:tinydbms_gui_ui_test>
+    )
+
+    set_tests_properties(tinydbms.gui_ui PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        LABELS gui
+    )
+endif()
