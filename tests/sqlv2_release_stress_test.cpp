@@ -210,6 +210,12 @@ void run_mixed_v1_v2_persistence() {
     namespace storage = tinydbms::storage;
 
     TemporaryDatabase temporary{1001U};
+    check(std::filesystem::create_directories(temporary.path));
+    {
+        std::ofstream metadata{temporary.path / "storage.meta"};
+        metadata << "TINYDBMS_STORAGE_V1\nEND\n";
+        check(!metadata.fail());
+    }
     check(!storage::open_storage({temporary.path.string()}).error.has_value());
     check(!storage::create_table({
         0U,

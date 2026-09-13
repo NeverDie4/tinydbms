@@ -23,12 +23,12 @@ bool test_canonical_lifecycle_and_subset_reopen() {
     TemporaryDirectory directory;
     bool ok = expect(!open_storage({directory.path.string()}).error, "open storage");
     const std::vector<ColumnMeta> columns{{"id", Type::kInt}, {"name", Type::kVarchar}};
-    ok = expect(!create_table({0, "people", columns}).error, "create canonical table") && ok;
-    const auto inserted = insert({0, {{Value{std::int32_t{7}}, Value{std::string{"Ada"}}}}});
+    ok = expect(!create_table({2, "people", columns}).error, "create canonical table") && ok;
+    const auto inserted = insert({2, {{Value{std::int32_t{7}}, Value{std::string{"Ada"}}}}});
     ok = expect(!inserted.error && inserted.rids.size() == 1, "insert canonical row") && ok;
     ok = expect(!close_storage({}).error, "close storage") && ok;
-    ok = expect(!open_storage({directory.path.string()}).error, "reopen INT32/VARCHAR V1 metadata") && ok;
-    const auto opened = open_table({0});
+    ok = expect(!open_storage({directory.path.string()}).error, "reopen V2 system catalog") && ok;
+    const auto opened = open_table({2});
     ok = expect(opened.cursor.has_value() && !opened.error, "open cursor") && ok;
     const auto next = scan_next({*opened.cursor});
     ok = expect(next.record.has_value() && next.record->rid.value == inserted.rids[0].value &&

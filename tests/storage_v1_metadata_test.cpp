@@ -11,7 +11,13 @@ void check(bool ok,std::source_location at=std::source_location::current()){
     if(!ok)throw std::runtime_error("metadata audit assertion line "+std::to_string(at.line()));}
 struct Temp{std::filesystem::path path=std::filesystem::temp_directory_path()/
     ("tinydbms-v1-meta-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    Temp(){check(std::filesystem::create_directory(path));}~Temp(){std::error_code e;std::filesystem::remove_all(path,e);}};
+    Temp(){
+        check(std::filesystem::create_directory(path));
+        std::ofstream metadata(path / "storage.meta");
+        metadata << "TINYDBMS_STORAGE_V1\nEND\n";
+        check(static_cast<bool>(metadata));
+    }
+    ~Temp(){std::error_code e;std::filesystem::remove_all(path,e);}};
 int main()try{
     const std::string valid="TABLE 0 first\nCOLUMN INT32 id\nENDTABLE\n";
     for(const auto& content:std::vector<std::string>{

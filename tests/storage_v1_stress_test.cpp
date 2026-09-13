@@ -2,6 +2,7 @@
 #include "storage_test_access.h"
 #include "record_page.h"
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
@@ -22,7 +23,12 @@ void check(bool ok,std::source_location at=std::source_location::current()){
 struct Temp {
     std::filesystem::path path=std::filesystem::temp_directory_path()/
         ("tinydbms-v1-stress-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    Temp(){check(std::filesystem::create_directory(path));}
+    Temp(){
+        check(std::filesystem::create_directory(path));
+        std::ofstream metadata(path / "storage.meta");
+        metadata << "TINYDBMS_STORAGE_V1\nEND\n";
+        check(static_cast<bool>(metadata));
+    }
     ~Temp(){std::error_code e;std::filesystem::remove_all(path,e);}
 };
 using Rows=std::map<std::uint64_t,std::vector<Value>>;

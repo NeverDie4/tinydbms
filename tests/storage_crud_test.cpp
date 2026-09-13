@@ -28,7 +28,12 @@ void kind(const std::optional<StorageError>& e,StorageErrorKind expected){check(
 struct Temp {
     std::filesystem::path path=std::filesystem::temp_directory_path()/
         ("tinydbms-crud-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    Temp(){check(std::filesystem::create_directory(path));}
+    Temp(){
+        check(std::filesystem::create_directory(path));
+        std::ofstream metadata(path / "storage.meta");
+        metadata << "TINYDBMS_STORAGE_V1\nEND\n";
+        check(static_cast<bool>(metadata));
+    }
     ~Temp(){std::error_code e;std::filesystem::remove_all(path,e);}
 };
 void create(TableId id=0){check(!create_table({id,id==0?"records":"other",{{"s",Type::kVarchar}}}).error);}

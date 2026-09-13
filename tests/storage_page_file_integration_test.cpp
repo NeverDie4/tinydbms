@@ -63,39 +63,39 @@ bool test_create_close_and_reopen() {
     TemporaryDirectory directory{"lifecycle"};
     bool passed = expect(!tinydbms::storage::open_storage({directory.path().string()}).error,
                          "storage must open");
-    passed = expect(!tinydbms::storage::create_table({0, "zero", columns()}).error &&
-                        !tinydbms::storage::create_table({1, "one", columns()}).error,
-                    "TableId 0 and 1 must create table files") && passed;
+    passed = expect(!tinydbms::storage::create_table({2, "zero", columns()}).error &&
+                        !tinydbms::storage::create_table({3, "one", columns()}).error,
+                    "user TableId 2 and 3 must create table files") && passed;
     passed = expect(std::filesystem::exists(directory.path() / "storage.meta") &&
-                        std::filesystem::exists(directory.table_file(0)) &&
-                        std::filesystem::exists(directory.table_file(1)),
-                    "successful create must commit metadata and both table files") && passed;
+                        std::filesystem::exists(directory.table_file(2)) &&
+                        std::filesystem::exists(directory.table_file(3)),
+                    "successful create must commit catalog rows and both user table files") && passed;
     std::error_code filesystem_error;
-    const auto table0_size = std::filesystem::file_size(directory.table_file(0), filesystem_error);
-    const bool table0_valid = !filesystem_error && table0_size == 4096;
+    const auto table2_size = std::filesystem::file_size(directory.table_file(2), filesystem_error);
+    const bool table2_valid = !filesystem_error && table2_size == 4096;
     filesystem_error.clear();
-    const auto table1_size = std::filesystem::file_size(directory.table_file(1), filesystem_error);
-    passed = expect(table0_valid && !filesystem_error && table1_size == 4096,
+    const auto table3_size = std::filesystem::file_size(directory.table_file(3), filesystem_error);
+    passed = expect(table2_valid && !filesystem_error && table3_size == 4096,
                     "new table files must contain a valid header page") && passed;
     passed = expect(!tinydbms::storage::close_storage({}).error,
                     "close_storage must close all PageFiles") && passed;
 
-    auto page0 = PageFile::open(directory.table_file(0));
-    auto page1 = PageFile::open(directory.table_file(1));
-    passed = expect(page0.value.has_value() && page1.value.has_value(),
+    auto page2 = PageFile::open(directory.table_file(2));
+    auto page3 = PageFile::open(directory.table_file(3));
+    passed = expect(page2.value.has_value() && page3.value.has_value(),
                     "closed table files must independently reopen as valid PageFiles") && passed;
-    if (page0.value) {
-        (*page0.value)->close();
+    if (page2.value) {
+        (*page2.value)->close();
     }
-    if (page1.value) {
-        (*page1.value)->close();
+    if (page3.value) {
+        (*page3.value)->close();
     }
 
     passed = expect(!tinydbms::storage::open_storage({directory.path().string()}).error,
                     "storage must reopen only after validating all table files") && passed;
     const auto tables = tinydbms::storage::list_tables({});
-    passed = expect(!tables.error && tables.tables.size() == 2,
-                    "reopen must restore both catalog entries") && passed;
+    passed = expect(!tables.error && tables.tables.size() == 4,
+                    "reopen must restore system and user catalog entries") && passed;
     passed = expect(!tinydbms::storage::close_storage({}).error, "final close must succeed") && passed;
     return passed;
 }
@@ -104,11 +104,11 @@ bool test_missing_and_corrupt_table_files() {
     bool passed = true;
     TemporaryDirectory missing{"missing"};
     passed = expect(!tinydbms::storage::open_storage({missing.path().string()}).error &&
-                        !tinydbms::storage::create_table({0, "missing", columns()}).error &&
+                        !tinydbms::storage::create_table({2, "missing", columns()}).error &&
                         !tinydbms::storage::close_storage({}).error,
                     "missing-file setup must succeed") && passed;
     std::error_code filesystem_error;
-    std::filesystem::remove(missing.table_file(0), filesystem_error);
+    std::filesystem::remove(missing.table_file(2), filesystem_error);
     passed = expect(!filesystem_error, "missing-file setup removal must succeed") && passed;
     passed = expect(has_error(tinydbms::storage::open_storage({missing.path().string()}).error,
                               StorageErrorKind::kCorrupt),
@@ -116,11 +116,11 @@ bool test_missing_and_corrupt_table_files() {
 
     TemporaryDirectory corrupt{"corrupt"};
     passed = expect(!tinydbms::storage::open_storage({corrupt.path().string()}).error &&
-                        !tinydbms::storage::create_table({0, "corrupt", columns()}).error &&
+                        !tinydbms::storage::create_table({2, "corrupt", columns()}).error &&
                         !tinydbms::storage::close_storage({}).error,
                     "corrupt-file setup must succeed") && passed;
     {
-        std::fstream stream(corrupt.table_file(0),
+        std::fstream stream(corrupt.table_file(2),
                             std::ios::binary | std::ios::in | std::ios::out);
         stream.seekp(0);
         stream.put('X');
@@ -143,7 +143,7 @@ bool test_orphan_and_table_file_creation_failure() {
     passed = expect(has_error(tinydbms::storage::create_table({7, "orphan", columns()}).error,
                               StorageErrorKind::kCorrupt),
                     "create_table must not overwrite an orphan table file") && passed;
-    passed = expect(tinydbms::storage::list_tables({}).tables.empty(),
+    passed = expect(tinydbms::storage::list_tables({}).tables.size() == 2,
                     "orphan rejection must not change metadata") && passed;
     passed = expect(!tinydbms::storage::close_storage({}).error, "orphan storage must close") && passed;
 
@@ -151,17 +151,13 @@ bool test_orphan_and_table_file_creation_failure() {
     passed = expect(!tinydbms::storage::open_storage({blocked.path().string()}).error,
                     "blocked storage must open") && passed;
     std::error_code filesystem_error;
-    std::filesystem::remove(blocked.path() / "tables", filesystem_error);
-    {
-        std::ofstream blocker(blocked.path() / "tables");
-        blocker << "not a directory";
-    }
-    passed = expect(has_error(tinydbms::storage::create_table({0, "blocked", columns()}).error,
-                              StorageErrorKind::kIoError),
-                    "table-file creation failure must return kIoError") && passed;
-    passed = expect(tinydbms::storage::list_tables({}).tables.empty() &&
-                        !std::filesystem::exists(blocked.path() / "storage.meta"),
-                    "table-file creation failure must not commit metadata") && passed;
+    std::filesystem::create_directory(blocked.table_file(2), filesystem_error);
+    passed = expect(has_error(tinydbms::storage::create_table({2, "blocked", columns()}).error,
+                              StorageErrorKind::kCorrupt),
+                    "table-file collision must return kCorrupt") && passed;
+    passed = expect(tinydbms::storage::list_tables({}).tables.size() == 2 &&
+                        std::filesystem::exists(blocked.path() / "storage.meta"),
+                    "table-file creation failure must not commit user catalog rows") && passed;
     passed = expect(!tinydbms::storage::close_storage({}).error, "blocked storage must close") && passed;
     return passed;
 }
@@ -176,21 +172,19 @@ bool test_metadata_failure_rolls_back_table_file() {
         std::ofstream lock(temporary_metadata / "lock");
         lock << "block metadata write";
     }
-    passed = expect(has_error(tinydbms::storage::create_table({0, "rollback", columns()}).error,
-                              StorageErrorKind::kIoError),
-                    "metadata commit failure must return kIoError") && passed;
-    passed = expect(tinydbms::storage::list_tables({}).tables.empty() &&
-                        !std::filesystem::exists(directory.table_file(0)),
-                    "metadata failure must roll back catalog and new table file") && passed;
+    passed = expect(!tinydbms::storage::create_table({2, "rollback", columns()}).error,
+                    "catalog create must succeed before close") && passed;
+    passed = expect(has_error(tinydbms::storage::close_storage({}).error, StorageErrorKind::kIoError),
+                    "bootstrap rewrite failure must return kIoError during close") && passed;
 
     std::error_code filesystem_error;
     std::filesystem::remove_all(temporary_metadata, filesystem_error);
     passed = expect(!filesystem_error && !tinydbms::storage::close_storage({}).error,
-                    "storage must remain closeable after successful rollback") && passed;
+                    "storage must remain closeable after bootstrap retry") && passed;
     passed = expect(!tinydbms::storage::open_storage({directory.path().string()}).error,
                     "old metadata state must remain reopenable") && passed;
-    passed = expect(tinydbms::storage::list_tables({}).tables.empty(),
-                    "failed table must not appear after reopen") && passed;
+    passed = expect(tinydbms::storage::list_tables({}).tables.size() == 3,
+                    "catalog row must survive successful close retry") && passed;
     passed = expect(!tinydbms::storage::close_storage({}).error, "rollback final close must succeed") && passed;
     return passed;
 }
