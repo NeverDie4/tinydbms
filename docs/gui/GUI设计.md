@@ -6,9 +6,8 @@ GUI 是可选展示入口，不改变公共契约，也不替代 CLI：按课程
 仍是 CLI 与公共 API；GUI 的价值是可视化演示与交互体验，不是新的业务层。
 
 本文与 [core 与 CLI 实现设计](../core-cli/实现设计.md)、[消息契约详细设计](../消息契约详细设计.md)、
-[模块交互契约](../模块交互契约.md) 一起使用。GUI 不修改 `include/`，因此
-[公共契约变更通知与待决策清单（最终提交前删除）](../公共契约变更通知与待决策清单（最终提交前删除）.md)
-无需为本文新增条目。
+[模块交互契约](../模块交互契约.md) 一起使用。GUI 不修改 `include/`，因此不需要在公共契约变更中
+新增条目。
 
 ## 1. GUI 连接 core，不连接 CLI
 
@@ -411,21 +410,20 @@ endif()
 `src/app` 只作为头文件搜索路径用于默认数据目录常量的交叉断言：`kDefaultDataDir` 是头文件内
 常量，不产生链接依赖，UI 测试仍然不链接 app 的逻辑库。
 
-### 9.5 当前阶段的链接限制
+### 9.5 链接现状
 
-`core` 静态库在链接期依赖 `compiler` 与 `storage` 目标，而 compiler 尚未完成公共契约适配
-（见 [联调准备与验收清单](../联调准备与验收清单.md) §3.1 的公共头迁移阻断）。因此在
-compiler 适配完成前：
+`core` 静态库在链接期依赖 `compiler` 与 `storage` 目标。Compiler 适配（PR #4/#5）与 Storage V2
+已于 2026-09-14 合入本分支，[联调准备与验收清单](../联调准备与验收清单.md) §3.1 记录的
+公共头迁移阻断已关闭。当前：
 
 - 默认配置（`TINYDBMS_ENABLE_REAL_MODULES=OFF`）下 `tinydbms-gui` 编译 `unavailable_backend.cpp`，
   可以正常构建、启动并调试界面；打开数据库会得到明确的「实现不可用」错误，不伪造数据；
-- 真实链路（`TINYDBMS_ENABLE_REAL_MODULES=ON`）下 `tinydbms-gui` 需要链接 `tinydbms_core`，
-  与同一开关下的 CLI 一样，要等 compiler 适配完成才能链接；
-- `tinydbms_gui_ui_test` 不链接 core，随时可以构建和运行；
-- 真实链路验收必须等 compiler 适配完成后再做，不能以 UI 测试代替。
-
-该阻断与本 GUI 无关：`tinydbms_core` 的链接接口依赖 compiler 目标，因此当前默认构建树里的
-CLI（`tinydbms`）同样无法链接，需要 compiler 成员先合入适配。
+- 真实链路（`TINYDBMS_ENABLE_REAL_MODULES=ON`）下 `tinydbms-gui` 链接 `tinydbms_core`，与同一
+  开关下的 CLI 一致；`TINYDBMS_ENABLE_REAL_MODULES=ON` + `TINYDBMS_BUILD_GUI=ON` 的构建目录
+  已完成全量构建并通过 CTest；
+- `tinydbms_gui_ui_test` 不链接 core，可独立构建和运行，覆盖界面与结果模型行为；
+- 真实数据目录下的人工交互验收（打开库、执行脚本、修复建议展示）仍需在本机 Qt 环境手动执行，
+  不能以离屏 UI 测试代替。
 
 ### 9.6 预设
 

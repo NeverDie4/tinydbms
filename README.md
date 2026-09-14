@@ -37,13 +37,22 @@ Core Database / Executor
 
 已支持：
 
-- `CREATE TABLE`
+- `CREATE TABLE`，含 `NULL` / `NOT NULL` 列约束
 - `INSERT`，包括完整的显式列重排
-- `SELECT`、列投影与简单 WHERE，包括比较、`AND`、`OR`、`NOT`
+- `SELECT`、列投影与 `WHERE`，包括比较、`AND`、`OR`、`NOT` 与 SQL 三值逻辑
+- `UPDATE`，采用扫描、构造完整替换行、关闭 cursor、批量替换流程（非事务性）
+- `ORDER BY`、`INNER JOIN`（含限定列引用）与 `GROUP BY` 的 `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`
 - `DELETE`，采用扫描、收集 RID、关闭 cursor、批量删除流程
 - 正常 close/reopen 后的 schema 和记录持久化
 
-初版 public type 只有 `INT` 和 `VARCHAR`。`INT` 是有符号 `int32_t`，物理编码为 4-byte little-endian；`VARCHAR` 是 UTF-8，物理编码为 `uint32_t` little-endian 字节长度加内容。
+public type 为 `INT`（`int32_t`）、`BIGINT`（`int64_t`）、`DOUBLE`、`BOOLEAN` 和 `VARCHAR`，
+SQL NULL 由 `Value` 的 `std::monostate` 表示；列元数据带 `nullable`，默认 NOT NULL。
+`VARCHAR` 必须是合法 UTF-8 且不超过 1024 字节，单行逻辑载荷不超过 4096 字节。
+逻辑类型与物理编码的对应关系以
+[docs/SQLv2扩展契约.md](docs/SQLv2扩展契约.md) §10 与 `include/tinydbms/common.hpp` 为准。
+
+SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子查询、`UNION`、`LIMIT`/`OFFSET`、
+窗口函数、算术表达式、事务、WAL 与崩溃原子性。
 
 `storage.meta` 是 V2 bootstrap，不保存用户 schema。`tdb_sys_tables`（TableId 0）与
 `tdb_sys_columns`（TableId 1）是 Storage 管理的特殊 HeapTable，保存用户 schema；它们可由
