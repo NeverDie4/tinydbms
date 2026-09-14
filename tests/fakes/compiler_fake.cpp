@@ -1,5 +1,6 @@
 #include "compiler_fake.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <stdexcept>
@@ -33,7 +34,7 @@ SourceLocation location_at(std::string_view text, std::size_t offset) {
         ++column;
         ++index;
     }
-    return SourceLocation{line, static_cast<int>(column)};
+    return SourceLocation{line, static_cast<int>(column), offset};
 }
 
 }  // namespace
@@ -69,9 +70,7 @@ SourceRange make_range(
     }
     return SourceRange{
         location_at(text, begin_offset),
-        location_at(text, end_offset),
-        begin_offset,
-        end_offset};
+        location_at(text, end_offset)};
 }
 
 SourceRange make_range_of(std::string_view text, std::string_view needle) {
@@ -80,6 +79,36 @@ SourceRange make_range_of(std::string_view text, std::string_view needle) {
         return make_range(text, 0, text.size());
     }
     return make_range(text, position, position + needle.size());
+}
+
+// 与真实 splitter 一致的分段扫描：sql 保留从分段首字符到结尾分号的原文
+// （含前导空白与注释），只丢弃既无内容也无分号语义的空分段。
+std::vector<compiler::SplitStatement> scan_segments(std::string_view text) {
+    std::vector<compiler::SplitStatement> statements;
+    std::size_t cursor = 0;
+    while (cursor < text.size()) {
+        const std::size_t semicolon = text.find(';', cursor);
+        const std::size_t end = semicolon == std::string_view::npos ? text.size() : semicolon + 1;
+        const std::string_view segment = text.substr(cursor, end - cursor);
+        const bool has_content = std::any_of(
+            segment.begin(),
+            segment.end(),
+            [](char value) {
+                return value != ';' &&
+                    std::isspace(static_cast<unsigned char>(value)) == 0;
+            });
+        if (has_content) {
+            statements.push_back(compiler::SplitStatement{
+                std::string{segment},
+                testing::fake_compiler::make_range(text, cursor, end)});
+        }
+
+        if (semicolon == std::string_view::npos) {
+            break;
+        }
+        cursor = semicolon + 1;
+    }
+    return statements;
 }
 
 compiler::CompileError make_compile_error(
@@ -96,6 +125,14 @@ compiler::CompileError make_compile_error(
         std::move(message),
         std::move(suggestion),
         std::move(fix_it)};
+}
+
+std::string statement_segment(std::string_view text, std::size_t index) {
+    const std::vector<compiler::SplitStatement> statements = scan_segments(text);
+    if (index >= statements.size()) {
+        return std::string{};
+    }
+    return statements[index].sql;
 }
 
 }  // namespace tinydbms::testing::fake_compiler
@@ -115,36 +152,13 @@ SplitStatementsResult split_statements(std::string_view text) {
     if (text.size() > kMaxSqlBytes) {
         return SplitStatementsResult{CompileError{
             CompileStage::kLex,
-            SourceRange{SourceLocation{1, 1}, SourceLocation{1, 1}, 0, 0},
+            SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 1, 0}},
             "SQL text exceeds maximum length",
             std::nullopt,
             std::nullopt}};
     }
 
-    std::vector<SplitStatement> statements;
-
-    std::size_t cursor = 0;
-    while (cursor < text.size()) {
-        while (cursor < text.size() &&
-               std::isspace(static_cast<unsigned char>(text[cursor])) != 0) {
-            ++cursor;
-        }
-        if (cursor == text.size()) {
-            break;
-        }
-
-        const std::size_t semicolon = text.find(';', cursor);
-        const std::size_t end = semicolon == std::string_view::npos ? text.size() : semicolon + 1;
-        statements.push_back(SplitStatement{
-            std::string{text.substr(cursor, end - cursor)},
-            testing::fake_compiler::make_range(text, cursor, end)});
-
-        if (semicolon == std::string_view::npos) {
-            break;
-        }
-        cursor = semicolon + 1;
-    }
-    return SplitStatementsResult{std::move(statements)};
+    return SplitStatementsResult{testing::fake_compiler::scan_segments(text)};
 }
 
 CompileResult compile(const CompileRequest& request) {

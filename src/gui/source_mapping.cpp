@@ -55,8 +55,8 @@ std::optional<int> utf8_offset_to_index(const QString& text, std::size_t byte_of
 std::optional<EditorRange> editor_range(
     const QString& text,
     const tinydbms::SourceRange& range) {
-    const std::optional<int> begin = utf8_offset_to_index(text, range.begin_offset);
-    const std::optional<int> end = utf8_offset_to_index(text, range.end_offset);
+    const std::optional<int> begin = utf8_offset_to_index(text, range.begin.byte_offset);
+    const std::optional<int> end = utf8_offset_to_index(text, range.end.byte_offset);
     if (!begin.has_value() || !end.has_value() || *end < *begin) {
         return std::nullopt;
     }

@@ -2,16 +2,54 @@
 
 #include <QString>
 
+#include <array>
+#include <charconv>
 #include <cstdint>
+#include <string>
+#include <type_traits>
 #include <variant>
 
 namespace tinydbms::gui {
 
-QString value_text(const tinydbms::Value& value) {
-    if (const auto* number = std::get_if<std::int32_t>(&value.data); number != nullptr) {
-        return QString::number(*number);
+namespace {
+
+// 与 CLI 的输出保持一致：DOUBLE 使用最短往返表示，整数形态补 ".0"，
+// 不使用 QString::number 的默认 6 位有效数字（会丢精度）。
+QString double_text(double value) {
+    std::array<char, 64> buffer{};
+    const auto [end, error] =
+        std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (error != std::errc{}) {
+        return QStringLiteral("<unsupported DOUBLE value>");
     }
-    return QString::fromUtf8(std::get<std::string>(value.data));
+    std::string text(buffer.data(), end);
+    if (text.find_first_of(".eE") == std::string::npos) {
+        text += ".0";
+    }
+    return QString::fromLatin1(text.c_str(), static_cast<int>(text.size()));
+}
+
+}  // namespace
+
+QString value_text(const tinydbms::Value& value) {
+    return std::visit(
+        [](const auto& item) -> QString {
+            using Item = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<Item, std::monostate>) {
+                return QStringLiteral("NULL");
+            } else if constexpr (std::is_same_v<Item, std::int32_t>) {
+                return QString::number(item);
+            } else if constexpr (std::is_same_v<Item, std::int64_t>) {
+                return QString::number(static_cast<qlonglong>(item));
+            } else if constexpr (std::is_same_v<Item, double>) {
+                return double_text(item);
+            } else if constexpr (std::is_same_v<Item, bool>) {
+                return item ? QStringLiteral("TRUE") : QStringLiteral("FALSE");
+            } else {
+                return QString::fromUtf8(item);
+            }
+        },
+        value.data);
 }
 
 ResultModel::ResultModel(QObject* parent) : QAbstractTableModel{parent} {}

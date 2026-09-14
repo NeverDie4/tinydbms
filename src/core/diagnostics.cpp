@@ -50,29 +50,31 @@ std::optional<SourceLocation> location_at_offset(
         column > std::numeric_limits<int>::max()) {
         return std::nullopt;
     }
-    return SourceLocation{static_cast<int>(line), static_cast<int>(column)};
+    return SourceLocation{static_cast<int>(line), static_cast<int>(column), offset};
 }
 
 }  // namespace
 
 SourceRange empty_source_range() noexcept {
-    return SourceRange{SourceLocation{1, 1}, SourceLocation{1, 1}, 0, 0};
+    return SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 1, 0}};
 }
 
 bool is_valid_source_range(const SourceRange& range, std::string_view text) noexcept {
     if (!is_valid_location(range.begin) || !is_valid_location(range.end)) {
         return false;
     }
-    if (range.begin_offset > range.end_offset || range.end_offset > text.size()) {
+    if (range.begin.byte_offset > range.end.byte_offset ||
+        range.end.byte_offset > text.size()) {
         return false;
     }
-    if (!is_valid_endpoint(range.begin_offset, text) ||
-        !is_valid_endpoint(range.end_offset, text)) {
+    if (!is_valid_endpoint(range.begin.byte_offset, text) ||
+        !is_valid_endpoint(range.end.byte_offset, text)) {
         return false;
     }
 
-    const std::optional<SourceLocation> begin = location_at_offset(text, range.begin_offset);
-    const std::optional<SourceLocation> end = location_at_offset(text, range.end_offset);
+    const std::optional<SourceLocation> begin =
+        location_at_offset(text, range.begin.byte_offset);
+    const std::optional<SourceLocation> end = location_at_offset(text, range.end.byte_offset);
     if (!begin.has_value() || !end.has_value()) {
         return false;
     }
@@ -87,16 +89,18 @@ std::optional<SourceRange> absolutize_range(
     if (!is_valid_source_range(statement.source, script_text)) {
         return std::nullopt;
     }
-    if (statement.source.end_offset < statement.source.begin_offset ||
-        statement.source.end_offset - statement.source.begin_offset != statement.sql.size()) {
+    const std::size_t statement_begin = statement.source.begin.byte_offset;
+    const std::size_t statement_end = statement.source.end.byte_offset;
+    if (statement_end < statement_begin ||
+        statement_end - statement_begin != statement.sql.size()) {
         return std::nullopt;
     }
     if (!is_valid_source_range(relative, statement.sql)) {
         return std::nullopt;
     }
 
-    const std::size_t begin_offset = statement.source.begin_offset + relative.begin_offset;
-    const std::size_t end_offset = statement.source.begin_offset + relative.end_offset;
+    const std::size_t begin_offset = statement_begin + relative.begin.byte_offset;
+    const std::size_t end_offset = statement_begin + relative.end.byte_offset;
     if (begin_offset > script_text.size() || end_offset > script_text.size()) {
         return std::nullopt;
     }
@@ -106,7 +110,7 @@ std::optional<SourceRange> absolutize_range(
     if (!begin.has_value() || !end.has_value()) {
         return std::nullopt;
     }
-    return SourceRange{*begin, *end, begin_offset, end_offset};
+    return SourceRange{*begin, *end};
 }
 
 }  // namespace tinydbms::core::internal

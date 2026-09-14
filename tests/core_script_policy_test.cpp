@@ -60,7 +60,7 @@ Plan create_table_plan(
 }
 
 Plan scan_plan(TableId table_id = 1) {
-    return Plan{QueryPlan{std::make_unique<PlanNode>(SeqScanNode{table_id})}};
+    return Plan{QueryPlan{std::make_unique<PlanNode>(SeqScanNode{table_id, {}}), {}}};
 }
 
 Plan insert_plan(TableId table_id, std::vector<std::vector<Value>> rows) {
@@ -74,7 +74,7 @@ bool open_database(Database& database) {
 bool is_empty_insertion_point(const SourceRange& range) {
     return range.begin.line == 1 && range.begin.column == 1 &&
         range.end.line == 1 && range.end.column == 1 &&
-        range.begin_offset == 0 && range.end_offset == 0;
+        range.begin.byte_offset == 0 && range.end.byte_offset == 0;
 }
 
 bool has_script_error(const ExecuteScriptResult& script, ErrorKind kind) {
@@ -97,20 +97,23 @@ bool test_stop_policy_skips_remaining_statements() {
     Database database;
     CHECK(open_database(database));
 
+    const std::string text =
+        "create table events (id int);\nselect from;\ncreate table never (id int);";
+    // 分段原文含前导换行，compile() 的相对偏移以分段为基准。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> results;
     results.emplace_back(create_table_plan("events"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSyntax,
-        "select from;",
-        0,
-        6,
+        second_segment,
+        1,
+        7,
         "injected syntax error"));
     results.emplace_back(create_table_plan("never"));
     fake_compiler::set_compile_results(std::move(results));
 
-    const auto script = database.execute_script(ExecuteScriptRequest{
-        "create table events (id int);\nselect from;\ncreate table never (id int);",
-        ScriptErrorPolicy::kStopOnFirstError});
+    const auto script = database.execute_script(
+        ExecuteScriptRequest{text, ScriptErrorPolicy::kStopOnFirstError});
 
     CHECK(!script.script_error.has_value());
     CHECK(script.statements.size() == 3);
@@ -120,8 +123,11 @@ bool test_stop_policy_skips_remaining_statements() {
     CHECK(script.statements[0].statement_index() == 0);
     CHECK(script.statements[1].statement_index() == 1);
     CHECK(script.statements[2].statement_index() == 2);
-    CHECK(script.statements[1].source().begin.line == 2);
-    CHECK(script.statements[2].source().begin.line == 3);
+    // 语句范围从上一句分号之后开始（含语句之间的换行）。
+    CHECK(script.statements[1].source().begin.line == 1);
+    CHECK(script.statements[1].source().begin.byte_offset == 29);
+    CHECK(script.statements[2].source().begin.line == 2);
+    CHECK(script.statements[2].source().begin.byte_offset == 42);
 
     const Error& compile_error =
         error_at(script, 1);
@@ -148,24 +154,27 @@ bool test_analyze_policy_continues_with_shadow_catalog() {
     Database database;
     CHECK(open_database(database));
 
+    const std::string text =
+        "create table orders (id int);\n"
+        "select missing from users;\n"
+        "create table events (id int);\n"
+        "select * from events;";
+    // 分段原文含前导换行，compile() 的相对偏移以分段为基准。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> results;
     results.emplace_back(create_table_plan("orders"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSemantic,
-        "select missing from users;",
-        7,
-        14,
+        second_segment,
+        8,
+        15,
         "unknown column \"missing\""));
     results.emplace_back(create_table_plan("events"));
     results.emplace_back(scan_plan(3));
     fake_compiler::set_compile_results(std::move(results));
 
-    const auto script = database.execute_script(ExecuteScriptRequest{
-        "create table orders (id int);\n"
-        "select missing from users;\n"
-        "create table events (id int);\n"
-        "select * from events;",
-        ScriptErrorPolicy::kAnalyzeRemaining});
+    const auto script = database.execute_script(
+        ExecuteScriptRequest{text, ScriptErrorPolicy::kAnalyzeRemaining});
 
     CHECK(!script.script_error.has_value());
     CHECK(script.statements.size() == 4);
@@ -402,7 +411,9 @@ bool test_compiler_exception_stops_script() {
     CHECK(status_at(script, 2) == StatementStatus::kSkippedExecution);
     CHECK(has_script_error(script, ErrorKind::kInternal));
     CHECK(script.script_error->source.has_value());
-    CHECK(script.script_error->source->begin_offset == script.statements[1].source().begin_offset);
+    CHECK(
+        script.script_error->source->begin.byte_offset ==
+        script.statements[1].source().begin.byte_offset);
     CHECK(fake_compiler::state().compile_calls == 2);
     CHECK(fake::state().create_table_calls == 1);
     CHECK(!database.close().error.has_value());
@@ -436,7 +447,9 @@ bool test_storage_exception_is_indeterminate_and_stops_script() {
     CHECK(status_at(script, 2) == StatementStatus::kSkippedExecution);
     CHECK(has_script_error(script, ErrorKind::kInternal));
     CHECK(script.script_error->source.has_value());
-    CHECK(script.script_error->source->begin_offset == script.statements[0].source().begin_offset);
+    CHECK(
+        script.script_error->source->begin.byte_offset ==
+        script.statements[0].source().begin.byte_offset);
     CHECK(fake::state().insert_calls == 1);
     CHECK(fake::state().create_table_calls == 0);
     CHECK(fake_compiler::state().compile_calls == 1);
@@ -518,7 +531,7 @@ bool test_split_failures_are_fatal_and_do_not_leak_state() {
     // 分句契约违反：sql 与 range 不一致 → kInternal + 空插入点，不编译。
     fake_compiler::reset();
     std::vector<SplitStatement> inconsistent{
-        SplitStatement{"x;", SourceRange{SourceLocation{1, 1}, SourceLocation{1, 2}, 0, 1}}};
+        SplitStatement{"x;", SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 2, 1}}}};
     fake_compiler::set_split_override(
         std::optional<std::vector<SplitStatement>>{std::move(inconsistent)});
     const auto violated = database.execute_script(ExecuteScriptRequest{"x;"});
@@ -533,7 +546,7 @@ bool test_split_failures_are_fatal_and_do_not_leak_state() {
     std::deque<CompileResult> bad_results;
     bad_results.emplace_back(CompileError{
         CompileStage::kSyntax,
-        SourceRange{SourceLocation{1, 6}, SourceLocation{1, 7}, 5, 6},
+        SourceRange{SourceLocation{1, 6, 5}, SourceLocation{1, 7, 6}},
         "out of bounds range",
         std::nullopt,
         std::nullopt});
@@ -544,7 +557,7 @@ bool test_split_failures_are_fatal_and_do_not_leak_state() {
     CHECK(status_at(invalid_range, 0) == StatementStatus::kSkippedExecution);
     CHECK(has_script_error(invalid_range, ErrorKind::kInternal));
     CHECK(invalid_range.script_error->source.has_value());
-    CHECK(invalid_range.script_error->source->begin_offset == 0);
+    CHECK(invalid_range.script_error->source->begin.byte_offset == 0);
     CHECK(!database.close().error.has_value());
     return true;
 }
@@ -598,26 +611,28 @@ bool test_crlf_and_utf8_ranges_are_absolutized() {
     Database database;
     CHECK(open_database(database));
 
-    const std::string statement_sql = "select 名字 from users;";
+    const std::string text = "create table events (id int);\r\nselect 名字 from users;";
+    // 第二段原文含前导 CRLF，相对偏移按分段起点计算（+2 覆盖 \r\n）。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> results;
     results.emplace_back(create_table_plan("events"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSemantic,
-        statement_sql,
-        7,
-        13,
+        second_segment,
+        9,
+        15,
         "unknown column \"名字\"",
         std::string{"did you mean \"name\"?"},
-        FixIt{fake_compiler::make_range(statement_sql, 7, 13), "name"}));
+        FixIt{fake_compiler::make_range(second_segment, 9, 15), "name"}));
     fake_compiler::set_compile_results(std::move(results));
 
-    const std::string text = "create table events (id int);\r\n" + statement_sql;
     const auto script = database.execute_script(ExecuteScriptRequest{text});
 
     CHECK(script.statements.size() == 2);
     CHECK(status_at(script, 1) == StatementStatus::kCompileError);
-    CHECK(script.statements[1].source().begin.line == 2);
-    CHECK(script.statements[1].source().begin_offset == 31);
+    // 语句范围从上一句分号之后开始（含语句之间的 CRLF）。
+    CHECK(script.statements[1].source().begin.line == 1);
+    CHECK(script.statements[1].source().begin.byte_offset == 29);
 
     const Error& error = error_at(script, 1);
     CHECK(error.source.has_value());
@@ -625,16 +640,16 @@ bool test_crlf_and_utf8_ranges_are_absolutized() {
     CHECK(error.source->begin.column == 8);
     CHECK(error.source->end.line == 2);
     CHECK(error.source->end.column == 14);
-    CHECK(error.source->begin_offset == 38);
-    CHECK(error.source->end_offset == 44);
+    CHECK(error.source->begin.byte_offset == 38);
+    CHECK(error.source->end.byte_offset == 44);
 
     // fix-it 必须与主诊断使用同一套绝对换算。
     CHECK(error.fix_it.has_value());
     CHECK(error.fix_it->range.begin.line == 2);
     CHECK(error.fix_it->range.begin.column == 8);
     CHECK(error.fix_it->range.end.column == 14);
-    CHECK(error.fix_it->range.begin_offset == 38);
-    CHECK(error.fix_it->range.end_offset == 44);
+    CHECK(error.fix_it->range.begin.byte_offset == 38);
+    CHECK(error.fix_it->range.end.byte_offset == 44);
     CHECK(error.fix_it->replacement == "name");
     CHECK(error.suggestion.has_value());
     CHECK(!database.close().error.has_value());
@@ -649,46 +664,52 @@ bool test_analyze_collects_multiple_compile_errors_in_order() {
     Database database;
     CHECK(open_database(database));
 
+    const std::string text =
+        "select 'unterminated;\n"
+        "select from users;\n"
+        "select missing from users;";
+    // 分段原文含前导换行，compile() 的相对偏移以分段为基准。
+    const std::string first_segment = fake_compiler::statement_segment(text, 0);
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
+    const std::string third_segment = fake_compiler::statement_segment(text, 2);
     std::deque<CompileResult> results;
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kLex,
-        "select 'unterminated;",
+        first_segment,
         7,
         20,
         "unterminated string"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSyntax,
-        "select from users;",
-        0,
-        6,
+        second_segment,
+        1,
+        7,
         "missing select list"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSemantic,
-        "select missing from users;",
-        7,
-        14,
+        third_segment,
+        8,
+        15,
         "unknown column \"missing\""));
     fake_compiler::set_compile_results(std::move(results));
 
-    const auto script = database.execute_script(ExecuteScriptRequest{
-        "select 'unterminated;\n"
-        "select from users;\n"
-        "select missing from users;",
-        ScriptErrorPolicy::kAnalyzeRemaining});
+    const auto script = database.execute_script(
+        ExecuteScriptRequest{text, ScriptErrorPolicy::kAnalyzeRemaining});
 
     CHECK(!script.script_error.has_value());
     CHECK(script.statements.size() == 3);
     for (std::size_t index = 0; index < script.statements.size(); ++index) {
         CHECK(script.statements[index].statement_index() == index);
         CHECK(status_at(script, index) == StatementStatus::kCompileError);
-        // 每条错误的绝对范围都落在自己语句的行内，不跨语句、不改写顺序。
-        CHECK(script.statements[index].source().begin.line == static_cast<int>(index + 1));
+        // 语句范围含前导换行，但必须以本语句的结尾行收束；每条错误的绝对范围
+        // 都落在自己语句的行内，不跨语句、不改写顺序。
+        CHECK(script.statements[index].source().end.line == static_cast<int>(index + 1));
         CHECK(error_at(script, index).source.has_value());
         CHECK(error_at(script, index).source->begin.line == static_cast<int>(index + 1));
         if (index != 0) {
             CHECK(
-                error_at(script, index).source->begin_offset >
-                error_at(script, index - 1U).source->begin_offset);
+                error_at(script, index).source->begin.byte_offset >
+                error_at(script, index - 1U).source->begin.byte_offset);
         }
     }
     CHECK((error_at(script, 1).compile_stage.has_value() &&
@@ -710,18 +731,20 @@ bool test_cross_line_range_is_absolutized() {
     Database database;
     CHECK(open_database(database));
 
-    const std::string statement_sql = "select a\r\nfrom t;";
+    const std::string text =
+        "create table events (id int);\r\n" "select a\r\nfrom t;";
+    // 第二段原文含前导 CRLF，相对偏移按分段起点计算。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> results;
     results.emplace_back(create_table_plan("events"));
     results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSemantic,
-        statement_sql,
-        7,
-        14,
+        second_segment,
+        9,
+        16,
         "unknown column \"a\""));
     fake_compiler::set_compile_results(std::move(results));
 
-    const std::string text = "create table events (id int);\r\n" + statement_sql;
     const auto script = database.execute_script(ExecuteScriptRequest{text});
 
     CHECK(script.statements.size() == 2);
@@ -732,8 +755,8 @@ bool test_cross_line_range_is_absolutized() {
     CHECK(error.source->begin.column == 8);
     CHECK(error.source->end.line == 3);
     CHECK(error.source->end.column == 5);
-    CHECK(error.source->begin_offset == 38);
-    CHECK(error.source->end_offset == 45);
+    CHECK(error.source->begin.byte_offset == 38);
+    CHECK(error.source->end.byte_offset == 45);
     CHECK(!database.close().error.has_value());
     return true;
 }
@@ -763,10 +786,10 @@ bool test_tab_columns_and_eof_insertion_point() {
     // Tab 按一字节一列参与列计数：offset 7 是列 8，offset 14 是列 15。
     CHECK(error.source->begin.line == 1);
     CHECK(error.source->begin.column == 8);
-    CHECK(error.source->begin_offset == 7);
+    CHECK(error.source->begin.byte_offset == 7);
     CHECK(error.source->end.line == 1);
     CHECK(error.source->end.column == 15);
-    CHECK(error.source->end_offset == 14);
+    CHECK(error.source->end.byte_offset == 14);
 
     // EOF 空插入点（begin == end == text.size()）必须通过校验并原样换算。
     fake_compiler::reset();
@@ -783,8 +806,8 @@ bool test_tab_columns_and_eof_insertion_point() {
     CHECK(eof_script.statements.size() == 1);
     const Error& eof_error = error_at(eof_script, 0);
     CHECK(eof_error.source.has_value());
-    CHECK(eof_error.source->begin_offset == statement_sql.size());
-    CHECK(eof_error.source->end_offset == statement_sql.size());
+    CHECK(eof_error.source->begin.byte_offset == statement_sql.size());
+    CHECK(eof_error.source->end.byte_offset == statement_sql.size());
     const SourceRange eof_relative = fake_compiler::make_range(
         statement_sql, statement_sql.size(), statement_sql.size());
     CHECK(eof_error.source->begin.line == eof_relative.begin.line);

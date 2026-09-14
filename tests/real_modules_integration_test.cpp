@@ -274,8 +274,9 @@ bool test_batch_stops_on_compile_error() {
     CHECK(failed.exit_code == 1);
     CHECK(failed.output.empty());
     // 诊断升级后保留语义阶段标签和脚本绝对范围，首错后的语句被跳过。
+    // 分段范围含前导换行：跳过范围从上一句分号之后开始，到本语句分号为止。
     CHECK(failed.error.rfind("ERROR semantic 1:", 0) == 0);
-    CHECK(failed.error.find("SKIPPED 2:") != std::string::npos);
+    CHECK(failed.error.find("SKIPPED 1:27-2:30 policy") != std::string::npos);
 
     const InvocationResult persisted = invoke_cli(data_dir.path(), "SELECT * FROM items;\n", false);
     CHECK(persisted.exit_code == 0);
@@ -326,7 +327,7 @@ bool test_batch_reports_semantic_error() {
     CHECK(duplicated.output.empty());
     // 重复建表由 compiler 语义阶段拒绝，位置由 core 换算为整段输入坐标。
     CHECK(duplicated.error.rfind("ERROR semantic 1:", 0) == 0);
-    CHECK(duplicated.error.find("SKIPPED 2:") != std::string::npos);
+    CHECK(duplicated.error.find("SKIPPED 1:29-2:30 policy") != std::string::npos);
 
     const InvocationResult persisted =
         invoke_cli(data_dir.path(), "SELECT * FROM items;\n", false);

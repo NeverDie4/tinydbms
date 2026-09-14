@@ -85,10 +85,8 @@ bool wait_until(const std::function<bool()>& predicate, int timeout_ms = 4000) {
 
 SourceRange range_of(std::size_t begin, std::size_t end) {
     return SourceRange{
-        SourceLocation{1, static_cast<int>(begin) + 1},
-        SourceLocation{1, static_cast<int>(end) + 1},
-        begin,
-        end};
+        SourceLocation{1, static_cast<int>(begin) + 1, begin},
+        SourceLocation{1, static_cast<int>(end) + 1, end}};
 }
 
 QueryResult make_query() {
@@ -175,6 +173,56 @@ ExecuteScriptResult query_result() {
     ExecuteScriptResult result;
     result.statements.push_back(executed_query(0, range_of(0, 20), make_query()));
     return result;
+}
+
+// SQL v2 引入了 BIGINT/DOUBLE/BOOLEAN/NULL：结果模型必须完整文本化，
+// 不能对非 INT/VARCHAR 的 alternative 调用 std::get<std::string>。
+bool test_result_model_formats_sql_v2_values() {
+    QueryResult query;
+    query.columns = std::vector<ColumnHeader>{
+        ColumnHeader{"b", Type::kBigInt},
+        ColumnHeader{"d", Type::kDouble},
+        ColumnHeader{"f", Type::kBoolean},
+        ColumnHeader{"s", Type::kVarchar},
+        ColumnHeader{"n", Type::kInt}};
+    query.rows = std::vector<tinydbms::core::Row>{tinydbms::core::Row{
+        Value{std::int64_t{2147483648}},
+        Value{1.5},
+        Value{true},
+        Value{std::string{"甲"}},
+        Value{std::monostate{}}}};
+
+    ResultModel model;
+    model.set_query(&query);
+    CHECK(model.rowCount() == 1);
+    CHECK(model.columnCount() == 5);
+    CHECK(model.data(model.index(0, 0), Qt::DisplayRole).toString() ==
+        QStringLiteral("2147483648"));
+    CHECK(
+        model.data(model.index(0, 1), Qt::DisplayRole).toString() ==
+        QStringLiteral("1.5"));
+    CHECK(
+        model.data(model.index(0, 2), Qt::DisplayRole).toString() ==
+        QStringLiteral("TRUE"));
+    CHECK(
+        model.data(model.index(0, 3), Qt::DisplayRole).toString() ==
+        QString::fromUtf8("甲"));
+    CHECK(
+        model.data(model.index(0, 4), Qt::DisplayRole).toString() ==
+        QStringLiteral("NULL"));
+    // 整数形态的 DOUBLE 需要与 CLI 一样补 ".0"，避免被误读成 BIGINT。
+    query.rows[0][1] = Value{2.0};
+    CHECK(
+        model.data(model.index(0, 1), Qt::DisplayRole).toString() ==
+        QStringLiteral("2.0"));
+    // DOUBLE 不能因为默认 6 位有效数字而丢精度。
+    query.rows[0][1] = Value{0.123456789012345};
+    CHECK(
+        model.data(model.index(0, 1), Qt::DisplayRole).toString() ==
+        QStringLiteral("0.123456789012345"));
+    model.set_query(nullptr);
+    CHECK(model.rowCount() == 0);
+    return true;
 }
 
 // 两张表，其中表名以 "(2)" 结尾：父子关系必须按 table_id 关联，不能靠节点文本匹配。
@@ -755,6 +803,7 @@ int main(int argc, char* argv[]) {
     run("default_data_dir_matches_cli", test_default_data_dir_matches_cli);
     run("utf8_offset_mapping", test_utf8_offset_mapping);
     run("statement_views_cover_all_states", test_statement_views_cover_all_states);
+    run("result_model_formats_sql_v2_values", test_result_model_formats_sql_v2_values);
     run("session_state_transitions", test_session_state_transitions);
     run("close_policy_filters_not_open", test_close_policy_filters_not_open);
     run("window_open_query_flow", test_window_open_query_flow);

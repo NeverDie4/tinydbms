@@ -1,6 +1,7 @@
 #include "record_codec.h"
 
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string_view>
@@ -9,6 +10,9 @@
 
 namespace tinydbms::storage::internal {
 namespace {
+
+static_assert(sizeof(double) == sizeof(std::uint64_t));
+static_assert(std::numeric_limits<double>::is_iec559);
 
 RecordCodecError make_error(RecordCodecErrorKind kind, std::string message) {
     return RecordCodecError{kind, std::move(message)};
@@ -85,6 +89,12 @@ std::size_t fixed_width(Type type) {
     switch (type) {
         case Type::kInt:
             return 4;
+        case Type::kBigInt:
+            return 8;
+        case Type::kDouble:
+            return 8;
+        case Type::kBoolean:
+            return 1;
         case Type::kVarchar:
             return 0;
     }
@@ -104,7 +114,7 @@ template <typename Unsigned>
 bool read_little_endian(std::span<const std::byte> payload, std::size_t& offset,
                         Unsigned& value) {
     static_assert(std::is_unsigned_v<Unsigned>);
-    if (payload.size() - offset < sizeof(Unsigned)) {
+    if (offset > payload.size() || payload.size() - offset < sizeof(Unsigned)) {
         return false;
     }
     value = 0;
@@ -125,7 +135,19 @@ std::size_t add_with_limit(std::size_t current, std::size_t amount, std::size_t 
     return current > limit || amount > limit - current ? limit + 1 : current + amount;
 }
 
-RecordCodecResult<MeasuredSize> measure(const TableMeta& table,
+std::size_t null_bitmap_size(std::size_t column_count) {
+    return column_count / 8U + (column_count % 8U == 0U ? 0U : 1U);
+}
+
+bool type_supported(RowFormat format, Type type) {
+    if (type == Type::kInt || type == Type::kVarchar) {
+        return true;
+    }
+    return format == RowFormat::kV2 &&
+        (type == Type::kBigInt || type == Type::kDouble || type == Type::kBoolean);
+}
+
+RecordCodecResult<MeasuredSize> measure(RowFormat format, const TableMeta& table,
                                         const std::vector<Value>& values) {
     if (values.size() != table.columns.size()) {
         return failure<MeasuredSize>(RecordCodecErrorKind::kInvalidArgument,
@@ -133,15 +155,40 @@ RecordCodecResult<MeasuredSize> measure(const TableMeta& table,
     }
 
     MeasuredSize size;
+    if (format == RowFormat::kV2) {
+        size.encoded = null_bitmap_size(table.columns.size());
+    }
     for (std::size_t index = 0; index < values.size(); ++index) {
-        const Type type = table.columns[index].type;
+        const ColumnMeta& column = table.columns[index];
+        const Type type = column.type;
         const Value& value = values[index];
-        const bool type_matches = type == Type::kInt
-            ? std::holds_alternative<std::int32_t>(value.data)
-            : std::holds_alternative<std::string>(value.data);
+        if ((format == RowFormat::kV1 && column.nullable) ||
+            !type_supported(format, type)) {
+            return failure<MeasuredSize>(RecordCodecErrorKind::kInvalidArgument,
+                                         format == RowFormat::kV1
+                                             ? "record codec only supports SQL v1 schemas"
+                                             : "record codec does not support this SQL v2 schema yet");
+        }
+        if (std::holds_alternative<std::monostate>(value.data)) {
+            if (!column.nullable) {
+                return failure<MeasuredSize>(RecordCodecErrorKind::kInvalidArgument,
+                                             "NULL value for non-nullable column");
+            }
+            continue;
+        }
+        const bool type_matches =
+            (type == Type::kInt && std::holds_alternative<std::int32_t>(value.data)) ||
+            (type == Type::kBigInt && std::holds_alternative<std::int64_t>(value.data)) ||
+            (type == Type::kDouble && std::holds_alternative<double>(value.data)) ||
+            (type == Type::kBoolean && std::holds_alternative<bool>(value.data)) ||
+            (type == Type::kVarchar && std::holds_alternative<std::string>(value.data));
         if (!type_matches) {
             return failure<MeasuredSize>(RecordCodecErrorKind::kInvalidArgument,
                                          "record Value type does not match schema");
+        }
+        if (type == Type::kDouble && !std::isfinite(std::get<double>(value.data))) {
+            return failure<MeasuredSize>(RecordCodecErrorKind::kInvalidArgument,
+                                         "DOUBLE value must be finite");
         }
 
         if (type == Type::kVarchar) {
@@ -177,30 +224,55 @@ RecordCodecResult<MeasuredSize> measure(const TableMeta& table,
 }  // namespace
 
 RecordCodecResult<std::size_t> RecordCodec::encoded_size(
-    const TableMeta& table, const std::vector<Value>& values) {
-    auto measured = measure(table, values);
+    RowFormat format, const TableMeta& table, const std::vector<Value>& values) {
+    auto measured = measure(format, table, values);
     if (!measured.value.has_value()) {
         return failure<std::size_t>(measured.error->kind, measured.error->message);
     }
     return success(measured.value->encoded);
 }
 
-RecordCodecResult<std::vector<std::byte>> RecordCodec::encode(
+RecordCodecResult<std::size_t> RecordCodec::encoded_size(
     const TableMeta& table, const std::vector<Value>& values) {
-    auto measured = measure(table, values);
+    return encoded_size(RowFormat::kV1, table, values);
+}
+
+RecordCodecResult<std::vector<std::byte>> RecordCodec::encode(
+    RowFormat format, const TableMeta& table, const std::vector<Value>& values) {
+    auto measured = measure(format, table, values);
     if (!measured.value.has_value()) {
         return failure<std::vector<std::byte>>(measured.error->kind, measured.error->message);
     }
 
     std::vector<std::byte> output;
     output.reserve(measured.value->encoded);
+    if (format == RowFormat::kV2) {
+        output.resize(null_bitmap_size(table.columns.size()), std::byte{0});
+    }
     for (std::size_t index = 0; index < values.size(); ++index) {
         const Type type = table.columns[index].type;
         const Value& value = values[index];
+        if (std::holds_alternative<std::monostate>(value.data)) {
+            const std::size_t bitmap_index = index / 8U;
+            const std::uint8_t mask = static_cast<std::uint8_t>(1U << (index % 8U));
+            output[bitmap_index] |= std::byte{mask};
+            continue;
+        }
         switch (type) {
             case Type::kInt:
                 append_little_endian(output,
                     std::bit_cast<std::uint32_t>(std::get<std::int32_t>(value.data)));
+                break;
+            case Type::kBigInt:
+                append_little_endian(output,
+                    std::bit_cast<std::uint64_t>(std::get<std::int64_t>(value.data)));
+                break;
+            case Type::kDouble:
+                append_little_endian(output,
+                    std::bit_cast<std::uint64_t>(std::get<double>(value.data)));
+                break;
+            case Type::kBoolean:
+                output.push_back(std::get<bool>(value.data) ? std::byte{1} : std::byte{0});
                 break;
             case Type::kVarchar: {
                 const std::string& text = std::get<std::string>(value.data);
@@ -214,8 +286,23 @@ RecordCodecResult<std::vector<std::byte>> RecordCodec::encode(
     return success(std::move(output));
 }
 
+RecordCodecResult<std::vector<std::byte>> RecordCodec::encode(
+    const TableMeta& table, const std::vector<Value>& values) {
+    return encode(RowFormat::kV1, table, values);
+}
+
 RecordCodecResult<std::vector<Value>> RecordCodec::decode(
-    const TableMeta& table, std::span<const std::byte> payload) {
+    RowFormat format, const TableMeta& table, std::span<const std::byte> payload) {
+    for (const ColumnMeta& column : table.columns) {
+        if ((format == RowFormat::kV1 && column.nullable) ||
+            !type_supported(format, column.type)) {
+            return failure<std::vector<Value>>(
+                RecordCodecErrorKind::kInvalidArgument,
+                format == RowFormat::kV1
+                    ? "record codec only supports SQL v1 schemas"
+                    : "record codec does not support this SQL v2 schema yet");
+        }
+    }
     if (payload.size() > kMaxRecordPayloadBytes) {
         return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
                                            "encoded record exceeds one-page payload limit");
@@ -224,8 +311,44 @@ RecordCodecResult<std::vector<Value>> RecordCodec::decode(
     std::vector<Value> values;
     values.reserve(table.columns.size());
     std::size_t offset = 0;
+    if (format == RowFormat::kV2) {
+        const std::size_t bitmap_size = null_bitmap_size(table.columns.size());
+        if (payload.size() < bitmap_size) {
+            return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                               "short null bitmap");
+        }
+        for (std::size_t index = 0; index < table.columns.size(); ++index) {
+            const std::uint8_t bitmap = std::to_integer<std::uint8_t>(payload[index / 8U]);
+            if ((bitmap & static_cast<std::uint8_t>(1U << (index % 8U))) != 0U &&
+                !table.columns[index].nullable) {
+                return failure<std::vector<Value>>(
+                    RecordCodecErrorKind::kCorrupt,
+                    "NULL bit is set for a non-nullable column");
+            }
+        }
+        if (!table.columns.empty() && table.columns.size() % 8U != 0U) {
+            const std::uint8_t bitmap =
+                std::to_integer<std::uint8_t>(payload[bitmap_size - 1U]);
+            const std::uint8_t used_mask = static_cast<std::uint8_t>(
+                (1U << (table.columns.size() % 8U)) - 1U);
+            if ((bitmap & static_cast<std::uint8_t>(~used_mask)) != 0U) {
+                return failure<std::vector<Value>>(
+                    RecordCodecErrorKind::kCorrupt,
+                    "unused null bitmap bits are not zero");
+            }
+        }
+        offset = bitmap_size;
+    }
     std::size_t logical_size = 0;
-    for (const ColumnMeta& column : table.columns) {
+    for (std::size_t index = 0; index < table.columns.size(); ++index) {
+        const ColumnMeta& column = table.columns[index];
+        if (format == RowFormat::kV2) {
+            const std::uint8_t bitmap = std::to_integer<std::uint8_t>(payload[index / 8U]);
+            if ((bitmap & static_cast<std::uint8_t>(1U << (index % 8U))) != 0U) {
+                values.push_back(Value{std::monostate{}});
+                continue;
+            }
+        }
         switch (column.type) {
             case Type::kInt: {
                 std::uint32_t bits = 0;
@@ -235,6 +358,47 @@ RecordCodecResult<std::vector<Value>> RecordCodec::decode(
                 }
                 values.push_back(Value{std::bit_cast<std::int32_t>(bits)});
                 logical_size += 4;
+                break;
+            }
+            case Type::kBigInt: {
+                std::uint64_t bits = 0;
+                if (!read_little_endian(payload, offset, bits)) {
+                    return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                                       "short INT64 payload");
+                }
+                values.push_back(Value{std::bit_cast<std::int64_t>(bits)});
+                logical_size += 8;
+                break;
+            }
+            case Type::kDouble: {
+                std::uint64_t bits = 0;
+                if (!read_little_endian(payload, offset, bits)) {
+                    return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                                       "short DOUBLE payload");
+                }
+                const double value = std::bit_cast<double>(bits);
+                if (!std::isfinite(value)) {
+                    return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                                       "non-finite DOUBLE payload");
+                }
+                values.push_back(Value{value});
+                logical_size += 8;
+                break;
+            }
+            case Type::kBoolean: {
+                if (offset >= payload.size()) {
+                    return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                                       "short BOOLEAN payload");
+                }
+                const std::uint8_t encoded =
+                    std::to_integer<std::uint8_t>(payload[offset]);
+                ++offset;
+                if (encoded > 1U) {
+                    return failure<std::vector<Value>>(RecordCodecErrorKind::kCorrupt,
+                                                       "invalid BOOLEAN payload");
+                }
+                values.push_back(Value{encoded == 1U});
+                logical_size += 1;
                 break;
             }
             case Type::kVarchar: {
@@ -269,6 +433,11 @@ RecordCodecResult<std::vector<Value>> RecordCodec::decode(
                                            "record payload has trailing bytes");
     }
     return success(std::move(values));
+}
+
+RecordCodecResult<std::vector<Value>> RecordCodec::decode(
+    const TableMeta& table, std::span<const std::byte> payload) {
+    return decode(RowFormat::kV1, table, payload);
 }
 
 }  // namespace tinydbms::storage::internal

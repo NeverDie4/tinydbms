@@ -76,7 +76,7 @@ bool script_error_is(const ExecuteScriptResult& script, ErrorKind kind) {
 bool is_empty_insertion_point(const tinydbms::SourceRange& range) {
     return range.begin.line == 1 && range.begin.column == 1 &&
         range.end.line == 1 && range.end.column == 1 &&
-        range.begin_offset == 0 && range.end_offset == 0;
+        range.begin.byte_offset == 0 && range.end.byte_offset == 0;
 }
 
 bool is_error(const ExecuteResult& result, ErrorKind expected) {
@@ -583,18 +583,20 @@ bool test_execute_script_compiles_in_order_and_stops_on_error() {
     Database database;
     CHECK(open_database(database));
 
+    const std::string text = "create events;\ninvalid statement;";
+    // 分段原文含前导换行，compile() 的相对偏移必须以分段为基准。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> compile_results;
     compile_results.emplace_back(create_table_plan("events"));
     compile_results.emplace_back(fake_compiler::make_compile_error(
         CompileStage::kSyntax,
-        "invalid statement;",
-        0,
-        7,
+        second_segment,
+        1,
+        8,
         "injected syntax error"));
     fake_compiler::set_compile_results(std::move(compile_results));
 
-    const auto script = database.execute_script(
-        ExecuteScriptRequest{"create events;\ninvalid statement;"});
+    const auto script = database.execute_script(ExecuteScriptRequest{text});
     CHECK(statement_count(script) == 2);
     CHECK(status_of(script, 0) == StatementStatus::kExecuted);
     CHECK(std::holds_alternative<CommandResult>(first_outcome(script).outcome));

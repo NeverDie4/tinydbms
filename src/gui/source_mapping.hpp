@@ -20,7 +20,7 @@ struct EditorRange {
 // 因此必须显式换算。偏移落在多字节字符内部时归位到该字符起点；越界返回 nullopt。
 std::optional<int> utf8_offset_to_index(const QString& text, std::size_t byte_offset);
 
-// 半开区间 [begin_offset, end_offset) 的换算；end 小于 begin 或越界返回 nullopt。
+// 半开区间 [begin.byte_offset, end.byte_offset) 的换算；end 小于 begin 或越界返回 nullopt。
 std::optional<EditorRange> editor_range(
     const QString& text,
     const tinydbms::SourceRange& range);

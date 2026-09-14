@@ -1,11 +1,14 @@
 #include "lexer.hpp"
 
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace tinydbms::compiler::internal {
@@ -43,13 +46,35 @@ std::optional<TokenKind> keyword_kind(std::string_view value) {
         std::pair{"values"sv, TokenKind::kValues},
         std::pair{"select"sv, TokenKind::kSelect},
         std::pair{"from"sv, TokenKind::kFrom},
+        std::pair{"join"sv, TokenKind::kJoin},
+        std::pair{"inner"sv, TokenKind::kInner},
+        std::pair{"on"sv, TokenKind::kOn},
         std::pair{"where"sv, TokenKind::kWhere},
+        std::pair{"order"sv, TokenKind::kOrder},
+        std::pair{"by"sv, TokenKind::kBy},
+        std::pair{"group"sv, TokenKind::kGroup},
+        std::pair{"count"sv, TokenKind::kCount},
+        std::pair{"sum"sv, TokenKind::kSum},
+        std::pair{"avg"sv, TokenKind::kAvg},
+        std::pair{"min"sv, TokenKind::kMin},
+        std::pair{"max"sv, TokenKind::kMax},
+        std::pair{"asc"sv, TokenKind::kAsc},
+        std::pair{"desc"sv, TokenKind::kDesc},
         std::pair{"delete"sv, TokenKind::kDelete},
+        std::pair{"update"sv, TokenKind::kUpdate},
+        std::pair{"set"sv, TokenKind::kSet},
         std::pair{"and"sv, TokenKind::kAnd},
         std::pair{"or"sv, TokenKind::kOr},
         std::pair{"not"sv, TokenKind::kNot},
         std::pair{"int"sv, TokenKind::kInt},
+        std::pair{"bigint"sv, TokenKind::kBigInt},
+        std::pair{"double"sv, TokenKind::kDouble},
+        std::pair{"boolean"sv, TokenKind::kBoolean},
         std::pair{"varchar"sv, TokenKind::kVarchar},
+        std::pair{"true"sv, TokenKind::kTrue},
+        std::pair{"false"sv, TokenKind::kFalse},
+        std::pair{"null"sv, TokenKind::kNull},
+        std::pair{"is"sv, TokenKind::kIs},
     };
 
     for (const auto& [keyword, kind] : keywords) {
@@ -144,7 +169,9 @@ public:
             if (current() == '/' && peek() == '*') {
                 const SourceLocation comment_start = location();
                 if (!skip_block_comment()) {
-                    return error(comment_start, "unterminated block comment");
+                    return error(
+                        SourceRange{comment_start, location()},
+                        "unterminated block comment");
                 }
                 continue;
             }
@@ -157,11 +184,10 @@ public:
                 continue;
             }
 
-            if (is_ascii_digit(current()) ||
-                (current() == '-' && is_ascii_digit(peek()))) {
-                const auto integer_error = scan_integer();
-                if (integer_error.has_value()) {
-                    return LexResult{std::move(*integer_error)};
+            if (is_ascii_digit(current())) {
+                const auto number_error = scan_number();
+                if (number_error.has_value()) {
+                    return LexResult{std::move(*number_error)};
                 }
                 continue;
             }
@@ -182,7 +208,8 @@ public:
                     break;
                 case '!':
                     if (peek() != '=') {
-                        return error(start, "invalid character '!'");
+                        advance();
+                        return error(SourceRange{start, location()}, "invalid character '!'");
                     }
                     add_double(TokenKind::kNe);
                     break;
@@ -215,14 +242,20 @@ public:
                 case '*':
                     add_single(TokenKind::kStar);
                     break;
+                case '.':
+                    add_single(TokenKind::kDot);
+                    break;
                 case '_':
-                    return error(start, "invalid identifier start");
+                    advance();
+                    return error(SourceRange{start, location()}, "invalid identifier start");
                 default:
-                    return error(start, "invalid character");
+                    advance();
+                    return error(SourceRange{start, location()}, "invalid character");
             }
         }
 
-        tokens_.push_back(Token{TokenKind::kEnd, "", location()});
+        const SourceLocation end = location();
+        tokens_.push_back(Token{TokenKind::kEnd, "", SourceRange{end, end}});
         return LexResult{std::move(tokens_)};
     }
 
@@ -240,7 +273,7 @@ private:
     }
 
     [[nodiscard]] SourceLocation location() const {
-        return SourceLocation{line_, column_};
+        return SourceLocation{line_, column_, index_};
     }
 
     char advance() {
@@ -255,10 +288,10 @@ private:
         return value;
     }
 
-    LexResult error(SourceLocation error_location, std::string message) const {
+    LexResult error(SourceRange source, std::string message) const {
         return LexResult{CompileError{
-            CompileErrorKind::kLex,
-            error_location,
+            CompileStage::kLex,
+            source,
             std::move(message)
         }};
     }
@@ -266,7 +299,10 @@ private:
     void add_single(TokenKind kind) {
         const SourceLocation start = location();
         const char value = advance();
-        tokens_.push_back(Token{kind, std::string(1, value), start});
+        tokens_.push_back(Token{
+            kind,
+            std::string(1, value),
+            SourceRange{start, location()}});
     }
 
     void add_double(TokenKind kind) {
@@ -274,7 +310,7 @@ private:
         std::string lexeme;
         lexeme.push_back(advance());
         lexeme.push_back(advance());
-        tokens_.push_back(Token{kind, std::move(lexeme), start});
+        tokens_.push_back(Token{kind, std::move(lexeme), SourceRange{start, location()}});
     }
 
     void skip_line_comment() {
@@ -305,8 +341,8 @@ private:
         while (!at_end() && is_identifier_continue(current())) {
             if (value.size() >= 64) {
                 return CompileError{
-                    CompileErrorKind::kLex,
-                    start,
+                    CompileStage::kLex,
+                    SourceRange{start, location()},
                     "identifier exceeds 64 bytes"
                 };
             }
@@ -314,45 +350,95 @@ private:
         }
 
         const auto keyword = keyword_kind(value);
-        tokens_.push_back(Token{keyword.value_or(TokenKind::kIdentifier), std::move(value), start});
+        tokens_.push_back(Token{
+            keyword.value_or(TokenKind::kIdentifier),
+            std::move(value),
+            SourceRange{start, location()}});
         return std::nullopt;
     }
 
-    std::optional<CompileError> scan_integer() {
+    std::optional<CompileError> scan_number() {
         const SourceLocation start = location();
         const std::size_t begin = index_;
-        const bool negative = current() == '-';
-        if (negative) {
+        while (!at_end() && is_ascii_digit(current())) {
             advance();
         }
-        const std::uint32_t maximum = negative
-            ? static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) + 1U
-            : static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
-        std::uint32_t value = 0;
+
+        bool is_floating = false;
+        if (!at_end() && current() == '.' && is_ascii_digit(peek())) {
+            is_floating = true;
+            advance();
+            while (!at_end() && is_ascii_digit(current())) {
+                advance();
+            }
+        } else if (!at_end() && current() == '.' &&
+                   (peek() == 'e' || peek() == 'E')) {
+            is_floating = true;
+            advance();
+        }
+
+        if (!at_end() && (current() == 'e' || current() == 'E')) {
+            advance();
+            if (!at_end() && (current() == '+' || current() == '-')) {
+                advance();
+            }
+            while (!at_end() && is_ascii_digit(current())) {
+                advance();
+            }
+            return CompileError{
+                CompileStage::kLex,
+                SourceRange{start, location()},
+                "exponent-form floating literals are not supported"
+            };
+        }
+
+        if (is_floating) {
+            const std::string_view lexeme = sql_.substr(begin, index_ - begin);
+            double value = 0.0;
+            const char* const first = lexeme.data();
+            const char* const last = first + lexeme.size();
+            const auto [parsed_end, parse_error] =
+                std::from_chars(first, last, value, std::chars_format::fixed);
+            if (parse_error != std::errc{} || parsed_end != last || !std::isfinite(value)) {
+                return CompileError{
+                    CompileStage::kLex,
+                    SourceRange{start, location()},
+                    "floating literal out of range"
+                };
+            }
+            tokens_.push_back(Token{
+                TokenKind::kDoubleLiteral,
+                std::string{lexeme},
+                SourceRange{start, location()}});
+            return std::nullopt;
+        }
+
+        constexpr std::uint64_t maximum =
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        std::uint64_t value = 0;
         bool overflow = false;
 
-        while (!at_end() && is_ascii_digit(current())) {
-            const std::uint32_t digit = static_cast<std::uint32_t>(current() - '0');
+        for (std::size_t cursor = begin; cursor < index_; ++cursor) {
+            const std::uint64_t digit = static_cast<std::uint64_t>(sql_[cursor] - '0');
             if (!overflow && value > (maximum - digit) / 10U) {
                 overflow = true;
             } else if (!overflow) {
                 value = value * 10U + digit;
             }
-            advance();
         }
 
         if (overflow) {
             return CompileError{
-                CompileErrorKind::kSemantic,
-                start,
-                "integer literal exceeds int32 range"
+                CompileStage::kLex,
+                SourceRange{start, location()},
+                "integer literal out of range"
             };
         }
 
         tokens_.push_back(Token{
             TokenKind::kIntegerLiteral,
             std::string{sql_.substr(begin, index_ - begin)},
-            start
+            SourceRange{start, location()}
         });
         return std::nullopt;
     }
@@ -366,8 +452,8 @@ private:
             if (current() != '\'') {
                 if (value.size() >= kMaxVarcharBytes) {
                     return CompileError{
-                        CompileErrorKind::kLex,
-                        start,
+                        CompileStage::kLex,
+                        SourceRange{start, location()},
                         "string literal exceeds maximum VARCHAR length"
                     };
                 }
@@ -378,8 +464,8 @@ private:
             if (peek() == '\'') {
                 if (value.size() >= kMaxVarcharBytes) {
                     return CompileError{
-                        CompileErrorKind::kLex,
-                        start,
+                        CompileStage::kLex,
+                        SourceRange{start, location()},
                         "string literal exceeds maximum VARCHAR length"
                     };
                 }
@@ -392,25 +478,28 @@ private:
             advance();
             if (!is_valid_utf8(value)) {
                 return CompileError{
-                    CompileErrorKind::kLex,
-                    start,
+                    CompileStage::kLex,
+                    SourceRange{start, location()},
                     "string literal contains invalid UTF-8"
                 };
             }
             if (value.size() > kMaxVarcharBytes) {
                 return CompileError{
-                    CompileErrorKind::kLex,
-                    start,
+                    CompileStage::kLex,
+                    SourceRange{start, location()},
                     "string literal exceeds maximum VARCHAR length"
                 };
             }
-            tokens_.push_back(Token{TokenKind::kStringLiteral, std::move(value), start});
+            tokens_.push_back(Token{
+                TokenKind::kStringLiteral,
+                std::move(value),
+                SourceRange{start, location()}});
             return std::nullopt;
         }
 
         return CompileError{
-            CompileErrorKind::kLex,
-            start,
+            CompileStage::kLex,
+            SourceRange{start, location()},
             "unterminated string literal"
         };
     }

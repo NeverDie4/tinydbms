@@ -125,10 +125,8 @@ SourceRange range(
     int end_line,
     int end_column) {
     return SourceRange{
-        SourceLocation{begin_line, begin_column},
-        SourceLocation{end_line, end_column},
-        0,
-        0};
+        SourceLocation{begin_line, begin_column, 0},
+        SourceLocation{end_line, end_column, 0}};
 }
 
 Error make_error(ErrorKind kind, std::string message) {

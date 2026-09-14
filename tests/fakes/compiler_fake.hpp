@@ -40,6 +40,11 @@ SourceRange make_range(
 // 用语句内子串首次出现的位置构造范围；找不到时返回整个文本范围。
 SourceRange make_range_of(std::string_view text, std::string_view needle);
 
+// 返回整段脚本里第 index 条语句的分段原文（含前导空白/注释），语义与
+// split_statements 一致且不影响调用计数；越界时返回空串。
+// 构造 compile() 诊断时必须以它为基准计算相对偏移。
+std::string statement_segment(std::string_view text, std::size_t index);
+
 // 构造一个相对单条语句的编译错误。
 compiler::CompileError make_compile_error(
     CompileStage stage,

@@ -78,12 +78,13 @@ void first_fit_and_persistence() {
     f.prepare_space(ids[1]);
     auto reused=table.insert_record(row(1024)); check(reused.value.has_value()); check(page_id(*reused.value)==1);
     check(RecordIdCodec::decode(*reused.value).value->generation==2);
-    for(int i=3;i<6;++i) f.prepare_space(ids[i]);
+    for(std::size_t i=3;i<6;++i) f.prepare_space(ids[i]);
     auto earlier=table.insert_record(row(1024)); check(earlier.value.has_value()); check(page_id(*earlier.value)==2);
-    for(auto i : {0,2,6,7,8,9}) f.expect(ids[i],row(1024));
+    constexpr std::size_t retained_indices[]{0,2,6,7,8,9};
+    for(std::size_t i : retained_indices) f.expect(ids[i],row(1024));
     check(!f.pool->close()); check(!f.files->close_all());
     check(f.files->open_table_file(0).value.has_value()); f.reset_pool();
-    for(auto i : {0,2,6,7,8,9}) f.expect(ids[i],row(1024));
+    for(std::size_t i : retained_indices) f.expect(ids[i],row(1024));
     f.expect(*reused.value,row(1024)); f.expect(*earlier.value,row(1024));
     check(!f.pool->close());
 }
@@ -144,7 +145,10 @@ void failures() {
     }
     { Fixture f; bool fail=true;
       f.reset_pool([&](PageKey key)->PageFileResult<RawPage>{
-          if(fail) return {std::nullopt,io_error()}; return f.file(key.table_id).read_page(key.page_id); });
+          if(fail) {
+              return {std::nullopt,io_error()};
+          }
+          return f.file(key.table_id).read_page(key.page_id); });
       HeapTable t(schema(),*f.files,*f.pool); auto r=t.insert_record(row());
       check(r.error && r.error->kind==HeapTableErrorKind::kIo);
       check(f.file().page_count()==2 && f.file().page_allocation_state(1).value==PageAllocationState::kAllocated);
@@ -206,7 +210,10 @@ void stop_on_existing_io_and_preserve_clean() {
     check(!f.pool->flush_all());
     bool fail_write=true;
     f.reset_pool({},[&](PageKey key,const RawPage& page)->std::optional<PageFileError>{
-        if(fail_write) return io_error(); return f.file(key.table_id).write_page(key.page_id,page); });
+        if(fail_write) {
+            return io_error();
+        }
+        return f.file(key.table_id).write_page(key.page_id,page); });
     HeapTable t(schema(),*f.files,*f.pool);
     { auto g=f.pool->fetch_page({0,1}); check(g.value.has_value()); g.value->mark_dirty(); }
     auto failure=t.insert_record(row(1024));
@@ -222,9 +229,37 @@ void stop_on_existing_io_and_preserve_clean() {
     check(f.file().page_count()==3 && BufferPoolTestAccess::clean(*f.pool));
     check(BufferPoolTestAccess::no_pins(*f.pool));
 }
+void update_and_prevalidation() {
+    Fixture f; HeapTable table(schema(),*f.files,*f.pool);
+    auto inserted=table.insert_batch({row(10),row(20)});
+    check(!inserted.error && inserted.record_ids.size()==2);
+    auto updated=table.update_batch({
+        UpdateRow{inserted.record_ids[0],row(300)},
+        UpdateRow{inserted.record_ids[1],row(1)}});
+    check(!updated.error && updated.updated_count==2);
+    f.expect(inserted.record_ids[0],row(300));
+    f.expect(inserted.record_ids[1],row(1));
+
+    auto duplicate=table.update_batch({
+        UpdateRow{inserted.record_ids[0],row(30)},
+        UpdateRow{inserted.record_ids[0],row(40)}});
+    check(duplicate.error && duplicate.updated_count==0 &&
+          duplicate.error->kind==HeapTableErrorKind::kInvalidArgument);
+    f.expect(inserted.record_ids[0],row(300));
+
+    auto invalid=table.update_batch({
+        UpdateRow{inserted.record_ids[0],row(2)},
+        UpdateRow{RecordId{},row(3)}});
+    check(invalid.error && invalid.updated_count==0 &&
+          invalid.error->kind==HeapTableErrorKind::kInvalidArgument);
+    f.expect(inserted.record_ids[0],row(300));
+    auto empty=table.update_batch({});
+    check(!empty.error && empty.updated_count==0);
+}
 }
 int main() try {
     first_fit_and_persistence(); free_and_corrupt(); prevalidation(); failures(); no_victim_and_batch();
     holes_and_empty_directory(); stop_on_existing_io_and_preserve_clean();
+    update_and_prevalidation();
     std::cout << "heap-table tests passed\n";
 } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

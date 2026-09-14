@@ -52,7 +52,7 @@ void scan_roundtrip() {
         check(r.value.has_value());ids.push_back(*r.value);}
     check(!f.pool->flush_all());
     auto pos=t.begin_scan();check(pos.value.has_value());
-    for(int i=0;i<10;++i){auto r=t.next_record(*pos.value);check(r.value.has_value());
+    for(std::size_t i=0;i<ids.size();++i){auto r=t.next_record(*pos.value);check(r.value.has_value());
         check(r.value->rid.value==ids[i].value);
         check(std::get<std::string>(r.value->values[0].data)==std::string(1024,static_cast<char>('a'+i)));
         check(BufferPoolTestAccess::unpinned_clean(*f.pool));}

@@ -134,8 +134,8 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             const bool range_valid =
                 internal::is_valid_source_range(statement.source, request.text);
             const bool text_matches_range =
-                statement.source.end_offset >= statement.source.begin_offset &&
-                statement.source.end_offset - statement.source.begin_offset ==
+                statement.source.end.byte_offset >= statement.source.begin.byte_offset &&
+                statement.source.end.byte_offset - statement.source.begin.byte_offset ==
                     statement.sql.size();
             if (!range_valid || !text_matches_range) {
                 return make_script_error_result(internal::make_error(

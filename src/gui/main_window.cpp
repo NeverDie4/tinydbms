@@ -305,12 +305,18 @@ void MainWindow::on_script_finished(const ExecutionPayload& payload) {
             } else if (result.statements.size() == 2 &&
                 result.statements[0].status() == tinydbms::core::StatementStatus::kExecuted &&
                 result.statements[1].status() == tinydbms::core::StatementStatus::kExecuted) {
-                const auto& tables = std::get<tinydbms::core::QueryResult>(
-                    result.statements[0].outcome()->outcome);
-                const auto& columns = std::get<tinydbms::core::QueryResult>(
-                    result.statements[1].outcome()->outcome);
-                schema_->set_tables(tables);
-                schema_->set_columns(columns);
+                // kExecuted 也可能携带 CommandResult；取不到 QueryResult 时按“无法读取”处理，
+                // 不能对 variant 直接取类型，否则异常会穿出 GUI 线程。
+                const auto* tables = std::get_if<tinydbms::core::QueryResult>(
+                    &result.statements[0].outcome()->outcome);
+                const auto* columns = std::get_if<tinydbms::core::QueryResult>(
+                    &result.statements[1].outcome()->outcome);
+                if (tables != nullptr && columns != nullptr) {
+                    schema_->set_tables(*tables);
+                    schema_->set_columns(*columns);
+                } else {
+                    schema_->set_status_text(QStringLiteral("无法读取系统表"));
+                }
             } else {
                 schema_->set_status_text(QStringLiteral("无法读取系统表"));
             }
