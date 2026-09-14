@@ -371,6 +371,10 @@ private:
             while (!at_end() && is_ascii_digit(current())) {
                 advance();
             }
+        } else if (!at_end() && current() == '.' &&
+                   (peek() == 'e' || peek() == 'E')) {
+            is_floating = true;
+            advance();
         }
 
         if (!at_end() && (current() == 'e' || current() == 'E')) {

@@ -281,7 +281,12 @@ int main() {
     expect_error(test, "inner missing join", "SELECT a.id FROM a INNER b ON a.id=b.id;", {1, 26}, "JOIN after INNER");
     expect_error(test, "join missing on", "SELECT a.id FROM a JOIN b WHERE a.id=1;", {1, 27}, "ON after joined table");
     expect_error(test, "table star unsupported", "SELECT a.* FROM a;", {1, 10}, "column identifier after '.'");
-    expect_error(test, "table alias unsupported", "SELECT a.id FROM a x;", {1, 20}, "';'");
+    expect_error(
+        test,
+        "table alias unsupported",
+        "SELECT a.id FROM a x;",
+        {1, 20},
+        "table aliases are not supported");
 
     if (test.failures() != 0) {
         std::cerr << test.failures() << " select parser assertion(s) failed\n";

@@ -1,6 +1,7 @@
 #ifndef TINYDBMS_COMPILER_HPP
 #define TINYDBMS_COMPILER_HPP
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <span>
@@ -14,6 +15,11 @@
 #include "tinydbms/diagnostic.hpp"
 
 namespace tinydbms::compiler {
+
+// Statement-wide parser budget. Each expression node and each grouping pair
+// consumes one unit. A successful AST therefore remains below Core's matching
+// zero-based depth rejection boundary of 256.
+inline constexpr std::size_t kMaxExpressionComplexity = 256;
 
 struct CatalogView {
     // 借用 core Catalog 中的表元数据数组，编译调用期间有效
