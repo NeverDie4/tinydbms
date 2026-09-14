@@ -501,6 +501,80 @@ void test_optimizer_stateless(TestContext& test, CatalogView catalog) {
 }
 
 void test_advanced_diagnostics(TestContext& test, CatalogView catalog) {
+    {
+        constexpr std::string_view sql = "SELECT id AS alias FROM student;";
+        const CompileResult result = compile_sql(sql, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->stage == CompileStage::kSyntax &&
+                        error->message == "SELECT aliases are not supported" &&
+                        error->source.begin.line == 1 &&
+                        error->source.begin.column == 11 &&
+                        error->source.begin.byte_offset == 10 &&
+                        error->source.end.line == 1 &&
+                        error->source.end.column == 13 &&
+                        error->source.end.byte_offset == 12,
+                    "AS alias diagnostic points at the unsupported token");
+    }
+    {
+        constexpr std::string_view sql = "SELECT id FROM student AS s;";
+        const CompileResult result = compile_sql(sql, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->stage == CompileStage::kSyntax &&
+                        error->message == "table aliases are not supported" &&
+                        error->source.begin.line == 1 &&
+                        error->source.begin.column == 27 &&
+                        error->source.begin.byte_offset == 26 &&
+                        error->source.end.line == 1 &&
+                        error->source.end.column == 28 &&
+                        error->source.end.byte_offset == 27,
+                    "explicit table alias diagnostic points at the alias token");
+    }
+    {
+        constexpr std::string_view sql = "SELECT id FROM student s;";
+        const CompileResult result = compile_sql(sql, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->stage == CompileStage::kSyntax &&
+                        error->message == "table aliases are not supported" &&
+                        error->source.begin.line == 1 &&
+                        error->source.begin.column == 24 &&
+                        error->source.begin.byte_offset == 23 &&
+                        error->source.end.line == 1 &&
+                        error->source.end.column == 25 &&
+                        error->source.end.byte_offset == 24,
+                    "implicit table alias diagnostic points at the alias token");
+    }
+    {
+        constexpr std::string_view sql =
+            "SELECT id FROM student WHERE id = 1e3;";
+        const CompileResult result = compile_sql(sql, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->stage == CompileStage::kLex &&
+                        error->message ==
+                            "exponent-form floating literals are not supported" &&
+                        error->source.begin.line == 1 &&
+                        error->source.begin.column == 35 &&
+                        error->source.begin.byte_offset == 34 &&
+                        error->source.end.line == 1 &&
+                        error->source.end.column == 38 &&
+                        error->source.end.byte_offset == 37,
+                    "exponent diagnostic covers the complete literal");
+    }
+    for (const std::string_view sql : {
+             "SELECT id FROM student WHERE id = 1.e3;",
+             "SELECT id FROM student WHERE id = 1.E3;"}) {
+        const CompileResult result = compile_sql(sql, catalog);
+        const auto* error = std::get_if<CompileError>(&result.outcome);
+        test.expect(error != nullptr && error->stage == CompileStage::kLex &&
+                        error->message ==
+                            "exponent-form floating literals are not supported" &&
+                        error->source.begin.line == 1 &&
+                        error->source.begin.column == 35 &&
+                        error->source.begin.byte_offset == 34 &&
+                        error->source.end.line == 1 &&
+                        error->source.end.column == 39 &&
+                        error->source.end.byte_offset == 38,
+                    "dot exponent diagnostic covers the complete literal");
+    }
     expect_fixable(
         test, "keyword transposition", "SELETC id FROM student;", catalog,
         "SELECT", {1, 1}, {1, 7}, "did you mean 'SELECT'?");
@@ -919,8 +993,13 @@ int main() {
              InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.;", CompileStage::kSyntax, {1, 36}},
              InvalidDoubleCase{"SELECT id FROM student WHERE id = -1.5;", CompileStage::kLex, {1, 35}},
              InvalidDoubleCase{"SELECT id FROM student WHERE id = +1.5;", CompileStage::kLex, {1, 35}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e3;", CompileStage::kSyntax, {1, 36}},
-             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.0e3;", CompileStage::kSyntax, {1, 38}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.0e3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1E3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e+3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1e-3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.e3;", CompileStage::kLex, {1, 35}},
+             InvalidDoubleCase{"SELECT id FROM student WHERE id = 1.E3;", CompileStage::kLex, {1, 35}},
              InvalidDoubleCase{"SELECT id FROM student WHERE id = NaN;", CompileStage::kSemantic, {1, 35}},
              InvalidDoubleCase{"SELECT id FROM student WHERE id = Infinity;", CompileStage::kSemantic, {1, 35}},
          }) {

@@ -797,6 +797,16 @@ void test_public_defense_and_state(TestContext& test, CatalogView catalog, std::
 }
 
 void test_moderate_stress(TestContext& test, CatalogView catalog) {
+    static_assert(kMaxExpressionComplexity == 256);
+    constexpr std::size_t kComparisonComplexity = 3;
+    constexpr std::size_t kMaximumNotCount =
+        kMaxExpressionComplexity - kComparisonComplexity;
+    constexpr std::size_t kFirstRejectedNotCount = kMaximumNotCount + 1;
+    // N comparisons joined by AND consume 3N expression nodes and N-1 AND nodes.
+    constexpr std::size_t kMaximumAndTerms =
+        (kMaxExpressionComplexity + 1) / 4;
+    constexpr std::size_t kFirstRejectedAndTerms = kMaximumAndTerms + 1;
+
     test.begin_case("split 100 statements");
     std::string script;
     for (int index = 0; index < 100; ++index) {
@@ -841,7 +851,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
 
     test.begin_case("expression complexity exact NOT boundary is accepted");
     std::string maximum_not = "SELECT id FROM numbers WHERE ";
-    for (int index = 0; index < 253; ++index) {
+    for (std::size_t index = 0; index < kMaximumNotCount; ++index) {
         maximum_not += "NOT ";
     }
     maximum_not += "id = 1;";
@@ -849,7 +859,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
 
     test.begin_case("expression complexity beyond NOT boundary is rejected");
     std::string excessive_not = "SELECT id FROM numbers WHERE ";
-    for (int index = 0; index < 254; ++index) {
+    for (std::size_t index = 0; index < kFirstRejectedNotCount; ++index) {
         excessive_not += "NOT ";
     }
     excessive_not += "id = 1;";
@@ -873,7 +883,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
 
     test.begin_case("expression complexity exact AND boundary is accepted");
     std::string maximum_and = "SELECT id FROM numbers WHERE ";
-    for (int index = 0; index < 64; ++index) {
+    for (std::size_t index = 0; index < kMaximumAndTerms; ++index) {
         if (index != 0) {
             maximum_and += " AND ";
         }
@@ -884,7 +894,7 @@ void test_moderate_stress(TestContext& test, CatalogView catalog) {
 
     test.begin_case("expression complexity beyond AND boundary is rejected");
     std::string excessive_and = "SELECT id FROM numbers WHERE ";
-    for (int index = 0; index < 65; ++index) {
+    for (std::size_t index = 0; index < kFirstRejectedAndTerms; ++index) {
         if (index != 0) {
             excessive_and += " AND ";
         }

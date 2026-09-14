@@ -18,8 +18,6 @@
 namespace tinydbms::compiler::internal {
 namespace {
 
-constexpr std::size_t kMaxExpressionComplexity = 256;
-
 [[nodiscard]] std::optional<Value> parse_integer_literal(std::string_view lexeme) {
     std::int64_t value = 0;
     const char* const begin = lexeme.data();
@@ -345,6 +343,9 @@ private:
         }
 
         if (!match(TokenKind::kFrom)) {
+            if (check(TokenKind::kIdentifier) && peek().lexeme == "as") {
+                return syntax_error("SELECT aliases are not supported");
+            }
             if (check(TokenKind::kIdentifier) && peek_next().kind == TokenKind::kFrom) {
                 return insertion_error("expected FROM after SELECT list", ",");
             }
@@ -358,6 +359,9 @@ private:
         std::string table_name = peek().lexeme;
         const SourceRange table_location = peek().source;
         advance();
+        if (auto alias_error = reject_table_alias(); alias_error.has_value()) {
+            return std::move(*alias_error);
+        }
 
         std::vector<AstJoin> joins;
         while (check(TokenKind::kJoin) || check(TokenKind::kInner)) {
@@ -373,6 +377,9 @@ private:
             std::string joined_table = peek().lexeme;
             const SourceRange joined_location = peek().source;
             advance();
+            if (auto alias_error = reject_table_alias(); alias_error.has_value()) {
+                return std::move(*alias_error);
+            }
             if (!match(TokenKind::kOn)) {
                 return keyword_error("expected ON after joined table", {{{"on", "ON"}}});
             }
@@ -925,6 +932,26 @@ private:
             peek().source,
             std::move(message)
         }};
+    }
+
+    [[nodiscard]] std::optional<ParseResult> reject_table_alias() {
+        if (!check(TokenKind::kIdentifier)) {
+            return std::nullopt;
+        }
+        if (peek().lexeme == "as") {
+            advance();
+            return check(TokenKind::kIdentifier)
+                ? std::optional{syntax_error("table aliases are not supported")}
+                : std::optional{syntax_error("expected table alias after AS")};
+        }
+        const TokenKind follower = peek_next().kind;
+        if (follower == TokenKind::kSemicolon || follower == TokenKind::kJoin ||
+            follower == TokenKind::kInner || follower == TokenKind::kOn ||
+            follower == TokenKind::kWhere || follower == TokenKind::kGroup ||
+            follower == TokenKind::kOrder) {
+            return syntax_error("table aliases are not supported");
+        }
+        return std::nullopt;
     }
 
     [[nodiscard]] ParseResult keyword_error(
