@@ -18,6 +18,9 @@
 namespace tinydbms::compiler::internal {
 namespace {
 
+// Statement-wide budget: every materialized expression node consumes one unit;
+// grouping parentheses also consume one unit.  At 256 units, any successful AST
+// has maximum zero-based depth 255, below Core's depth-256 rejection boundary.
 constexpr std::size_t kMaxExpressionComplexity = 256;
 
 [[nodiscard]] std::optional<Value> parse_integer_literal(std::string_view lexeme) {
@@ -345,6 +348,9 @@ private:
         }
 
         if (!match(TokenKind::kFrom)) {
+            if (check(TokenKind::kIdentifier) && peek().lexeme == "as") {
+                return syntax_error("SELECT aliases are not supported");
+            }
             if (check(TokenKind::kIdentifier) && peek_next().kind == TokenKind::kFrom) {
                 return insertion_error("expected FROM after SELECT list", ",");
             }

@@ -364,11 +364,31 @@ private:
             advance();
         }
 
+        bool is_floating = false;
         if (!at_end() && current() == '.' && is_ascii_digit(peek())) {
+            is_floating = true;
             advance();
             while (!at_end() && is_ascii_digit(current())) {
                 advance();
             }
+        }
+
+        if (!at_end() && (current() == 'e' || current() == 'E')) {
+            advance();
+            if (!at_end() && (current() == '+' || current() == '-')) {
+                advance();
+            }
+            while (!at_end() && is_ascii_digit(current())) {
+                advance();
+            }
+            return CompileError{
+                CompileStage::kLex,
+                SourceRange{start, location()},
+                "exponent-form floating literals are not supported"
+            };
+        }
+
+        if (is_floating) {
             const std::string_view lexeme = sql_.substr(begin, index_ - begin);
             double value = 0.0;
             const char* const first = lexeme.data();
