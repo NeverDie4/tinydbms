@@ -15,6 +15,7 @@ int main(int argc, char* argv[]) {
     qRegisterMetaType<tinydbms::gui::ExecutionPayload>();
     qRegisterMetaType<tinydbms::gui::LifecyclePayload>();
     qRegisterMetaType<tinydbms::gui::LifecycleAction>();
+    qRegisterMetaType<tinydbms::core::CancelToken>();
 
     const std::unique_ptr<tinydbms::gui::Backend> backend = tinydbms::gui::make_backend();
     tinydbms::gui::MainWindow window{*backend};

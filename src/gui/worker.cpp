@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "backend.hpp"
 
@@ -52,15 +53,22 @@ void Worker::open_database(const QString& data_dir) {
     emit lifecycle_finished(payload);
 }
 
-void Worker::execute_script(const QString& text, bool analyze_mode, quint64 snapshot_id) {
+void Worker::execute_script(
+    const QString& text,
+    bool analyze_mode,
+    quint64 snapshot_id,
+    tinydbms::core::CancelToken cancel) {
     ExecutionPayload payload;
     payload.snapshot_id = snapshot_id;
     try {
         auto result = std::make_shared<tinydbms::core::ExecuteScriptResult>();
-        *result = backend_->execute_script(tinydbms::core::ExecuteScriptRequest{
-            utf8(text),
-            analyze_mode ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
-                         : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError});
+        tinydbms::core::ExecuteScriptRequest request;
+        request.text = utf8(text);
+        request.error_policy = analyze_mode
+            ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
+            : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
+        request.cancel = std::move(cancel);
+        *result = backend_->execute_script(request);
         payload.result = result;
     } catch (const std::exception& exception) {
         auto result = std::make_shared<tinydbms::core::ExecuteScriptResult>();

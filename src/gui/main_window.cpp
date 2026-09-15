@@ -37,6 +37,15 @@ constexpr const char* kDefaultDataDir = "./tinydbms-data";
 constexpr const char* kSchemaQuery =
     "SELECT * FROM tdb_sys_tables; SELECT * FROM tdb_sys_columns";
 
+bool contains_cancelled_statement(const tinydbms::core::ExecuteScriptResult& result) {
+    for (const tinydbms::core::StatementResult& statement : result.statements) {
+        if (statement.status() == tinydbms::core::StatementStatus::kCancelled) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 QString default_data_dir() {
@@ -71,6 +80,7 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
     auto* toolbar = addToolBar(QStringLiteral("主工具栏"));
     open_button_ = new QPushButton{QStringLiteral("打开/切换数据库"), this};
     execute_button_ = new QPushButton{QStringLiteral("执行 (Ctrl+Enter)"), this};
+    cancel_button_ = new QPushButton{QStringLiteral("取消"), this};
     analyze_box_ = new QCheckBox{
         QStringLiteral("出错后继续分析剩余语句（首错后的语句只分析、不执行）"), this};
     path_label_ = new QLabel{this};
@@ -81,6 +91,7 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
 
     toolbar->addWidget(open_button_);
     toolbar->addWidget(execute_button_);
+    toolbar->addWidget(cancel_button_);
     toolbar->addWidget(analyze_box_);
     toolbar->addWidget(path_label_);
 
@@ -101,6 +112,7 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
 
     connect(open_button_, &QPushButton::clicked, this, &MainWindow::choose_directory);
     connect(execute_button_, &QPushButton::clicked, this, &MainWindow::execute_editor_text);
+    connect(cancel_button_, &QPushButton::clicked, this, &MainWindow::request_cancel);
     connect(analyze_box_, &QCheckBox::toggled, this, [this](bool) { update_controls(); });
     connect(editor_, &ScriptEditor::text_edited, this, &MainWindow::on_editor_text_edited);
     connect(diagnostics_, &DiagnosticList::fix_requested, this, &MainWindow::on_fix_requested);
@@ -165,9 +177,29 @@ void MainWindow::execute_editor_text() {
     executed_snapshot_ = text;
     executed_snapshot_id_ = next_snapshot_id();
     busy_ = true;
+    // 每次执行使用独立令牌：上一次的取消请求不会影响新的执行。
+    active_cancel_ = tinydbms::core::CancelToken{};
+    cancel_pending_ = false;
     timer_.start();
     update_controls();
-    emit request_execute(text, analyze_box_->isChecked(), executed_snapshot_id_);
+    emit request_execute(
+        text,
+        analyze_box_->isChecked(),
+        executed_snapshot_id_,
+        active_cancel_);
+}
+
+void MainWindow::request_cancel() {
+    if (!busy_ || state_ != SessionState::kOpen || closing_ || cancel_pending_) {
+        return;
+    }
+    // CancelToken 是无锁共享标志：UI 线程直接置位，core 在检查点轮询读取。
+    active_cancel_.request_cancel();
+    cancel_pending_ = true;
+    update_controls();
+    statusBar()->showMessage(
+        QStringLiteral("已请求取消，等待当前语句到达检查点"),
+        5000);
 }
 
 void MainWindow::refresh_schema_browser() {
@@ -176,11 +208,14 @@ void MainWindow::refresh_schema_browser() {
     }
     schema_snapshot_ = next_snapshot_id();
     busy_ = true;
+    active_cancel_ = tinydbms::core::CancelToken{};
+    cancel_pending_ = false;
     update_controls();
     emit request_execute(
         QString::fromUtf8(kSchemaQuery),
         false,
-        *schema_snapshot_);
+        *schema_snapshot_,
+        active_cancel_);
 }
 
 void MainWindow::set_analyze_mode(bool enabled) {
@@ -213,6 +248,10 @@ QString MainWindow::session_state_text() const {
 
 bool MainWindow::execute_enabled() const {
     return execute_button_->isEnabled();
+}
+
+bool MainWindow::cancel_enabled() const {
+    return cancel_button_->isEnabled();
 }
 
 bool MainWindow::is_busy() const noexcept {
@@ -288,6 +327,7 @@ void MainWindow::on_lifecycle_finished(const LifecyclePayload& payload) {
 
 void MainWindow::on_script_finished(const ExecutionPayload& payload) {
     busy_ = false;
+    cancel_pending_ = false;
 
     if (schema_snapshot_.has_value() && payload.snapshot_id == *schema_snapshot_) {
         schema_snapshot_.reset();
@@ -302,6 +342,9 @@ void MainWindow::on_script_finished(const ExecutionPayload& payload) {
             if (result.script_error.has_value()) {
                 schema_->set_status_text(script_error_banner(result));
                 result_panel_->show_notice(script_error_banner(result));
+            } else if (contains_cancelled_statement(result)) {
+                // 刷新被用户取消不是失败：保留既有内容，只更新状态说明。
+                schema_->set_status_text(QStringLiteral("已取消表结构刷新"));
             } else if (result.statements.size() == 2 &&
                 result.statements[0].status() == tinydbms::core::StatementStatus::kExecuted &&
                 result.statements[1].status() == tinydbms::core::StatementStatus::kExecuted) {
@@ -365,7 +408,11 @@ void MainWindow::apply_script_result(const ExecutionPayload& payload) {
     }
     set_session_state(next);
     const qint64 elapsed = timer_.isValid() ? timer_.elapsed() : 0;
-    statusBar()->showMessage(QStringLiteral("执行完成，用时 %1 ms").arg(elapsed), 5000);
+    statusBar()->showMessage(
+        contains_cancelled_statement(result)
+            ? QStringLiteral("已取消，用时 %1 ms").arg(elapsed)
+            : QStringLiteral("执行完成，用时 %1 ms").arg(elapsed),
+        5000);
 }
 
 void MainWindow::on_editor_text_edited() {
@@ -401,6 +448,8 @@ void MainWindow::update_controls() {
     const bool open = state_ == SessionState::kOpen;
     open_button_->setEnabled(!busy_);
     execute_button_->setEnabled(open && !busy_ && !editor_->toPlainText().trimmed().isEmpty());
+    // 取消只在执行中可用；置位后立即禁用，避免重复请求与状态歧义。
+    cancel_button_->setEnabled(open && busy_ && !closing_ && !cancel_pending_);
     analyze_box_->setEnabled(!busy_);
     editor_->setReadOnly(!open);
 
@@ -420,7 +469,13 @@ void MainWindow::update_controls() {
         state_text += QStringLiteral("：%1").arg(data_dir_);
     }
     if (busy_) {
-        state_text += closing_ ? QStringLiteral("（正在关闭）") : QStringLiteral("（执行中）");
+        if (closing_) {
+            state_text += QStringLiteral("（正在关闭）");
+        } else if (cancel_pending_) {
+            state_text += QStringLiteral("（正在取消）");
+        } else {
+            state_text += QStringLiteral("（执行中）");
+        }
     }
     // 常驻标签承载连接状态，不会被 showMessage 的临时消息（「没有可执行语句」、
     // 「执行完成，用时 N ms」）覆盖，反之亦然。

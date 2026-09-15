@@ -21,7 +21,11 @@ public:
 
 public slots:
     void open_database(const QString& data_dir);
-    void execute_script(const QString& text, bool analyze_mode, quint64 snapshot_id);
+    void execute_script(
+        const QString& text,
+        bool analyze_mode,
+        quint64 snapshot_id,
+        tinydbms::core::CancelToken cancel);
     void close_database();
 
 signals:

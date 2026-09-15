@@ -1,5 +1,7 @@
 #include "gui_backend_fake.hpp"
 
+#include <chrono>
+#include <thread>
 #include <utility>
 
 namespace tinydbms::testing::gui_fake {
@@ -14,6 +16,10 @@ void FakeBackend::queue_close(tinydbms::core::CloseDatabaseResult result) {
 
 void FakeBackend::queue_script(tinydbms::core::ExecuteScriptResult result) {
     scripts_.push_back(std::move(result));
+}
+
+void FakeBackend::set_script_gate(std::shared_ptr<ScriptGate> gate) {
+    script_gate_ = std::move(gate);
 }
 
 int FakeBackend::open_calls() const noexcept {
@@ -40,6 +46,10 @@ bool FakeBackend::last_analyze_mode() const noexcept {
     return last_analyze_mode_;
 }
 
+bool FakeBackend::last_cancel_requested() const noexcept {
+    return last_cancel_requested_.load();
+}
+
 tinydbms::core::OpenDatabaseResult FakeBackend::open(
     const tinydbms::core::OpenDatabaseRequest& request) {
     ++open_calls_;
@@ -57,6 +67,30 @@ tinydbms::core::ExecuteScriptResult FakeBackend::execute_script(
     ++execute_calls_;
     last_script_text_ = request.text;
     last_analyze_mode_ = request.error_policy == tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining;
+    last_cancel_requested_.store(request.cancel.cancel_requested());
+    if (script_gate_ != nullptr) {
+        std::shared_ptr<ScriptGate> gate = std::move(script_gate_);
+        script_gate_ = nullptr;
+        gate->entered.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!request.cancel.cancel_requested() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool cancelled = request.cancel.cancel_requested();
+        last_cancel_requested_.store(cancelled);
+        gate->observed_cancel.store(cancelled);
+        if (cancelled) {
+            // 模拟 core 在无副作用检查点结束：只返回 kCancelled，不携带 outcome。
+            tinydbms::core::ExecuteScriptResult result;
+            result.statements.push_back(tinydbms::core::StatementResult::cancelled(
+                0,
+                tinydbms::SourceRange{
+                    tinydbms::SourceLocation{1, 1, 0},
+                    tinydbms::SourceLocation{1, 1, 0}}));
+            return result;
+        }
+    }
     if (scripts_.empty()) {
         return tinydbms::core::ExecuteScriptResult{};
     }

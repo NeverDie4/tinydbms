@@ -37,5 +37,8 @@ struct LifecyclePayload {
 Q_DECLARE_METATYPE(tinydbms::gui::ExecutionPayload)
 Q_DECLARE_METATYPE(tinydbms::gui::LifecycleAction)
 Q_DECLARE_METATYPE(tinydbms::gui::LifecyclePayload)
+// 取消令牌跨线程传入 Worker：拷贝共享同一原子标志，UI 线程只置位，工作线程在
+// core 的检查点读取；不注册 metatype 时队列连接会拒绝投递。
+Q_DECLARE_METATYPE(tinydbms::core::CancelToken)
 
 #endif  // TINYDBMS_GUI_EXECUTION_PAYLOAD_HPP

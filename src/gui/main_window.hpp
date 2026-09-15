@@ -42,6 +42,8 @@ public:
     // 手工路径与测试共用的入口：直接以给定目录打开，不弹对话框。
     void open_directory(const QString& path);
     void execute_editor_text();
+    // 请求取消当前执行：只置位令牌，core 在下一个检查点生效，不强制中断 storage 调用。
+    void request_cancel();
     void set_analyze_mode(bool enabled);
 
     ScriptEditor* script_editor() const noexcept;
@@ -53,11 +55,16 @@ public:
     // 状态栏常驻标签的文本（测试与手工排查共用，不影响临时消息）。
     QString session_state_text() const;
     bool execute_enabled() const;
+    bool cancel_enabled() const;
     bool is_busy() const noexcept;
 
 signals:
     void request_open(const QString& path);
-    void request_execute(const QString& text, bool analyze_mode, quint64 snapshot_id);
+    void request_execute(
+        const QString& text,
+        bool analyze_mode,
+        quint64 snapshot_id,
+        tinydbms::core::CancelToken cancel);
     void request_close();
 
 protected:
@@ -89,6 +96,7 @@ private:
     SchemaBrowser* schema_ = nullptr;
     QPushButton* open_button_ = nullptr;
     QPushButton* execute_button_ = nullptr;
+    QPushButton* cancel_button_ = nullptr;
     QCheckBox* analyze_box_ = nullptr;
     QLabel* path_label_ = nullptr;
     QLabel* status_state_ = nullptr;
@@ -101,8 +109,10 @@ private:
     std::uint64_t snapshot_counter_ = 0;
     std::uint64_t executed_snapshot_id_ = 0;
     QString executed_snapshot_;
+    tinydbms::core::CancelToken active_cancel_;
     QElapsedTimer timer_;
     bool busy_ = false;
+    bool cancel_pending_ = false;
     bool closing_ = false;
     bool force_close_ = false;
     // open 失败后公共契约无法区分是否留下 cleanup-pending，下一次打开前先走一次 close。

@@ -1,6 +1,8 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QPixmap>
+#include <QPushButton>
 #include <QStatusBar>
 #include <QThread>
 #include <QTreeWidget>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "arguments.hpp"
+#include "chart_widget.hpp"
 #include "close_policy.hpp"
 #include "diagnostic_list.hpp"
 #include "fakes/gui_backend_fake.hpp"
@@ -47,6 +50,8 @@ using tinydbms::core::OpenDatabaseResult;
 using tinydbms::core::QueryResult;
 using tinydbms::core::StatementResult;
 using tinydbms::core::StatementStatus;
+using tinydbms::gui::ChartData;
+using tinydbms::gui::ChartWidget;
 using tinydbms::gui::DiagnosticList;
 using tinydbms::gui::EditorRange;
 using tinydbms::gui::MainWindow;
@@ -222,6 +227,169 @@ bool test_result_model_formats_sql_v2_values() {
         QStringLiteral("0.123456789012345"));
     model.set_query(nullptr);
     CHECK(model.rowCount() == 0);
+    return true;
+}
+
+QueryResult make_chart_query() {
+    QueryResult query;
+    query.columns = std::vector<ColumnHeader>{
+        ColumnHeader{"label", Type::kVarchar},
+        ColumnHeader{"a", Type::kInt},
+        ColumnHeader{"b", Type::kDouble},
+        ColumnHeader{"big", Type::kBigInt},
+        ColumnHeader{"flag", Type::kBoolean}};
+    query.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{
+            Value{std::string{"甲"}},
+            Value{std::int32_t{1}},
+            Value{2.5},
+            Value{std::int64_t{3}},
+            Value{true}},
+        tinydbms::core::Row{
+            Value{std::string{"乙"}},
+            Value{std::int32_t{2}},
+            Value{std::monostate{}},
+            Value{std::int64_t{4}},
+            Value{false}}};
+    return query;
+}
+
+bool test_chart_data_selects_numeric_series() {
+    const QueryResult query = make_chart_query();
+    const ChartData data = tinydbms::gui::build_chart_data(query);
+    CHECK(!data.empty());
+    CHECK(!data.truncated);
+    CHECK(data.total_rows == 2);
+    CHECK(data.categories.size() == 2);
+    CHECK(data.categories[0] == QString::fromUtf8("甲"));
+    CHECK(data.categories[1] == QString::fromUtf8("乙"));
+    // 首列作 x 轴；INT/BIGINT/DOUBLE 作系列，BOOLEAN 与 VARCHAR 不参与数值系列。
+    CHECK(data.series.size() == 3);
+    CHECK(data.series[0].name == QStringLiteral("a"));
+    CHECK(data.series[1].name == QStringLiteral("b"));
+    CHECK(data.series[2].name == QStringLiteral("big"));
+    CHECK(data.series[0].values[0].has_value());
+    CHECK(*data.series[0].values[0] == 1.0);
+    CHECK(data.series[0].values[1].has_value());
+    CHECK(*data.series[0].values[1] == 2.0);
+    CHECK(data.series[1].values[0].has_value());
+    CHECK(*data.series[1].values[0] == 2.5);
+    // NULL 保留为缺口，不折算成 0。
+    CHECK(!data.series[1].values[1].has_value());
+    CHECK(data.series[2].values[1].has_value());
+    CHECK(*data.series[2].values[1] == 4.0);
+    return true;
+}
+
+bool test_chart_data_axis_fallback_and_truncation() {
+    // 单数值列：行号作 x 轴，该列作系列。
+    QueryResult single;
+    single.columns = std::vector<ColumnHeader>{ColumnHeader{"v", Type::kBigInt}};
+    single.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::int64_t{7}}},
+        tinydbms::core::Row{Value{std::int64_t{9}}}};
+    const ChartData fallback = tinydbms::gui::build_chart_data(single);
+    CHECK(!fallback.empty());
+    CHECK(fallback.categories.size() == 2);
+    CHECK(fallback.categories[0] == QStringLiteral("1"));
+    CHECK(fallback.categories[1] == QStringLiteral("2"));
+    CHECK(fallback.series.size() == 1);
+    CHECK(fallback.series[0].name == QStringLiteral("v"));
+
+    // 没有数值列：图表为空，由控件显示空状态文案。
+    QueryResult text_only;
+    text_only.columns = std::vector<ColumnHeader>{ColumnHeader{"s", Type::kVarchar}};
+    text_only.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::string{"x"}}}};
+    CHECK(tinydbms::gui::build_chart_data(text_only).empty());
+
+    // 超过上限：按行截断并显式标记，表格视图不受影响。
+    QueryResult long_query;
+    long_query.columns = std::vector<ColumnHeader>{ColumnHeader{"v", Type::kInt}};
+    long_query.rows.reserve(tinydbms::gui::kMaxChartRows + 5);
+    for (std::size_t row = 0; row < tinydbms::gui::kMaxChartRows + 5; ++row) {
+        long_query.rows.push_back(
+            tinydbms::core::Row{Value{static_cast<std::int32_t>(row)}});
+    }
+    const ChartData truncated = tinydbms::gui::build_chart_data(long_query);
+    CHECK(truncated.truncated);
+    CHECK(truncated.total_rows == tinydbms::gui::kMaxChartRows + 5);
+    CHECK(truncated.categories.size() == tinydbms::gui::kMaxChartRows);
+    CHECK(truncated.series.size() == 1);
+    CHECK(truncated.series[0].values.size() == tinydbms::gui::kMaxChartRows);
+    return true;
+}
+
+bool test_result_panel_chart_view() {
+    ExecuteScriptResult result;
+    result.statements.push_back(executed_query(0, range_of(0, 12), make_chart_query()));
+    auto payload = std::make_shared<ExecuteScriptResult>(std::move(result));
+
+    ResultPanel panel;
+    panel.show_result(payload);
+    ChartWidget* chart = panel.chart_widget();
+    CHECK(chart != nullptr);
+    CHECK(panel.chart_data().series.size() == 3);
+    CHECK(panel.chart_data().categories.size() == 2);
+
+    // 绘制路径 smoke：有数据与空状态都必须能在离屏环境完成一次 render。
+    chart->resize(480, 280);
+    QPixmap canvas{chart->size()};
+    canvas.fill(Qt::white);
+    chart->render(&canvas);
+
+    panel.show_notice(QStringLiteral("打开失败"));
+    CHECK(panel.chart_data().empty());
+    canvas.fill(Qt::white);
+    chart->render(&canvas);
+    return true;
+}
+
+bool test_cancel_button_requests_cancellation() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    MainWindow window{backend};
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-cancel"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+
+    auto gate = std::make_shared<tinydbms::testing::gui_fake::ScriptGate>();
+    backend.set_script_gate(gate);
+    window.script_editor()->setPlainText(QStringLiteral("SELECT * FROM t;"));
+    CHECK(window.execute_enabled());
+    CHECK(!window.cancel_enabled());
+
+    window.execute_editor_text();
+    CHECK(window.is_busy());
+    CHECK(wait_until([&] { return gate->entered.load(); }));
+    CHECK(window.cancel_enabled());
+
+    QPushButton* cancel_button = nullptr;
+    for (QPushButton* candidate : window.findChildren<QPushButton*>()) {
+        if (candidate->text() == QStringLiteral("取消")) {
+            cancel_button = candidate;
+            break;
+        }
+    }
+    CHECK(cancel_button != nullptr);
+    CHECK(cancel_button->isEnabled());
+    cancel_button->click();
+
+    // 置位后按钮立即禁用并进入「正在取消」，避免重复请求与状态歧义。
+    CHECK(!window.cancel_enabled());
+    CHECK(window.session_state_text().contains(QStringLiteral("正在取消")));
+
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(gate->observed_cancel.load());
+    CHECK(backend.last_cancel_requested());
+    CHECK(window.result_panel()->statement_text().contains(QStringLiteral("已取消")));
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("已取消")));
+    CHECK(!window.cancel_enabled());
+
+    backend.queue_close(CloseDatabaseResult{std::nullopt});
+    window.close();
+    CHECK(wait_until([&] { return !window.isVisible(); }));
     return true;
 }
 
@@ -824,12 +992,17 @@ int main(int argc, char* argv[]) {
     qRegisterMetaType<tinydbms::gui::ExecutionPayload>();
     qRegisterMetaType<tinydbms::gui::LifecyclePayload>();
     qRegisterMetaType<tinydbms::gui::LifecycleAction>();
+    qRegisterMetaType<tinydbms::core::CancelToken>();
 
     run("default_data_dir_matches_cli", test_default_data_dir_matches_cli);
     run("utf8_offset_mapping", test_utf8_offset_mapping);
     run("statement_views_cover_all_states", test_statement_views_cover_all_states);
     run("plan_only_statement_view", test_plan_only_statement_view);
     run("result_model_formats_sql_v2_values", test_result_model_formats_sql_v2_values);
+    run("chart_data_selects_numeric_series", test_chart_data_selects_numeric_series);
+    run("chart_data_axis_fallback_and_truncation", test_chart_data_axis_fallback_and_truncation);
+    run("result_panel_chart_view", test_result_panel_chart_view);
+    run("cancel_button_requests_cancellation", test_cancel_button_requests_cancellation);
     run("session_state_transitions", test_session_state_transitions);
     run("close_policy_filters_not_open", test_close_policy_filters_not_open);
     run("window_open_query_flow", test_window_open_query_flow);

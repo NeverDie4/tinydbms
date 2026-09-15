@@ -3,12 +3,14 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QStringList>
+#include <QTabWidget>
 #include <QTableView>
 #include <QVBoxLayout>
 
 #include <variant>
 #include <vector>
 
+#include "chart_widget.hpp"
 #include "result_model.hpp"
 #include "session_state.hpp"
 
@@ -27,6 +29,13 @@ ResultPanel::ResultPanel(QWidget* parent) : QWidget{parent} {
     model_ = new ResultModel{table_};
     table_->setModel(model_);
 
+    chart_ = new ChartWidget{this};
+
+    // 表格是默认视图；图表是同一份结果的派生展示，两者共享 payload 生命周期。
+    auto* views = new QTabWidget{this};
+    views->addTab(table_, QStringLiteral("表格"));
+    views->addTab(chart_, QStringLiteral("图表"));
+
     statements_ = new QPlainTextEdit{this};
     statements_->setReadOnly(true);
     statements_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -34,7 +43,7 @@ ResultPanel::ResultPanel(QWidget* parent) : QWidget{parent} {
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(banner_);
-    layout->addWidget(table_, 3);
+    layout->addWidget(views, 3);
     layout->addWidget(statements_, 2);
 }
 
@@ -43,6 +52,7 @@ void ResultPanel::show_result(
     payload_ = payload;
     model_->set_query(nullptr);
     statements_->clear();
+    chart_->set_data(ChartData{});
 
     if (payload_ == nullptr) {
         banner_->clear();
@@ -56,6 +66,7 @@ void ResultPanel::show_result(
 
     const std::vector<StatementView> views = build_statement_views(*payload_);
     QStringList lines;
+    const tinydbms::core::QueryResult* last_query = nullptr;
     for (const StatementView& view : views) {
         lines.append(view.summary);
         if (!view.detail.isEmpty()) {
@@ -65,8 +76,10 @@ void ResultPanel::show_result(
         }
         if (view.query != nullptr) {
             model_->set_query(view.query);
+            last_query = view.query;
         }
     }
+    chart_->set_data(last_query != nullptr ? build_chart_data(*last_query) : ChartData{});
     if (lines.isEmpty()) {
         lines.append(QStringLiteral("没有可执行语句"));
     }
@@ -76,6 +89,7 @@ void ResultPanel::show_result(
 void ResultPanel::show_notice(const QString& text) {
     payload_.reset();
     model_->set_query(nullptr);
+    chart_->set_data(ChartData{});
     table_->clearSpans();
     statements_->clear();
     banner_->setText(text);
@@ -96,6 +110,14 @@ QString ResultPanel::statement_text() const {
 
 ResultModel* ResultPanel::model() const noexcept {
     return model_;
+}
+
+ChartWidget* ResultPanel::chart_widget() const noexcept {
+    return chart_;
+}
+
+const ChartData& ResultPanel::chart_data() const noexcept {
+    return chart_->data();
 }
 
 }  // namespace tinydbms::gui

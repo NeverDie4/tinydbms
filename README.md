@@ -73,8 +73,10 @@ CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format 
 
 运行中取消：CLI 在 `execute_script` 期间按 Ctrl+C 会请求取消（`CancelToken`），当前语句在
 下一个无副作用检查点结束、剩余语句不再执行并记为 `CANCELLED`，本次调用退出码为 1；
-空闲期或第二次 Ctrl+C 按默认处置终止进程。GUI 侧只登记该能力边界，本版不提供取消按钮。
-规格见 [docs/core-cli/运行中取消设计.md](docs/core-cli/运行中取消设计.md)。
+空闲期或第二次 Ctrl+C 按默认处置终止进程。GUI 工具栏提供「取消」按钮：请求只置位令牌，
+当前语句在下一个检查点结束后按 `kCancelled` 渲染（收尾阶段实现，见
+[docs/gui/GUI设计.md](docs/gui/GUI设计.md) §17）。规格见
+[docs/core-cli/运行中取消设计.md](docs/core-cli/运行中取消设计.md)。
 
 ## 公共契约
 

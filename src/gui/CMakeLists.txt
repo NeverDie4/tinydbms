@@ -5,6 +5,8 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.3 REQUIRED COMPONENTS Widgets)
 
 add_library(tinydbms_gui_objects OBJECT
+    chart_data.cpp
+    chart_widget.cpp
     diagnostic_list.cpp
     main_window.cpp
     result_model.cpp
