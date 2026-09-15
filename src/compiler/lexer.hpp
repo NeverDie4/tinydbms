@@ -18,15 +18,38 @@ enum class TokenKind {
     kValues,
     kSelect,
     kFrom,
+    kJoin,
+    kInner,
+    kOn,
     kWhere,
+    kOrder,
+    kBy,
+    kGroup,
+    kCount,
+    kSum,
+    kAvg,
+    kMin,
+    kMax,
+    kAsc,
+    kDesc,
     kDelete,
+    kUpdate,
+    kSet,
     kAnd,
     kOr,
     kNot,
     kInt,
+    kBigInt,
+    kDouble,
+    kBoolean,
     kVarchar,
+    kTrue,
+    kFalse,
+    kNull,
+    kIs,
     kIdentifier,
     kIntegerLiteral,
+    kDoubleLiteral,
     kStringLiteral,
     kEq,
     kNe,
@@ -39,13 +62,14 @@ enum class TokenKind {
     kComma,
     kSemicolon,
     kStar,
+    kDot,
     kEnd
 };
 
 struct Token {
     TokenKind kind;
     std::string lexeme;
-    SourceLocation location;
+    SourceRange source;
 };
 
 struct LexResult {

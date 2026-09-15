@@ -104,14 +104,16 @@ bool test_bootstrap_system_tables_and_user_catalog_records() {
 
     const auto table_rows = scan(0);
     CHECK(table_rows.size() == 2);
-    CHECK(table_rows[0].values.size() == 3);
+    CHECK(table_rows[0].values.size() == 4);
     CHECK(std::get<std::string>(table_rows[0].values[0].data) == "2");
     CHECK(std::get<std::string>(table_rows[0].values[1].data) == "student");
     CHECK(std::get<std::int32_t>(table_rows[0].values[2].data) == 2);
-    CHECK(table_rows[1].values.size() == 3);
+    CHECK(std::get<std::string>(table_rows[0].values[3].data) == "V2");
+    CHECK(table_rows[1].values.size() == 4);
     CHECK(std::get<std::string>(table_rows[1].values[0].data) == "3");
     CHECK(std::get<std::string>(table_rows[1].values[1].data) == "course");
     CHECK(std::get<std::int32_t>(table_rows[1].values[2].data) == 1);
+    CHECK(std::get<std::string>(table_rows[1].values[3].data) == "V2");
     CHECK(scan(1).size() == 3);
     CHECK(!close_storage({}).error.has_value());
 
@@ -150,7 +152,7 @@ bool test_invalid_or_legacy_bootstrap_is_rejected_without_rewrite() {
     }
     const auto legacy_result = open_storage({legacy.path().string()});
     CHECK(legacy_result.error.has_value());
-    CHECK(legacy_result.error->kind == StorageErrorKind::kInvalidRequest);
+    CHECK(legacy_result.error->kind == StorageErrorKind::kCorrupt);
     std::ifstream input{legacy.path() / "storage.meta"};
     const std::string after{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
     CHECK(after == v1);

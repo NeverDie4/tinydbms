@@ -8,17 +8,17 @@ Core 负责 catalog snapshot、Plan 调度、表达式、WHERE 与 projection。
 
 ## 类型、ID 与记录
 
-支持 `Type::kInt` 与 `Type::kVarchar`。INT 是 signed int32 的四字节 little-endian；VARCHAR 是 uint32 little-endian 长度与 UTF-8 内容。逻辑行最多 4096 字节，VARCHAR 最多 1024 UTF-8 字节，单记录不能跨页。
+支持 `INT`、`BIGINT`、`DOUBLE`、`BOOLEAN`、`VARCHAR` 及 nullable 列。固定宽度值以 little-endian 编码；`VARCHAR` 是 uint32 little-endian 长度与 UTF-8 内容；V2 行在 payload 起始处保存 NULL bitmap。逻辑行最多 4096 字节，VARCHAR 最多 1024 UTF-8 字节，单记录不能跨页；DOUBLE 必须为 finite 值。
 
 `TableId` 是 uint32 值。TableId 0 (`tdb_sys_tables`) 与 1 (`tdb_sys_columns`) 为 Storage 保留的 system table；普通用户 `create_table` 只能使用不小于 2 的 ID，也不能使用这两个保留名称。`RecordId` 是 table-scoped opaque value，Core 不解释。`Record` 是 `{rid, values}`，values 永远按 `TableMeta.columns` 顺序并按值返回。
 
-`storage.meta` 是 V2 bootstrap，不携带用户 schema。用户表 schema 由 `tdb_sys_tables` 与 `tdb_sys_columns` 中的 `INT32`/`VARCHAR` catalog records 持久化；未知 bootstrap、损坏的 system PageFile、逻辑 catalog 或 catalog/file 不一致均 fail-closed 为 `kCorrupt`。历史 V1 metadata 不迁移且返回明确错误。
+`storage.meta` 是 V2 bootstrap，不携带用户 schema。用户表 schema 由 `tdb_sys_tables` 与 `tdb_sys_columns` catalog records 持久化；未知 bootstrap、损坏的 system PageFile、逻辑 catalog 或 catalog/file 不一致均 fail-closed 为 `kCorrupt`。历史 V1 metadata 可读；V1/V2 表可共存，新的表一律写 V2，不自动重写旧表。
 
 ## API 与结果
 
-`open_storage`、`close_storage`、`list_tables`、`create_table`、`open_table`、`scan_next`、`close_cursor`、`insert`、`delete_records` 均采用 `.hpp` 中的 request/result 对象。
+`open_storage`、`close_storage`、`list_tables`、`create_table`、`open_table`、`scan_next`、`close_cursor`、`insert`、`delete_records`、`update_rows` 均采用 `.hpp` 中的 request/result 对象。
 
-`OpenTableResult.cursor` 是成功 cursor。`ScanNextResult` 的 `record` 空且 `error` 空表示 EOF。`InsertResult.rids` 和 `DeleteResult.deleted_count` 分别报告已成功的前缀；它们不提供事务回滚。
+`OpenTableResult.cursor` 是成功 cursor。`ScanNextResult` 的 `record` 空且 `error` 空表示 EOF。`InsertResult.rids`、`DeleteResult.deleted_count` 与 `UpdateResult.updated_count` 分别报告已成功的前缀；它们不提供事务回滚。UPDATE 会先对整批重复 RID、RID 有效性和编码做预检，再逐行应用；页内没有足够空间时返回 `kValueTooLarge`，当前不 relocate。
 
 `list_tables` 返回 system table 与用户表，使 Core 的 CatalogView 能用常规 SELECT 读取 system catalog。普通 public `insert` 和 `delete_records` 对 TableId 0/1 返回 `kInvalidRequest`；内部 catalog helper 不属于 public API。
 
@@ -34,4 +34,4 @@ Storage 是 singleton：正常数据操作仅在 open 状态可用。BufferPool 
 
 公共错误为 `kTableNotFound`、`kCursorInvalid`、`kValueTooLarge`、`kIoError`、`kCorrupt`、`kInvalidRequest`。Storage 不暴露 Page 或 Buffer 专用错误。
 
-FSM、Index、WAL、Transaction、MVCC、schema evolution、V1 自动迁移、DROP 和多进程文件锁不在当前范围。普通 CREATE 仅具有正常 API 失败下的最小补偿；不承诺 crash-atomic DDL。
+FSM、Index、WAL、Transaction、MVCC、schema evolution、V1 自动重写、DROP 和多进程文件锁不在当前范围。普通 CREATE 仅具有正常 API 失败下的最小补偿；不承诺 crash-atomic DDL。

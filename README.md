@@ -37,13 +37,22 @@ Core Database / Executor
 
 已支持：
 
-- `CREATE TABLE`
+- `CREATE TABLE`，含 `NULL` / `NOT NULL` 列约束
 - `INSERT`，包括完整的显式列重排
-- `SELECT`、列投影与简单 WHERE，包括比较、`AND`、`OR`、`NOT`
+- `SELECT`、列投影与 `WHERE`，包括比较、`AND`、`OR`、`NOT` 与 SQL 三值逻辑
+- `UPDATE`，采用扫描、构造完整替换行、关闭 cursor、批量替换流程（非事务性）
+- `ORDER BY`、`INNER JOIN`（含限定列引用）与 `GROUP BY` 的 `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`
 - `DELETE`，采用扫描、收集 RID、关闭 cursor、批量删除流程
 - 正常 close/reopen 后的 schema 和记录持久化
 
-初版 public type 只有 `INT` 和 `VARCHAR`。`INT` 是有符号 `int32_t`，物理编码为 4-byte little-endian；`VARCHAR` 是 UTF-8，物理编码为 `uint32_t` little-endian 字节长度加内容。
+public type 为 `INT`（`int32_t`）、`BIGINT`（`int64_t`）、`DOUBLE`、`BOOLEAN` 和 `VARCHAR`，
+SQL NULL 由 `Value` 的 `std::monostate` 表示；列元数据带 `nullable`，默认 NOT NULL。
+`VARCHAR` 必须是合法 UTF-8 且不超过 1024 字节，单行逻辑载荷不超过 4096 字节。
+逻辑类型与物理编码的对应关系以
+[docs/SQLv2扩展契约.md](docs/SQLv2扩展契约.md) §10 与 `include/tinydbms/common.hpp` 为准。
+
+SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子查询、`UNION`、`LIMIT`/`OFFSET`、
+窗口函数、算术表达式、事务、WAL 与崩溃原子性。
 
 `storage.meta` 是 V2 bootstrap，不保存用户 schema。`tdb_sys_tables`（TableId 0）与
 `tdb_sys_columns`（TableId 1）是 Storage 管理的特殊 HeapTable，保存用户 schema；它们可由
@@ -72,6 +81,7 @@ core/CLI 的阶段设计入口：
 - [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
+- [GUI 设计（Qt6 可选前端）](docs/gui/GUI设计.md)
 
 ## 构建与验证
 
@@ -98,5 +108,19 @@ ctest --test-dir build/real-debug --output-on-failure
 `CREATE TABLE -> INSERT -> SELECT -> DELETE -> close -> reopen -> SELECT`、批处理停止、
 REPL 恢复、超大 SQL 边界、UTF-8 数据目录、编译与语义错误位置、storage 运行期错误和 open
 失败路径。
+
+可选的 Qt6 GUI（默认不参与构建，只有本机装了 Qt6 时才有意义）：
+
+```bash
+cmake --preset gui
+cmake --build build/gui-debug --target tinydbms-gui tinydbms_gui_ui_test
+./build/gui-debug/src/gui/tinydbms-gui
+ctest --test-dir build/gui-debug -L gui --output-on-failure
+```
+
+GUI 与 CLI 一样只调用 core 的公开 API，`TINYDBMS_BUILD_GUI` 默认为 `OFF`，未开启时不会查找
+Qt、也不会新增目标或测试。未启用 `TINYDBMS_ENABLE_REAL_MODULES` 时 GUI 使用不可用后端：窗口
+可以打开与调试，但不会伪造数据。接口与线程模型见
+[docs/gui/GUI设计.md](docs/gui/GUI设计.md)。
 
 开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/) 的分层与调用链，不复制其事务、日志或多引擎范围。

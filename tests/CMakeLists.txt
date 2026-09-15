@@ -52,8 +52,6 @@ add_executable(tinydbms.buffer_pool_concurrency_test buffer_pool_concurrency_tes
 target_include_directories(tinydbms.buffer_pool_concurrency_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
 target_link_libraries(tinydbms.buffer_pool_concurrency_test PRIVATE tinydbms_storage)
 add_test(NAME tinydbms.buffer_pool_concurrency COMMAND $<TARGET_FILE:tinydbms.buffer_pool_concurrency_test>)
-add_test(NAME tinydbms.buffer_pool_loading COMMAND $<TARGET_FILE:tinydbms.buffer_pool_concurrency_test>)
-add_test(NAME tinydbms.buffer_pool_clean_victim COMMAND $<TARGET_FILE:tinydbms.buffer_pool_concurrency_test>)
 
 add_executable(tinydbms.buffer_pool_dirty_victim_test buffer_pool_dirty_victim_test.cpp)
 target_include_directories(tinydbms.buffer_pool_dirty_victim_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
@@ -95,6 +93,14 @@ add_executable(tinydbms.core_execution_test core_execution_test.cpp)
 target_include_directories(tinydbms.core_execution_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
 target_link_libraries(tinydbms.core_execution_test PRIVATE tinydbms_core)
 add_test(NAME tinydbms.core_execution COMMAND $<TARGET_FILE:tinydbms.core_execution_test>)
+
+add_executable(tinydbms_sqlv2_release_stress_test sqlv2_release_stress_test.cpp)
+target_link_libraries(tinydbms_sqlv2_release_stress_test PRIVATE tinydbms_core)
+add_test(
+    NAME tinydbms.sqlv2_release_stress
+    COMMAND $<TARGET_FILE:tinydbms_sqlv2_release_stress_test>
+)
+set_tests_properties(tinydbms.sqlv2_release_stress PROPERTIES TIMEOUT 180)
 
 add_executable(tinydbms.storage_contract_test storage_contract_test.cpp)
 
@@ -269,6 +275,23 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms_core_lifecycle_test>
 )
 
+add_executable(tinydbms_core_script_recovery_fuzz_test
+    core_script_recovery_fuzz_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_core_script_recovery_fuzz_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+    NAME tinydbms.core_script_recovery_fuzz
+    COMMAND $<TARGET_FILE:tinydbms_core_script_recovery_fuzz_test>
+)
+
 add_executable(tinydbms_core_executor_test
     core_executor_test.cpp
     fakes/compiler_fake.cpp
@@ -284,6 +307,23 @@ target_include_directories(tinydbms_core_executor_test PRIVATE
 add_test(
     NAME tinydbms.core_executor
     COMMAND $<TARGET_FILE:tinydbms_core_executor_test>
+)
+
+add_executable(tinydbms_core_script_policy_test
+    core_script_policy_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_core_script_policy_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+    NAME tinydbms.core_script_policy
+    COMMAND $<TARGET_FILE:tinydbms_core_script_policy_test>
 )
 
 add_executable(tinydbms_app_cli_test app_cli_test.cpp)
@@ -667,3 +707,38 @@ add_test(
     NAME tinydbms.compiler_fuzz_invalid
     COMMAND $<TARGET_FILE:tinydbms_compiler_fuzz_invalid_test>
 )
+
+if(TINYDBMS_BUILD_GUI)
+    # GUI 测试只使用 FakeBackend 与 UI 源文件，不链接 core，
+    # 因此 compiler 未完成契约适配时也能构建和运行。
+    # find_package 在这里重复调用是必要的：Qt 的 imported target 只在创建它的目录及其
+    # 子目录可见，tests/ 与 src/gui/ 是并列目录。第二次查找命中缓存，代价可忽略。
+    find_package(Qt6 6.3 REQUIRED COMPONENTS Widgets)
+
+    add_executable(tinydbms_gui_ui_test
+        gui_ui_test.cpp
+        fakes/gui_backend_fake.cpp
+        $<TARGET_OBJECTS:tinydbms_gui_objects>
+    )
+
+    target_include_directories(tinydbms_gui_ui_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/gui
+        ${PROJECT_SOURCE_DIR}/src/app
+        ${PROJECT_SOURCE_DIR}/tests
+    )
+
+    target_link_libraries(tinydbms_gui_ui_test PRIVATE
+        Qt6::Widgets
+    )
+
+    add_test(
+        NAME tinydbms.gui_ui
+        COMMAND $<TARGET_FILE:tinydbms_gui_ui_test>
+    )
+
+    set_tests_properties(tinydbms.gui_ui PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        LABELS gui
+    )
+endif()

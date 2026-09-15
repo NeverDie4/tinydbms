@@ -50,7 +50,8 @@ public:
     PageFileResult<PageFile*> create_table_file(TableId table_id);
     PageFileResult<PageFile*> open_table_file(TableId table_id);
     PageFileResult<PageFileLease> acquire_file(TableId table_id);
-    // Legacy diagnostic/test lookup only; callers must not perform a PageFile operation through it.
+    // Legacy single-threaded diagnostic/test lookup only. It does not extend the
+    // PageFile lifetime; concurrent production code must use acquire_file().
     PageFile* find_table_file(TableId table_id) const noexcept;
     std::optional<PageFileError> close_table_file(TableId table_id);
     std::optional<PageFileError> close_all();

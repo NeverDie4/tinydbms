@@ -8,9 +8,9 @@
 #include <filesystem>
 #include <charconv>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <new>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -24,10 +24,18 @@ namespace tinydbms::storage {
 namespace {
 
 enum class Lifecycle { kClosed, kOpen, kClosing };
+enum class MetadataFormat { kV1, kV2 };
+enum class CatalogMode { kLegacy, kSystem };
+struct StoredTable {
+    TableMeta metadata;
+    internal::RowFormat row_format;
+};
 struct StorageState {
     Lifecycle lifecycle = Lifecycle::kClosed;
+    CatalogMode catalog_mode = CatalogMode::kSystem;
+    MetadataFormat metadata_format = MetadataFormat::kV2;
     std::filesystem::path data_dir;
-    std::vector<TableMeta> tables;
+    std::vector<StoredTable> tables;
     std::unique_ptr<internal::FileManager> file_manager;
     std::unique_ptr<internal::BufferPool> buffer_pool; // Destroyed before FileManager.
     std::unique_ptr<internal::CursorRegistry> cursors; // Destroyed before borrowed resources.
@@ -129,7 +137,8 @@ TableMeta system_tables_meta() {
     return TableMeta{kSystemTablesId, std::string{kSystemTablesName}, {
         {"table_id", Type::kVarchar},
         {"table_name", Type::kVarchar},
-        {"column_count", Type::kInt}}};
+        {"column_count", Type::kInt},
+        {"row_format", Type::kVarchar}}};
 }
 
 TableMeta system_columns_meta() {
@@ -137,15 +146,14 @@ TableMeta system_columns_meta() {
         {"table_id", Type::kVarchar},
         {"column_ordinal", Type::kInt},
         {"column_name", Type::kVarchar},
-        {"column_type", Type::kVarchar}}};
+        {"column_type", Type::kVarchar},
+        {"nullable", Type::kBoolean}}};
 }
 
-std::vector<TableMeta> system_tables() {
-    std::vector<TableMeta> tables;
-    tables.reserve(2);
-    tables.push_back(system_tables_meta());
-    tables.push_back(system_columns_meta());
-    return tables;
+std::vector<StoredTable> system_tables() {
+    return {
+        {system_tables_meta(), internal::RowFormat::kV2},
+        {system_columns_meta(), internal::RowFormat::kV2}};
 }
 
 bool is_reserved_system_identity(TableId table_id, std::string_view table_name) {
@@ -157,59 +165,240 @@ bool is_system_catalog_table(TableId table_id) {
     return table_id == kSystemTablesId || table_id == kSystemColumnsId;
 }
 
-std::optional<std::string_view> type_name(Type type) {
+std::optional<std::string_view> v1_type_name(Type type) {
     switch (type) {
         case Type::kInt:
             return "INT32";
+        case Type::kVarchar:
+            return "VARCHAR";
+        case Type::kBigInt:
+        case Type::kDouble:
+        case Type::kBoolean:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string_view> v2_type_name(Type type) {
+    switch (type) {
+        case Type::kInt:
+            return "INT32";
+        case Type::kBigInt:
+            return "INT64";
+        case Type::kDouble:
+            return "DOUBLE";
+        case Type::kBoolean:
+            return "BOOLEAN";
         case Type::kVarchar:
             return "VARCHAR";
     }
     return std::nullopt;
 }
 
-bool is_normalized_identifier(std::string_view name);
-bool has_valid_columns(const std::vector<ColumnMeta>& columns);
+std::optional<Type> parse_v1_type(std::string_view name) {
+    if (name == "INT32" || name == "INT") {
+        return Type::kInt;
+    }
+    if (name == "VARCHAR") {
+        return Type::kVarchar;
+    }
+    return std::nullopt;
+}
 
-enum class BootstrapReadResult { kOk, kLegacy, kCorrupt };
+std::optional<Type> parse_v2_type(std::string_view name) {
+    if (name == "INT32") {
+        return Type::kInt;
+    }
+    if (name == "INT64") {
+        return Type::kBigInt;
+    }
+    if (name == "DOUBLE") {
+        return Type::kDouble;
+    }
+    if (name == "BOOLEAN") {
+        return Type::kBoolean;
+    }
+    if (name == "VARCHAR") {
+        return Type::kVarchar;
+    }
+    return std::nullopt;
+}
 
-BootstrapReadResult read_bootstrap(std::ifstream& input) {
+enum class MetadataMarker { kLegacyV1, kLegacyV2, kBootstrap, kInvalid };
+
+MetadataMarker inspect_metadata_marker(std::ifstream& input) {
     std::string line;
-    if (!std::getline(input, line)) {
-        return BootstrapReadResult::kCorrupt;
-    }
-    if (line == "TINYDBMS_STORAGE_V1") {
-        return BootstrapReadResult::kLegacy;
-    }
-    if (line != "TINYDBMS_STORAGE_BOOTSTRAP_V2") {
-        return BootstrapReadResult::kCorrupt;
-    }
+    if (!std::getline(input, line)) return MetadataMarker::kInvalid;
+    input.clear();
+    input.seekg(0);
+    if (line == "TINYDBMS_STORAGE_V1") return MetadataMarker::kLegacyV1;
+    if (line == "TINYDBMS_STORAGE_V2") return MetadataMarker::kLegacyV2;
+    if (line == "TINYDBMS_STORAGE_BOOTSTRAP_V2") return MetadataMarker::kBootstrap;
+    return MetadataMarker::kInvalid;
+}
+
+bool read_bootstrap(std::ifstream& input) {
+    std::string line;
+    if (!std::getline(input, line) || line != "TINYDBMS_STORAGE_BOOTSTRAP_V2") return false;
     bool saw_tables = false;
     bool saw_columns = false;
     while (std::getline(input, line)) {
         if (line == "END") {
-            while (std::getline(input, line)) {
-                if (line.find_first_not_of(" \t\r") != std::string::npos) {
-                    return BootstrapReadResult::kCorrupt;
-                }
-            }
-            return !input.bad() && saw_tables && saw_columns
-                ? BootstrapReadResult::kOk
-                : BootstrapReadResult::kCorrupt;
+            while (std::getline(input, line))
+                if (line.find_first_not_of(" \t\r") != std::string::npos) return false;
+            return !input.bad() && saw_tables && saw_columns;
         }
-        if (line == "SYS_TABLES 0" && !saw_tables) {
-            saw_tables = true;
-            continue;
-        }
-        if (line == "SYS_COLUMNS 1" && !saw_columns) {
-            saw_columns = true;
-            continue;
-        }
-        return BootstrapReadResult::kCorrupt;
+        if (line == "SYS_TABLES 0" && !saw_tables) saw_tables = true;
+        else if (line == "SYS_COLUMNS 1" && !saw_columns) saw_columns = true;
+        else return false;
     }
-    return BootstrapReadResult::kCorrupt;
+    return false;
+}
+
+std::optional<StorageError> replace_metadata_file(
+    const std::filesystem::path& temporary_path, std::string_view replace_error) {
+    std::error_code filesystem_error;
+#ifdef _WIN32
+    if (MoveFileExW(temporary_path.c_str(), metadata_path().c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        std::filesystem::remove(temporary_path, filesystem_error);
+        return error(StorageErrorKind::kIoError, std::string{replace_error});
+    }
+#else
+    std::filesystem::rename(temporary_path, metadata_path(), filesystem_error);
+    if (filesystem_error) {
+        std::filesystem::remove(temporary_path, filesystem_error);
+        return error(StorageErrorKind::kIoError, std::string{replace_error});
+    }
+#endif
+    return std::nullopt;
 }
 
 std::optional<StorageError> write_bootstrap() {
+    const auto temporary_path = temporary_metadata_path();
+    std::error_code filesystem_error;
+    std::filesystem::remove(temporary_path, filesystem_error);
+    if (filesystem_error)
+        return error(StorageErrorKind::kIoError, "cannot remove temporary storage metadata");
+    {
+        std::ofstream output(temporary_path, std::ios::trunc);
+        if (!output)
+            return error(StorageErrorKind::kIoError, "cannot write temporary storage metadata");
+        output << "TINYDBMS_STORAGE_BOOTSTRAP_V2\n"
+               << "SYS_TABLES 0\n"
+               << "SYS_COLUMNS 1\n"
+               << "END\n";
+        output.flush();
+        if (!output) {
+            output.close();
+            std::filesystem::remove(temporary_path, filesystem_error);
+            return error(StorageErrorKind::kIoError, "cannot flush temporary storage metadata");
+        }
+        output.close();
+        if (output.fail()) {
+            std::filesystem::remove(temporary_path, filesystem_error);
+            return error(StorageErrorKind::kIoError, "cannot close temporary storage metadata");
+        }
+    }
+    return replace_metadata_file(temporary_path, "cannot replace storage bootstrap metadata");
+}
+
+bool is_normalized_identifier(std::string_view name);
+bool has_valid_columns(
+    const std::vector<ColumnMeta>& columns, internal::RowFormat row_format);
+
+bool read_metadata(
+    std::ifstream& input, std::vector<StoredTable>& tables,
+    MetadataFormat& metadata_format, bool& unsupported_schema) {
+    std::string line;
+    if (!std::getline(input, line)) {
+        return false;
+    }
+    const bool is_v1 = line == "TINYDBMS_STORAGE_V1";
+    if (!is_v1 && line != "TINYDBMS_STORAGE_V2") return false;
+    metadata_format = is_v1 ? MetadataFormat::kV1 : MetadataFormat::kV2;
+    while (std::getline(input, line)) {
+        if (line == "END") {
+            // Only whitespace may follow the final marker; never ignore extra tables/data.
+            while (std::getline(input,line)) {
+                if (line.find_first_not_of(" \t\r") != std::string::npos) return false;
+            }
+            return !input.bad();
+        }
+        std::istringstream table_stream(line);
+        std::string marker;
+        std::string id_token, extra;
+        std::string row_format_token;
+        TableMeta table;
+        if (!(table_stream >> marker >> id_token >> table.table_name) || marker != "TABLE" ||
+            (!is_v1 && !(table_stream >> row_format_token)) || (table_stream >> extra) ||
+            !is_normalized_identifier(table.table_name)) {
+            return false;
+        }
+        internal::RowFormat row_format = internal::RowFormat::kV1;
+        if (!is_v1) {
+            if (row_format_token == "V2") row_format = internal::RowFormat::kV2;
+            else if (row_format_token != "V1") return false;
+        }
+        const auto parsed_id=std::from_chars(id_token.data(),id_token.data()+id_token.size(),table.table_id);
+        if (parsed_id.ec!=std::errc{} || parsed_id.ptr!=id_token.data()+id_token.size()) return false;
+        for (const auto& existing:tables)
+            if (existing.metadata.table_id==table.table_id ||
+                existing.metadata.table_name==table.table_name) return false;
+        bool ended=false;
+        while (std::getline(input, line)) {
+            if (line == "ENDTABLE") {
+                ended=true;
+                break;
+            }
+            std::istringstream column_stream(line);
+            std::string type;
+            std::string nullability;
+            ColumnMeta column;
+            if (!(column_stream >> marker >> type) || marker != "COLUMN" ||
+                (!is_v1 && !(column_stream >> nullability)) ||
+                !(column_stream >> column.name) || (column_stream >> extra)) {
+                return false;
+            }
+            const auto parsed_type = is_v1 ? parse_v1_type(type) : parse_v2_type(type);
+            if (!parsed_type.has_value()) {
+                unsupported_schema = is_v1 &&
+                    (type == "INT64" || type == "FLOAT" || type == "DOUBLE" ||
+                     type == "BOOL" || type == "BOOLEAN");
+                return false;
+            }
+            column.type = *parsed_type;
+            if (!is_v1) {
+                if (nullability == "NULLABLE") column.nullable = true;
+                else if (nullability != "NOT_NULL") return false;
+            }
+            table.columns.push_back(std::move(column));
+        }
+        if (!ended || table.columns.empty()) {
+            return false;
+        }
+        bool schema_supported = true;
+        for (const ColumnMeta& column : table.columns) {
+            const bool type_supported = column.type == Type::kInt ||
+                column.type == Type::kVarchar ||
+                (row_format == internal::RowFormat::kV2 &&
+                 (column.type == Type::kBigInt || column.type == Type::kDouble ||
+                  column.type == Type::kBoolean));
+            if ((row_format == internal::RowFormat::kV1 && column.nullable) ||
+                !type_supported) {
+                schema_supported = false;
+            }
+        }
+        if (!schema_supported || !has_valid_columns(table.columns,row_format)) {
+            unsupported_schema = !schema_supported;
+            return false;
+        }
+        tables.push_back(StoredTable{std::move(table),row_format});
+    }
+    return false;
+}
+
+std::optional<StorageError> write_metadata() {
     const auto temporary_path = temporary_metadata_path();
     std::error_code filesystem_error;
     std::filesystem::remove(temporary_path, filesystem_error);
@@ -222,10 +411,36 @@ std::optional<StorageError> write_bootstrap() {
         if (!output) {
             return error(StorageErrorKind::kIoError, "cannot write temporary storage metadata");
         }
-        output << "TINYDBMS_STORAGE_BOOTSTRAP_V2\n"
-               << "SYS_TABLES 0\n"
-               << "SYS_COLUMNS 1\n"
-               << "END\n";
+        output << (state.metadata_format == MetadataFormat::kV1
+                       ? "TINYDBMS_STORAGE_V1\n"
+                       : "TINYDBMS_STORAGE_V2\n");
+        for (const StoredTable& stored : state.tables) {
+            const TableMeta& table = stored.metadata;
+            output << "TABLE " << table.table_id << ' ' << table.table_name;
+            if (state.metadata_format == MetadataFormat::kV2) {
+                output << (stored.row_format == internal::RowFormat::kV1 ? " V1\n" : " V2\n");
+            } else {
+                output << '\n';
+            }
+            for (const ColumnMeta& column : table.columns) {
+                const auto name = state.metadata_format == MetadataFormat::kV1
+                    ? v1_type_name(column.type) : v2_type_name(column.type);
+                if (!name.has_value()) {
+                    output.close();
+                    std::filesystem::remove(temporary_path, filesystem_error);
+                    return error(StorageErrorKind::kInvalidRequest, "unknown column type");
+                }
+                output << "COLUMN " << *name;
+                if (state.metadata_format == MetadataFormat::kV2) {
+                    output << (column.nullable ? " NULLABLE " : " NOT_NULL ");
+                } else {
+                    output << ' ';
+                }
+                output << column.name << "\n";
+            }
+            output << "ENDTABLE\n";
+        }
+        output << "END\n";
         output.flush();
         if (!output) {
             output.close();
@@ -243,21 +458,21 @@ std::optional<StorageError> write_bootstrap() {
     if (MoveFileExW(temporary_path.c_str(), metadata_path().c_str(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         std::filesystem::remove(temporary_path, filesystem_error);
-        return error(StorageErrorKind::kIoError, "cannot replace storage bootstrap metadata");
+        return error(StorageErrorKind::kIoError, "cannot replace storage.meta");
     }
 #else
     std::filesystem::rename(temporary_path, metadata_path(), filesystem_error);
     if (filesystem_error) {
         std::filesystem::remove(temporary_path, filesystem_error);
-        return error(StorageErrorKind::kIoError, "cannot replace storage bootstrap metadata");
+        return error(StorageErrorKind::kIoError, "cannot replace storage.meta");
     }
 #endif
     return std::nullopt;
 }
 
 bool has_table_name(std::string_view name) {
-    for (const TableMeta& table : state.tables) {
-        if (table.table_name == name) {
+    for (const StoredTable& table : state.tables) {
+        if (table.metadata.table_name == name) {
             return true;
         }
     }
@@ -281,9 +496,17 @@ bool is_normalized_identifier(std::string_view name) {
     return true;
 }
 
-bool has_valid_columns(const std::vector<ColumnMeta>& columns) {
+bool has_valid_columns(
+    const std::vector<ColumnMeta>& columns, internal::RowFormat row_format) {
     for (std::size_t index = 0; index < columns.size(); ++index) {
-        if (!is_normalized_identifier(columns[index].name) || !type_name(columns[index].type).has_value()) {
+        const Type type = columns[index].type;
+        const bool supported = type == Type::kInt || type == Type::kVarchar ||
+            (row_format == internal::RowFormat::kV2 &&
+             (type == Type::kBigInt || type == Type::kDouble ||
+              type == Type::kBoolean));
+        if (!is_normalized_identifier(columns[index].name) ||
+            (row_format == internal::RowFormat::kV1 && columns[index].nullable) ||
+            !supported) {
             return false;
         }
         for (std::size_t other = 0; other < index; ++other) {
@@ -295,9 +518,9 @@ bool has_valid_columns(const std::vector<ColumnMeta>& columns) {
     return true;
 }
 
-const TableMeta* find_table(TableId table_id) {
-    for (const TableMeta& table : state.tables) {
-        if (table.table_id == table_id) {
+const StoredTable* find_table(TableId table_id) {
+    for (const StoredTable& table : state.tables) {
+        if (table.metadata.table_id == table_id) {
             return &table;
         }
     }
@@ -306,139 +529,125 @@ const TableMeta* find_table(TableId table_id) {
 
 std::optional<TableId> parse_catalog_table_id(const Value& value) {
     const auto* text = std::get_if<std::string>(&value.data);
-    if (text == nullptr || text->empty() || (text->size() > 1 && text->front() == '0')) {
+    if (text == nullptr || text->empty() || (text->size() > 1 && text->front() == '0'))
         return std::nullopt;
-    }
     TableId table_id = 0;
     const auto parsed = std::from_chars(text->data(), text->data() + text->size(), table_id);
-    if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size()) {
+    if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size())
         return std::nullopt;
-    }
     return table_id;
 }
 
 struct PendingCatalogTable {
     std::string name;
     std::int32_t column_count = 0;
+    internal::RowFormat row_format = internal::RowFormat::kV2;
     std::map<std::int32_t, ColumnMeta> columns;
 };
 
 std::optional<StorageError> scan_catalog_records(
-    const TableMeta& metadata,
-    internal::FileManager& file_manager,
-    internal::BufferPool& buffer_pool,
-    std::vector<Record>& records) {
-    internal::HeapTable table(metadata, file_manager, buffer_pool);
+    const TableMeta& metadata, internal::FileManager& file_manager,
+    internal::BufferPool& buffer_pool, std::vector<Record>& records) {
+    internal::HeapTable table(
+        metadata, internal::RowFormat::kV2, file_manager, buffer_pool);
     auto position = table.begin_scan();
-    if (!position.value.has_value()) {
-        return data_error(*position.error);
-    }
+    if (!position.value.has_value()) return data_error(*position.error);
     while (true) {
         auto next = table.next_record(*position.value);
-        if (next.error.has_value()) {
-            return data_error(*next.error);
-        }
-        if (!next.value.has_value()) {
-            return std::nullopt;
-        }
+        if (next.error.has_value()) return data_error(*next.error);
+        if (!next.value.has_value()) return std::nullopt;
         records.push_back(std::move(*next.value));
     }
 }
 
 std::optional<StorageError> load_user_catalog(
-    internal::FileManager& file_manager,
-    internal::BufferPool& buffer_pool,
-    std::vector<TableMeta>& tables) {
+    internal::FileManager& file_manager, internal::BufferPool& buffer_pool,
+    std::vector<StoredTable>& tables) {
     std::vector<Record> table_records;
     std::vector<Record> column_records;
-    const TableMeta tables_meta = system_tables_meta();
-    const TableMeta columns_meta = system_columns_meta();
-    if (auto scan_error = scan_catalog_records(tables_meta, file_manager, buffer_pool, table_records)) {
-        return scan_error;
-    }
-    if (auto scan_error = scan_catalog_records(columns_meta, file_manager, buffer_pool, column_records)) {
-        return scan_error;
-    }
+    if (auto scan_error = scan_catalog_records(
+            system_tables_meta(), file_manager, buffer_pool, table_records)) return scan_error;
+    if (auto scan_error = scan_catalog_records(
+            system_columns_meta(), file_manager, buffer_pool, column_records)) return scan_error;
 
     std::map<TableId, PendingCatalogTable> pending;
     for (const Record& record : table_records) {
-        if (record.values.size() != 3) {
+        if (record.values.size() != 4)
             return error(StorageErrorKind::kCorrupt, "invalid tdb_sys_tables record");
-        }
         const auto table_id = parse_catalog_table_id(record.values[0]);
         const auto* name = std::get_if<std::string>(&record.values[1].data);
         const auto* column_count = std::get_if<std::int32_t>(&record.values[2].data);
-        if (!table_id.has_value() || name == nullptr || column_count == nullptr || *column_count <= 0 ||
-            is_reserved_system_identity(*table_id, *name) || !is_normalized_identifier(*name) ||
-            pending.contains(*table_id)) {
+        const auto* row_format_name = std::get_if<std::string>(&record.values[3].data);
+        const auto row_format = row_format_name != nullptr && *row_format_name == "V1"
+            ? std::optional{internal::RowFormat::kV1}
+            : row_format_name != nullptr && *row_format_name == "V2"
+                ? std::optional{internal::RowFormat::kV2} : std::nullopt;
+        if (!table_id.has_value() || name == nullptr || column_count == nullptr ||
+            *column_count <= 0 || !row_format.has_value() ||
+            is_reserved_system_identity(*table_id, *name) ||
+            !is_normalized_identifier(*name) || pending.contains(*table_id))
             return error(StorageErrorKind::kCorrupt, "invalid tdb_sys_tables record");
-        }
         for (const auto& [existing_id, existing] : pending) {
-            if (existing.name == *name) {
+            static_cast<void>(existing_id);
+            if (existing.name == *name)
                 return error(StorageErrorKind::kCorrupt, "duplicate tdb_sys_tables name");
-            }
         }
-        pending.emplace(*table_id, PendingCatalogTable{*name, *column_count, {}});
+        pending.emplace(*table_id, PendingCatalogTable{*name, *column_count, *row_format, {}});
     }
 
     for (const Record& record : column_records) {
-        if (record.values.size() != 4) {
+        if (record.values.size() != 5)
             return error(StorageErrorKind::kCorrupt, "invalid tdb_sys_columns record");
-        }
         const auto table_id = parse_catalog_table_id(record.values[0]);
         const auto* ordinal = std::get_if<std::int32_t>(&record.values[1].data);
         const auto* name = std::get_if<std::string>(&record.values[2].data);
-        const auto* type_name_value = std::get_if<std::string>(&record.values[3].data);
-        if (!table_id.has_value() || ordinal == nullptr || name == nullptr || type_name_value == nullptr ||
-            *ordinal < 0 || is_reserved_system_identity(*table_id, "") ||
-            !is_normalized_identifier(*name)) {
+        const auto* type_text = std::get_if<std::string>(&record.values[3].data);
+        const auto* nullable = std::get_if<bool>(&record.values[4].data);
+        const auto type = type_text == nullptr ? std::nullopt : parse_v2_type(*type_text);
+        auto table = table_id.has_value() ? pending.find(*table_id) : pending.end();
+        if (!table_id.has_value() || ordinal == nullptr || name == nullptr ||
+            nullable == nullptr || *ordinal < 0 ||
+            is_reserved_system_identity(*table_id, "") ||
+            !is_normalized_identifier(*name) || !type.has_value() || table == pending.end() ||
+            !table->second.columns.emplace(
+                *ordinal, ColumnMeta{*name, *type, *nullable}).second)
             return error(StorageErrorKind::kCorrupt, "invalid tdb_sys_columns record");
-        }
-        const auto type = *type_name_value == "INT32" ? std::optional<Type>{Type::kInt}
-            : *type_name_value == "VARCHAR" ? std::optional<Type>{Type::kVarchar}
-            : std::nullopt;
-        auto table = pending.find(*table_id);
-        if (!type.has_value() || table == pending.end() ||
-            !table->second.columns.emplace(*ordinal, ColumnMeta{*name, *type}).second) {
-            return error(StorageErrorKind::kCorrupt, "invalid tdb_sys_columns record");
-        }
     }
 
     tables = system_tables();
     for (auto& [table_id, pending_table] : pending) {
-        if (pending_table.columns.size() != static_cast<std::size_t>(pending_table.column_count)) {
-            return error(StorageErrorKind::kCorrupt, "tdb_sys_columns count does not match tdb_sys_tables");
-        }
-        TableMeta table{table_id, std::move(pending_table.name), {}};
-        table.columns.reserve(pending_table.columns.size());
+        if (pending_table.columns.size() !=
+            static_cast<std::size_t>(pending_table.column_count))
+            return error(StorageErrorKind::kCorrupt,
+                         "tdb_sys_columns count does not match tdb_sys_tables");
+        TableMeta metadata{table_id, std::move(pending_table.name), {}};
+        metadata.columns.reserve(pending_table.columns.size());
         for (std::int32_t ordinal = 0; ordinal < pending_table.column_count; ++ordinal) {
             const auto column = pending_table.columns.find(ordinal);
-            if (column == pending_table.columns.end()) {
-                return error(StorageErrorKind::kCorrupt, "tdb_sys_columns ordinal is not contiguous");
-            }
-            table.columns.push_back(std::move(column->second));
+            if (column == pending_table.columns.end())
+                return error(StorageErrorKind::kCorrupt,
+                             "tdb_sys_columns ordinal is not contiguous");
+            metadata.columns.push_back(std::move(column->second));
         }
-        if (!has_valid_columns(table.columns)) {
-            return error(StorageErrorKind::kCorrupt, "invalid user table schema in system catalog");
-        }
-        tables.push_back(std::move(table));
+        if (!has_valid_columns(metadata.columns, pending_table.row_format))
+            return error(StorageErrorKind::kCorrupt,
+                         "invalid user table schema in system catalog");
+        tables.push_back(StoredTable{std::move(metadata), pending_table.row_format});
     }
     return std::nullopt;
 }
 
 std::optional<StorageError> rollback_catalog_create(
-    internal::HeapTable& columns_table,
-    const std::vector<RecordId>& column_records,
-    internal::FileManager& file_manager,
-    TableId table_id) {
+    internal::HeapTable& columns_table, const std::vector<RecordId>& column_records,
+    internal::FileManager& file_manager, TableId table_id) {
     bool rollback_failed = false;
     if (!column_records.empty()) {
         const auto deleted = columns_table.delete_batch(column_records);
-        rollback_failed = deleted.error.has_value() || deleted.deleted_count != column_records.size();
+        rollback_failed = deleted.error.has_value() ||
+            deleted.deleted_count != column_records.size();
     }
-    if (const auto removed = file_manager.remove_table_file(table_id); removed.has_value()) {
+    if (const auto removed = file_manager.remove_table_file(table_id); removed.has_value())
         rollback_failed = true;
-    }
     return rollback_failed
         ? std::optional{error(StorageErrorKind::kIoError, "system catalog rollback failed")}
         : std::nullopt;
@@ -448,39 +657,35 @@ std::optional<TableId> parse_canonical_table_file_name(std::string_view filename
     constexpr std::string_view prefix = "table_";
     constexpr std::string_view suffix = ".dat";
     if (!filename.starts_with(prefix) || !filename.ends_with(suffix) ||
-        filename.size() == prefix.size() + suffix.size()) {
-        return std::nullopt;
-    }
+        filename.size() == prefix.size() + suffix.size()) return std::nullopt;
     const std::string_view id_text = filename.substr(
         prefix.size(), filename.size() - prefix.size() - suffix.size());
     TableId table_id{};
     const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), table_id);
     if (parsed.ec != std::errc{} || parsed.ptr != id_text.data() + id_text.size() ||
-        filename != "table_" + std::to_string(table_id) + ".dat") {
-        return std::nullopt;
-    }
+        filename != "table_" + std::to_string(table_id) + ".dat") return std::nullopt;
     return table_id;
 }
 
-std::optional<StorageError> validate_catalog_table_files(const std::vector<TableMeta>& tables) {
+std::optional<StorageError> validate_catalog_table_files(
+    const std::vector<StoredTable>& tables) {
     std::error_code filesystem_error;
-    const std::filesystem::path tables_dir = state.data_dir / "tables";
-    std::filesystem::directory_iterator iterator(tables_dir, filesystem_error);
-    if (filesystem_error) {
+    std::filesystem::directory_iterator iterator(state.data_dir / "tables", filesystem_error);
+    if (filesystem_error)
         return error(StorageErrorKind::kIoError, "cannot inspect tables directory");
-    }
     const std::filesystem::directory_iterator end;
     while (iterator != end) {
         const auto table_id = parse_canonical_table_file_name(iterator->path().filename().string());
         const bool catalog_has_file = table_id.has_value() && std::any_of(
-            tables.begin(), tables.end(), [&](const TableMeta& table) { return table.table_id == *table_id; });
-        if (table_id.has_value() && !catalog_has_file) {
-            return error(StorageErrorKind::kCorrupt, "orphan table PageFile is not in system catalog");
-        }
+            tables.begin(), tables.end(), [&](const StoredTable& table) {
+                return table.metadata.table_id == *table_id;
+            });
+        if (table_id.has_value() && !catalog_has_file)
+            return error(StorageErrorKind::kCorrupt,
+                         "orphan table PageFile is not in system catalog");
         iterator.increment(filesystem_error);
-        if (filesystem_error) {
+        if (filesystem_error)
             return error(StorageErrorKind::kIoError, "cannot inspect tables directory");
-        }
     }
     return std::nullopt;
 }
@@ -519,27 +724,46 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
             state.data_dir.clear();
             return {error(StorageErrorKind::kIoError, "cannot inspect storage metadata")};
         }
-        bool initializing = false;
+        bool initializing_system_catalog = false;
         if (metadata_exists) {
             std::ifstream input(meta);
             if (!input) {
                 reset_state();
                 return {error(StorageErrorKind::kIoError,"cannot open storage.meta")};
             }
-            const BootstrapReadResult bootstrap = read_bootstrap(input);
-            if (bootstrap != BootstrapReadResult::kOk) {
-                const bool io_failed = input.bad();
-                state.data_dir.clear();
-                return {error(io_failed ? StorageErrorKind::kIoError
-                                        : bootstrap == BootstrapReadResult::kLegacy
-                                            ? StorageErrorKind::kInvalidRequest
+            const MetadataMarker marker = inspect_metadata_marker(input);
+            if (marker == MetadataMarker::kBootstrap) {
+                state.catalog_mode = CatalogMode::kSystem;
+                if (!read_bootstrap(input)) {
+                    const bool io_failed = input.bad();
+                    reset_state();
+                    return {error(io_failed ? StorageErrorKind::kIoError
                                             : StorageErrorKind::kCorrupt,
-                              io_failed ? "cannot read storage.meta"
-                                        : bootstrap == BootstrapReadResult::kLegacy
-                                            ? "legacy storage metadata format is unsupported"
+                                  io_failed ? "cannot read storage.meta"
                                             : "invalid storage bootstrap metadata")};
+                }
+                state.tables = system_tables();
+            } else if (marker == MetadataMarker::kLegacyV1 ||
+                       marker == MetadataMarker::kLegacyV2) {
+                state.catalog_mode = CatalogMode::kLegacy;
+                bool unsupported_schema = false;
+                if (!read_metadata(
+                        input, state.tables, state.metadata_format, unsupported_schema)) {
+                    const bool io_failed = input.bad();
+                    reset_state();
+                    return {error(io_failed ? StorageErrorKind::kIoError
+                                            : unsupported_schema
+                                                ? StorageErrorKind::kInvalidRequest
+                                                : StorageErrorKind::kCorrupt,
+                                  io_failed ? "cannot read storage.meta"
+                                            : unsupported_schema
+                                                ? "legacy storage schema uses unsupported type"
+                                                : "invalid storage.meta")};
+                }
+            } else {
+                reset_state();
+                return {error(StorageErrorKind::kCorrupt, "invalid storage.meta")};
             }
-            state.tables = system_tables();
         } else {
             bool has_unrecognized_entries = false;
             std::filesystem::directory_iterator iterator(data_dir, filesystem_error);
@@ -568,7 +792,8 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
                 state.data_dir.clear();
                 return {error(StorageErrorKind::kCorrupt, "data directory has no storage.meta")};
             }
-            initializing = true;
+            state.catalog_mode = CatalogMode::kSystem;
+            initializing_system_catalog = true;
         }
         const auto tables_dir = data_dir / "tables";
         const bool tables_existed = std::filesystem::exists(tables_dir, filesystem_error);
@@ -603,28 +828,40 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
             std::filesystem::remove(metadata_path(), cleanup_error);
         };
 
-        if (initializing) {
-            auto created_tables = (*file_manager.value)->create_table_file(kSystemTablesId);
-            if (!created_tables.value.has_value()) {
-                const auto mapped = file_error(*created_tables.error, true);
-                reset_state();
-                return {mapped};
-            }
-            auto created_columns = (*file_manager.value)->create_table_file(kSystemColumnsId);
-            if (!created_columns.value.has_value()) {
-                const auto mapped = file_error(*created_columns.error, true);
-                rollback_initialization();
-                reset_state();
-                return {mapped};
-            }
-            if (const auto bootstrap_error = write_bootstrap(); bootstrap_error.has_value()) {
-                rollback_initialization();
-                reset_state();
-                return {*bootstrap_error};
+        if (state.catalog_mode == CatalogMode::kSystem) {
+            if (initializing_system_catalog) {
+                auto created_tables = (*file_manager.value)->create_table_file(kSystemTablesId);
+                if (!created_tables.value.has_value()) {
+                    const auto mapped = file_error(*created_tables.error, true);
+                    reset_state();
+                    return {mapped};
+                }
+                auto created_columns = (*file_manager.value)->create_table_file(kSystemColumnsId);
+                if (!created_columns.value.has_value()) {
+                    const auto mapped = file_error(*created_columns.error, true);
+                    rollback_initialization();
+                    reset_state();
+                    return {mapped};
+                }
+                if (const auto bootstrap_error = write_bootstrap(); bootstrap_error.has_value()) {
+                    rollback_initialization();
+                    reset_state();
+                    return {*bootstrap_error};
+                }
+            } else {
+                for (TableId table_id : {kSystemTablesId, kSystemColumnsId}) {
+                    auto opened_table = (*file_manager.value)->open_table_file(table_id);
+                    if (!opened_table.value.has_value()) {
+                        const auto mapped = file_error(*opened_table.error, true);
+                        reset_state();
+                        return {mapped};
+                    }
+                }
             }
         } else {
-            for (TableId table_id : {kSystemTablesId, kSystemColumnsId}) {
-                auto opened_table = (*file_manager.value)->open_table_file(table_id);
+            for (const StoredTable& table : state.tables) {
+                auto opened_table =
+                    (*file_manager.value)->open_table_file(table.metadata.table_id);
                 if (!opened_table.value.has_value()) {
                     const auto mapped = file_error(*opened_table.error, true);
                     reset_state();
@@ -636,43 +873,37 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
             buffer_config.read, buffer_config.write, buffer_config.policy);
         if (!pool.value) {
             const auto mapped = buffer_error(*pool.error);
-            if (initializing) {
-                rollback_initialization();
-            }
+            if (initializing_system_catalog) rollback_initialization();
             reset_state();
-            return {mapped};
+            return {mapped}; // Local FileManager closes validated files.
         }
-        // V2 recovery scans HeapTables before open_storage returns.  Keep the
-        // manager owned by Storage while that scan runs so its narrow test I/O
-        // adapter observes the same valid manager it will use after open.
         state.file_manager = std::move(*file_manager.value);
-        if (const auto catalog_error = load_user_catalog(
-                *state.file_manager, **pool.value, state.tables);
-            catalog_error.has_value()) {
-            pool.value.reset();
-            if (initializing) {
-                rollback_initialization();
-            }
-            reset_state();
-            return {*catalog_error};
-        }
-        for (std::size_t index = 2; index < state.tables.size(); ++index) {
-            auto opened_table = state.file_manager->open_table_file(state.tables[index].table_id);
-            if (!opened_table.value.has_value()) {
-                const auto mapped = file_error(*opened_table.error, true);
+        if (state.catalog_mode == CatalogMode::kSystem) {
+            if (const auto catalog_error = load_user_catalog(
+                    *state.file_manager, **pool.value, state.tables);
+                catalog_error.has_value()) {
                 pool.value.reset();
-                if (initializing) {
-                    rollback_initialization();
-                }
+                if (initializing_system_catalog) rollback_initialization();
                 reset_state();
-                return {mapped};
+                return {*catalog_error};
             }
-        }
-        if (const auto consistency_error = validate_catalog_table_files(state.tables);
-            consistency_error.has_value()) {
-            pool.value.reset();
-            reset_state();
-            return {*consistency_error};
+            for (std::size_t index = 2; index < state.tables.size(); ++index) {
+                auto opened_table = state.file_manager->open_table_file(
+                    state.tables[index].metadata.table_id);
+                if (!opened_table.value.has_value()) {
+                    const auto mapped = file_error(*opened_table.error, true);
+                    pool.value.reset();
+                    if (initializing_system_catalog) rollback_initialization();
+                    reset_state();
+                    return {mapped};
+                }
+            }
+            if (const auto consistency_error = validate_catalog_table_files(state.tables);
+                consistency_error.has_value()) {
+                pool.value.reset();
+                reset_state();
+                return {*consistency_error};
+            }
         }
         state.buffer_pool = std::move(*pool.value);
         state.cursors = std::make_unique<internal::CursorRegistry>(*state.file_manager,*state.buffer_pool);
@@ -715,7 +946,9 @@ CloseStorageResult close_storage(const CloseStorageRequest&) {
     try {
         auto close_error = state.file_manager->close_all();
         if (close_error) return {file_error(*close_error)};
-        if (auto write_error = write_bootstrap()) return {write_error};
+        const auto metadata_error = state.catalog_mode == CatalogMode::kSystem
+            ? write_bootstrap() : write_metadata();
+        if (metadata_error.has_value()) return {metadata_error};
         reset_state();
         return {};
     } catch (const std::filesystem::filesystem_error&) {
@@ -730,7 +963,10 @@ ListTablesResult list_tables(const ListTablesRequest&) {
         if (state.lifecycle != Lifecycle::kOpen) {
             return {{}, error(StorageErrorKind::kInvalidRequest, "storage is not open")};
         }
-        return {state.tables, std::nullopt};
+        std::vector<TableMeta> tables;
+        tables.reserve(state.tables.size());
+        for (const StoredTable& table : state.tables) tables.push_back(table.metadata);
+        return {std::move(tables), std::nullopt};
     } catch (...) {
         return {{}, unexpected_exception_error()};
     }
@@ -742,23 +978,43 @@ CreateTableResult create_table(const CreateTableRequest& request) {
             return {error(StorageErrorKind::kInvalidRequest, "storage is not open")};
         }
         if (!is_normalized_identifier(request.table_name) || request.columns.empty() ||
-            !has_valid_columns(request.columns)) {
+            !has_valid_columns(request.columns,internal::RowFormat::kV2)) {
             return {error(StorageErrorKind::kInvalidRequest, "invalid table definition")};
         }
-        if (is_reserved_system_identity(request.table_id, request.table_name)) {
+        if (state.catalog_mode == CatalogMode::kSystem &&
+            is_reserved_system_identity(request.table_id, request.table_name)) {
             return {error(StorageErrorKind::kInvalidRequest, "system table identity is reserved")};
-        }
-        if (request.columns.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-            return {error(StorageErrorKind::kInvalidRequest, "table has too many columns")};
         }
         if (find_table(request.table_id) != nullptr || has_table_name(request.table_name)) {
             return {error(StorageErrorKind::kInvalidRequest, "table already exists")};
         }
-        if (state.tables.size() == state.tables.max_size()) {
-            return {error(StorageErrorKind::kInvalidRequest, "too many tables")};
+
+        if (state.catalog_mode == CatalogMode::kLegacy) {
+            auto created_file = state.file_manager->create_table_file(request.table_id);
+            if (!created_file.value.has_value()) return {file_error(*created_file.error, true)};
+            const MetadataFormat previous_format = state.metadata_format;
+            state.metadata_format = MetadataFormat::kV2;
+            state.tables.push_back(StoredTable{
+                TableMeta{request.table_id, request.table_name, request.columns},
+                internal::RowFormat::kV2});
+            if (const auto write_error = write_metadata(); write_error.has_value()) {
+                state.tables.pop_back();
+                state.metadata_format = previous_format;
+                if (const auto rollback_error = state.file_manager->remove_table_file(request.table_id);
+                    rollback_error.has_value()) {
+                    return {error(StorageErrorKind::kIoError,
+                                  "metadata commit and table-file rollback both failed")};
+                }
+                return {write_error};
+            }
+            return {};
         }
-        // Reserve before the system-table commit marker is written.  Publishing
-        // the TableMeta after a successful marker write must not allocate or throw.
+
+        if (request.columns.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+            return {error(StorageErrorKind::kInvalidRequest, "table has too many columns")};
+        if (state.tables.size() == state.tables.max_size())
+            return {error(StorageErrorKind::kInvalidRequest, "too many tables")};
         state.tables.reserve(state.tables.size() + 1);
 
         auto created_file = state.file_manager->create_table_file(request.table_id);
@@ -766,77 +1022,89 @@ CreateTableResult create_table(const CreateTableRequest& request) {
             return {file_error(*created_file.error, true)};
         }
 
-        if (state.cursors->has_cursor(kSystemTablesId) || state.cursors->has_cursor(kSystemColumnsId)) {
+        if (state.cursors->has_cursor(kSystemTablesId) ||
+            state.cursors->has_cursor(kSystemColumnsId)) {
             if (const auto rollback_error = state.file_manager->remove_table_file(request.table_id);
                 rollback_error.has_value()) {
-                return {error(StorageErrorKind::kIoError, "system catalog cursor and table-file rollback failed")};
+                return {error(StorageErrorKind::kIoError,
+                              "system catalog cursor and table-file rollback failed")};
             }
-            return {error(StorageErrorKind::kInvalidRequest, "system catalog has an unclosed cursor")};
+            return {error(StorageErrorKind::kInvalidRequest,
+                          "system catalog has an unclosed cursor")};
         }
 
         internal::HeapTable columns_table(
-            system_columns_meta(), *state.file_manager, *state.buffer_pool);
+            system_columns_meta(), internal::RowFormat::kV2,
+            *state.file_manager, *state.buffer_pool);
         std::vector<std::vector<Value>> column_rows;
         column_rows.reserve(request.columns.size());
         for (std::size_t ordinal = 0; ordinal < request.columns.size(); ++ordinal) {
-            const auto type = type_name(request.columns[ordinal].type);
+            const auto type = v2_type_name(request.columns[ordinal].type);
             if (!type.has_value()) {
                 const auto rollback_error = state.file_manager->remove_table_file(request.table_id);
                 return {rollback_error.has_value()
-                    ? error(StorageErrorKind::kIoError, "unknown column type and table-file rollback failed")
+                    ? error(StorageErrorKind::kIoError,
+                            "unknown column type and table-file rollback failed")
                     : error(StorageErrorKind::kInvalidRequest, "unknown column type")};
             }
             column_rows.push_back({
                 Value{std::to_string(request.table_id)},
                 Value{static_cast<std::int32_t>(ordinal)},
                 Value{request.columns[ordinal].name},
-                Value{std::string{*type}}});
+                Value{std::string{*type}},
+                Value{request.columns[ordinal].nullable}});
         }
         const auto columns_written = columns_table.insert_batch(column_rows);
-        if (columns_written.error.has_value() || columns_written.record_ids.size() != column_rows.size()) {
+        if (columns_written.error.has_value() ||
+            columns_written.record_ids.size() != column_rows.size()) {
             const auto rollback_error = rollback_catalog_create(
-                columns_table, columns_written.record_ids, *state.file_manager, request.table_id);
-            if (rollback_error.has_value()) {
-                return {*rollback_error};
-            }
+                columns_table, columns_written.record_ids, *state.file_manager,
+                request.table_id);
+            if (rollback_error.has_value()) return {*rollback_error};
             return {columns_written.error.has_value()
                 ? data_error(*columns_written.error)
-                : error(StorageErrorKind::kCorrupt, "system catalog column write returned an incomplete result")};
+                : error(StorageErrorKind::kCorrupt,
+                        "system catalog column write returned an incomplete result")};
         }
 
         internal::HeapTable tables_table(
-            system_tables_meta(), *state.file_manager, *state.buffer_pool);
+            system_tables_meta(), internal::RowFormat::kV2,
+            *state.file_manager, *state.buffer_pool);
         const auto table_written = tables_table.insert_record({
             Value{std::to_string(request.table_id)},
             Value{request.table_name},
-            Value{static_cast<std::int32_t>(request.columns.size())}});
+            Value{static_cast<std::int32_t>(request.columns.size())},
+            Value{std::string{"V2"}}});
         if (table_written.error.has_value() || !table_written.value.has_value()) {
             const auto rollback_error = rollback_catalog_create(
-                columns_table, columns_written.record_ids, *state.file_manager, request.table_id);
-            if (rollback_error.has_value()) {
-                return {*rollback_error};
-            }
+                columns_table, columns_written.record_ids, *state.file_manager,
+                request.table_id);
+            if (rollback_error.has_value()) return {*rollback_error};
             return {table_written.error.has_value()
                 ? data_error(*table_written.error)
-                : error(StorageErrorKind::kCorrupt, "system catalog table write returned no record id")};
+                : error(StorageErrorKind::kCorrupt,
+                        "system catalog table write returned no record id")};
         }
 
         const auto marker = internal::RecordIdCodec::decode(*table_written.value);
-        if (marker.error.has_value()) {
-            return {error(StorageErrorKind::kCorrupt, "system catalog returned an invalid commit marker")};
-        }
+        if (marker.error.has_value())
+            return {error(StorageErrorKind::kCorrupt,
+                          "system catalog returned an invalid commit marker")};
         if (const auto marker_flush = state.buffer_pool->flush_page(
                 {kSystemTablesId, marker.value->page_id}); marker_flush.has_value()) {
             const auto marker_rollback = tables_table.delete_record(*table_written.value);
             const auto columns_rollback = rollback_catalog_create(
-                columns_table, columns_written.record_ids, *state.file_manager, request.table_id);
-            if (marker_rollback.has_value() || columns_rollback.has_value()) {
-                return {error(StorageErrorKind::kIoError, "system catalog commit rollback failed")};
-            }
+                columns_table, columns_written.record_ids, *state.file_manager,
+                request.table_id);
+            if (marker_rollback.has_value() || columns_rollback.has_value())
+                return {error(StorageErrorKind::kIoError,
+                              "system catalog commit rollback failed")};
             return {buffer_error(*marker_flush)};
         }
 
-        state.tables.push_back(TableMeta{request.table_id, request.table_name, request.columns});
+        state.tables.push_back(StoredTable{
+            TableMeta{request.table_id, request.table_name, request.columns},
+            internal::RowFormat::kV2});
         return {};
     } catch (const std::filesystem::filesystem_error&) {
         return {error(StorageErrorKind::kIoError,
@@ -853,7 +1121,7 @@ OpenTableResult open_table(const OpenTableRequest& request) {
         if (table == nullptr) {
             return {std::nullopt, error(StorageErrorKind::kTableNotFound, "table does not exist")};
         }
-        auto result=state.cursors->create(*table);
+        auto result=state.cursors->create(table->metadata,table->row_format);
         return {result.value,data_error(result.error)};
     } catch (...) {
         return {std::nullopt, unexpected_exception_error()};
@@ -883,16 +1151,16 @@ CloseCursorResult close_cursor(const CloseCursorRequest& request) {
 InsertResult insert(const InsertRequest& request) {
     try {
         if(auto e=require_data_open())return {{},std::move(e)};
-        if (is_system_catalog_table(request.table_id)) {
-            return {{}, error(StorageErrorKind::kInvalidRequest, "system catalog table is read-only")};
-        }
         const auto* table=find_table(request.table_id);
         if(!table)return {{},error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(state.catalog_mode == CatalogMode::kSystem && is_system_catalog_table(request.table_id))
+            return {{},error(StorageErrorKind::kInvalidRequest,"system table is read-only")};
         if(request.rows.empty())
             return {{}, error(StorageErrorKind::kInvalidRequest, "insert batch is empty")};
         if(state.cursors->has_cursor(request.table_id))
             return {{},error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
         auto result=heap.insert_batch(request.rows);
         return {std::move(result.record_ids),data_error(result.error)};
     } catch (...) {
@@ -903,15 +1171,15 @@ InsertResult insert(const InsertRequest& request) {
 DeleteResult delete_records(const DeleteRequest& request) {
     try {
         if(auto e=require_data_open())return {0,std::move(e)};
-        if (is_system_catalog_table(request.table_id)) {
-            return {0, error(StorageErrorKind::kInvalidRequest, "system catalog table is read-only")};
-        }
         const auto* table=find_table(request.table_id);
         if(!table)return {0,error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(state.catalog_mode == CatalogMode::kSystem && is_system_catalog_table(request.table_id))
+            return {0,error(StorageErrorKind::kInvalidRequest,"system table is read-only")};
         if(request.rids.empty())return {};
         if(state.cursors->has_cursor(request.table_id))
             return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
-        internal::HeapTable heap(*table,*state.file_manager,*state.buffer_pool);
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
         auto result=heap.delete_batch(request.rids);
         return {result.deleted_count,data_error(result.error)};
     } catch (...) {
@@ -919,11 +1187,30 @@ DeleteResult delete_records(const DeleteRequest& request) {
     }
 }
 
+UpdateResult update_rows(const UpdateRequest& request) {
+    try {
+        if(auto e=require_data_open())return {0,std::move(e)};
+        const auto* table=find_table(request.table_id);
+        if(!table)return {0,error(StorageErrorKind::kTableNotFound,"table does not exist")};
+        if(state.catalog_mode == CatalogMode::kSystem && is_system_catalog_table(request.table_id))
+            return {0,error(StorageErrorKind::kInvalidRequest,"system table is read-only")};
+        if(request.rows.empty())return {};
+        if(state.cursors->has_cursor(request.table_id))
+            return {0,error(StorageErrorKind::kInvalidRequest,"table has an unclosed cursor")};
+        internal::HeapTable heap(
+            table->metadata,table->row_format,*state.file_manager,*state.buffer_pool);
+        auto result=heap.update_batch(request.rows);
+        return {result.updated_count,data_error(result.error)};
+    } catch (...) {
+        return {0,unexpected_exception_error()};
+    }
+}
+
 internal::BufferPool* internal::StorageTestAccess::buffer_pool() noexcept {
     return state.lifecycle == Lifecycle::kOpen ? state.buffer_pool.get() : nullptr;
 }
 internal::FileManager* internal::StorageTestAccess::file_manager() noexcept {
-    return state.file_manager.get();
+    return state.lifecycle == Lifecycle::kClosed ? nullptr : state.file_manager.get();
 }
 bool internal::StorageTestAccess::configure(std::size_t capacity, ReplacementPolicy policy,
                                            BufferPool::WritePage write, BufferPool::ReadPage read) {

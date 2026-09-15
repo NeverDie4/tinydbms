@@ -42,8 +42,13 @@ HeapTableError translate(const RecordPageError& e) {
 }
 }
 
+HeapTable::HeapTable(
+    TableMeta meta, RowFormat format, FileManager& files, BufferPool& pool,
+    NewRecordPageIo io)
+    : meta_(std::move(meta)), format_(format), files_(files), pool_(pool), io_(std::move(io)) {}
+
 HeapTable::HeapTable(TableMeta meta, FileManager& files, BufferPool& pool, NewRecordPageIo io)
-    : meta_(std::move(meta)), files_(files), pool_(pool), io_(std::move(io)) {}
+    : HeapTable(std::move(meta), RowFormat::kV1, files, pool, std::move(io)) {}
 
 HeapTableResult<HeapScanPosition> HeapTable::begin_scan() const {
     auto lease=acquire_file(); if(lease.error) return {std::nullopt,std::move(lease.error)};
@@ -69,7 +74,8 @@ HeapTableResult<Record> HeapTable::next_record(HeapScanPosition& position) {
             if (guard.error) return {std::nullopt,translate(*guard.error)};
             if (candidate.next_slot == 0 && candidate.next_page + 1 < candidate.page_end_exclusive)
                 pool_.prefetch_page({meta_.table_id, static_cast<PageId>(candidate.next_page + 1)});
-            auto next=RecordPage::next_record(guard.value->page(),id,meta_,candidate.next_slot);
+            auto next=RecordPage::next_record(
+                guard.value->page(),id,format_,meta_,candidate.next_slot);
             if (next.error) return {std::nullopt,translate(*next.error)};
             if (next.record) {
                 candidate.next_slot=next.next_position;
@@ -92,7 +98,7 @@ HeapTableResult<PageFileLease> HeapTable::acquire_file() const {
 }
 
 HeapTableResult<RecordId> HeapTable::insert_record(const std::vector<Value>& values) {
-    auto size = RecordCodec::encoded_size(meta_,values);
+    auto size = RecordCodec::encoded_size(format_,meta_,values);
     if (size.error) return {std::nullopt,translate(*size.error)};
     if (*size.value == 0) return {std::nullopt,HeapTableError{HeapTableErrorKind::kInvalidArgument,"empty record schema"}};
     auto lease=acquire_file(); if(lease.error) return {std::nullopt,std::move(lease.error)};
@@ -105,7 +111,8 @@ HeapTableResult<RecordId> HeapTable::insert_record(const std::vector<Value>& val
         if (*state.value == PageAllocationState::kFree) continue;
         auto guard = pool_.fetch_page({meta_.table_id,id});
         if (guard.error) return {std::nullopt,translate(*guard.error)};
-        auto inserted = RecordPage::insert_record(guard.value->mutable_page(),id,meta_,values);
+        auto inserted = RecordPage::insert_record(
+            guard.value->mutable_page(),id,format_,meta_,values);
         if (inserted.error) {
             if (inserted.error->kind == RecordPageErrorKind::kNoSpace) continue;
             return {std::nullopt,translate(*inserted.error)};
@@ -141,7 +148,8 @@ HeapTableResult<RecordId> HeapTable::create_record_page(PageFile& file, const st
     // From here the valid empty page is retained on every failure, never freed.
     auto guard = pool_.fetch_page({meta_.table_id,id});
     if (guard.error) return {std::nullopt,translate(*guard.error)};
-    auto inserted = RecordPage::insert_record(guard.value->mutable_page(),id,meta_,values);
+    auto inserted = RecordPage::insert_record(
+        guard.value->mutable_page(),id,format_,meta_,values);
     if (inserted.error) return {std::nullopt,translate(*inserted.error)};
     guard.value->mark_dirty();
     return {inserted.value,std::nullopt};
@@ -172,7 +180,7 @@ std::optional<HeapTableError> HeapTable::delete_record(RecordId rid) {
     if(guard.error)return translate(*guard.error);
     // erase_record validates slots/layout, not encoded values. Validate the target
     // payload through the existing read path before deleting it; no parsing here.
-    auto record=RecordPage::get_record(guard.value->page(),id,meta_,rid);
+    auto record=RecordPage::get_record(guard.value->page(),id,format_,meta_,rid);
     if(record.error)return translate(*record.error);
     if(auto error=RecordPage::erase_record(guard.value->mutable_page(),id,rid))return translate(*error);
     guard.value->mark_dirty();
@@ -184,6 +192,65 @@ HeapDeleteResult HeapTable::delete_batch(const std::vector<RecordId>& record_ids
     for(auto rid:record_ids) {
         if(auto error=delete_record(rid)){result.error=std::move(error);break;}
         ++result.deleted_count;
+    }
+    return result;
+}
+
+std::optional<HeapTableError> HeapTable::validate_update(const UpdateRow& row) {
+    auto lease=acquire_file(); if(lease.error)return lease.error;
+    auto encoded=RecordCodec::encoded_size(format_,meta_,row.values);
+    if(encoded.error)return translate(*encoded.error);
+    auto parts=RecordIdCodec::decode(row.rid);
+    if(parts.error)return translate(*parts.error);
+    auto& file=**lease.value;
+    auto state=file.page_allocation_state(parts.value->page_id);
+    if(state.error)return translate(*state.error);
+    if(*state.value==PageAllocationState::kFree)
+        return HeapTableError{HeapTableErrorKind::kInvalidArgument,"RID refers to a free page"};
+    auto guard=pool_.fetch_page({meta_.table_id,parts.value->page_id});
+    if(guard.error)return translate(*guard.error);
+    auto current=RecordPage::get_record(
+        guard.value->page(),parts.value->page_id,format_,meta_,row.rid);
+    if(current.error)return translate(*current.error);
+    return std::nullopt;
+}
+
+std::optional<HeapTableError> HeapTable::update_record(const UpdateRow& row) {
+    auto lease=acquire_file(); if(lease.error)return lease.error;
+    auto parts=RecordIdCodec::decode(row.rid);
+    if(parts.error)return translate(*parts.error);
+    auto guard=pool_.fetch_page({meta_.table_id,parts.value->page_id});
+    if(guard.error)return translate(*guard.error);
+    if(auto error=RecordPage::replace_record(
+            guard.value->mutable_page(),parts.value->page_id,format_,meta_,row.rid,row.values)) {
+        if(error->kind==RecordPageErrorKind::kNoSpace) {
+            return HeapTableError{HeapTableErrorKind::kValueTooLarge,
+                                  "updated record does not fit its RecordPage"};
+        }
+        return translate(*error);
+    }
+    guard.value->mark_dirty();
+    return std::nullopt;
+}
+
+HeapUpdateResult HeapTable::update_batch(const std::vector<UpdateRow>& rows) {
+    auto lease=acquire_file(); if(lease.error)return {0,std::move(lease.error)};
+    for(std::size_t index=0;index<rows.size();++index) {
+        for(std::size_t previous=0;previous<index;++previous) {
+            if(rows[index].rid.value==rows[previous].rid.value) {
+                return {0,HeapTableError{HeapTableErrorKind::kInvalidArgument,
+                                        "update request contains a duplicate RID"}};
+            }
+        }
+        if(auto error=validate_update(rows[index]))return {0,std::move(error)};
+    }
+    HeapUpdateResult result;
+    for(const UpdateRow& row:rows) {
+        if(auto error=update_record(row)) {
+            result.error=std::move(error);
+            break;
+        }
+        ++result.updated_count;
     }
     return result;
 }

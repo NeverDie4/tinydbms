@@ -312,6 +312,78 @@ SlottedPageResult<std::vector<std::byte>> SlottedPage::get(
                                               slot.record_length));
 }
 
+std::optional<SlottedPageError> SlottedPage::replace(
+    RawPage& page, PageId page_id, SlotHandle handle,
+    std::span<const std::byte> payload) {
+    if (payload.empty() || payload.size() > kMaxRecordPayloadBytes) {
+        return make_error(SlottedPageErrorKind::kInvalidArgument,
+                          "record payload size is invalid");
+    }
+    if (auto validation_error = validate(page, page_id); validation_error.has_value()) {
+        return validation_error;
+    }
+    const std::uint16_t slot_count = get_u16(page, kSlotCountOffset);
+    if (handle.slot_id >= slot_count) {
+        return make_error(SlottedPageErrorKind::kInvalidArgument,
+                          "SlotId is outside the Slot Directory");
+    }
+
+    std::vector<SlotEntry> slots;
+    slots.reserve(slot_count);
+    std::size_t payload_bytes = payload.size();
+    for (std::size_t index = 0; index < slot_count; ++index) {
+        const SlotEntry slot = read_slot(page, static_cast<SlotId>(index));
+        slots.push_back(slot);
+        if (slot.flags == kSlotOccupied && index != handle.slot_id) {
+            payload_bytes += slot.record_length;
+        }
+    }
+    if (auto handle_error = invalid_handle(slots[handle.slot_id], handle);
+        handle_error.has_value()) {
+        return handle_error;
+    }
+    const std::size_t free_lower =
+        kSlottedPageHeaderSize + static_cast<std::size_t>(slot_count) * kSlotEntrySize;
+    if (payload_bytes > kPageSize - free_lower) {
+        return make_error(SlottedPageErrorKind::kNoSpace,
+                          "SlottedPage has insufficient space for replacement payload");
+    }
+
+    RawPage updated;
+    if (auto initialize_error = initialize(updated, page_id); initialize_error.has_value()) {
+        return initialize_error;
+    }
+    put_u16(updated, kSlotCountOffset, slot_count);
+    put_u16(updated, kLiveCountOffset, get_u16(page, kLiveCountOffset));
+    put_u16(updated, kFreeLowerOffset, static_cast<std::uint16_t>(free_lower));
+
+    std::uint16_t cursor = static_cast<std::uint16_t>(kPageSize);
+    for (std::size_t index = 0; index < slot_count; ++index) {
+        SlotEntry& slot = slots[index];
+        if (slot.flags == kSlotOccupied) {
+            const bool target = index == handle.slot_id;
+            const std::size_t length = target ? payload.size() : slot.record_length;
+            cursor = static_cast<std::uint16_t>(cursor - length);
+            if (target) {
+                std::copy(payload.begin(), payload.end(), updated.bytes.begin() + cursor);
+            } else {
+                std::copy(page.bytes.begin() + slot.record_offset,
+                          page.bytes.begin() + slot.record_offset + slot.record_length,
+                          updated.bytes.begin() + cursor);
+            }
+            slot.record_offset = cursor;
+            slot.record_length = static_cast<std::uint16_t>(length);
+        }
+        write_slot(updated, static_cast<SlotId>(index), slot);
+    }
+    put_u16(updated, kFreeUpperOffset, cursor);
+    if (auto validation_error = validate(updated, page_id); validation_error.has_value()) {
+        return validation_error;
+    }
+    page = std::move(updated);
+    return std::nullopt;
+}
+
 std::optional<SlottedPageError> SlottedPage::erase(
     RawPage& page, PageId page_id, SlotHandle handle) {
     if (auto validation_error = validate(page, page_id); validation_error.has_value()) {

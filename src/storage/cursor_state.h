@@ -25,6 +25,7 @@ public:
     CursorRegistry& operator=(const CursorRegistry&)=delete;
     CursorRegistry(CursorRegistry&&)=delete;
     CursorRegistry& operator=(CursorRegistry&&)=delete;
+    CursorResult<CursorId> create(const TableMeta& meta, RowFormat format);
     CursorResult<CursorId> create(const TableMeta& meta);
     CursorResult<CursorState> lookup(CursorId id) const; // Owned diagnostic snapshot.
     CursorResult<Record> next_record(CursorId id);
@@ -34,7 +35,7 @@ public:
 private:
     friend struct CursorRegistryTestAccess;
     static std::optional<CursorId>& next_id(); // Process lifetime, never reset by registry.
-    struct Entry { TableMeta meta; CursorState state; };
+    struct Entry { TableMeta meta; RowFormat format; CursorState state; };
     FileManager& files_;
     BufferPool& pool_;
     std::unordered_map<CursorId,Entry> entries_;

@@ -10,12 +10,15 @@ tinydbms::core::Error not_open_error() {
     return tinydbms::core::Error{
         tinydbms::core::ErrorKind::kExecute,
         std::nullopt,
-        "session is not open"};
+        std::nullopt,
+        "session is not open",
+        std::nullopt,
+        std::nullopt};
 }
 
 tinydbms::core::ExecuteScriptResult not_open_execute_result() {
     tinydbms::core::ExecuteScriptResult result;
-    result.outcomes.push_back(tinydbms::core::ExecuteResult{not_open_error()});
+    result.script_error = not_open_error();
     return result;
 }
 
@@ -28,7 +31,10 @@ tinydbms::core::OpenDatabaseResult CoreSession::open(
             std::optional<tinydbms::core::Error>{tinydbms::core::Error{
                 tinydbms::core::ErrorKind::kExecute,
                 std::nullopt,
-                "session is already open"}}};
+                std::nullopt,
+                "session is already open",
+                std::nullopt,
+                std::nullopt}}};
     }
 
     auto candidate = std::make_unique<tinydbms::core::Database>();

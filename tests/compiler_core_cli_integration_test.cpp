@@ -68,11 +68,12 @@ bool test_real_compiler_drives_core_and_cli() {
     const InvocationResult result = invoke_cli(
         "CREATE TABLE students (id INT, name VARCHAR, age INT);\n"
         "INSERT INTO students VALUES (1, 'alice', 20), (2, 'bob', 17);\n"
+        "UPDATE students SET name='ALICE',age=21 WHERE id=1;\n"
         "SELECT name, age FROM students WHERE age >= 18;\n");
 
     CHECK(result.exit_code == 0);
     CHECK(result.error.empty());
-    CHECK(result.output == "OK 0\nOK 2\nname\tage\nalice\t20\n");
+    CHECK(result.output == "OK 0\nOK 2\nOK 1\nname\tage\nALICE\t21\n");
 
     const State& state = tinydbms::testing::fake_storage::state();
     CHECK(!state.opened);
@@ -80,9 +81,10 @@ bool test_real_compiler_drives_core_and_cli() {
     CHECK(state.list_tables_calls == 1);
     CHECK(state.create_table_calls == 1);
     CHECK(state.insert_calls == 1);
-    CHECK(state.open_table_calls == 1);
-    CHECK(state.scan_next_calls == 3);
-    CHECK(state.close_cursor_calls == 1);
+    CHECK(state.update_calls == 1);
+    CHECK(state.open_table_calls == 2);
+    CHECK(state.scan_next_calls == 6);
+    CHECK(state.close_cursor_calls == 2);
     CHECK(state.close_calls == 1);
     CHECK(state.tables.size() == 1);
     CHECK(state.tables.front().table_id == tinydbms::TableId{0});
@@ -109,6 +111,12 @@ bool test_real_compiler_drives_core_and_cli() {
         "scan_next",
         "scan_next",
         "close_cursor",
+        "update_rows",
+        "open_table",
+        "scan_next",
+        "scan_next",
+        "scan_next",
+        "close_cursor",
         "close_storage"}));
     return true;
 }
@@ -123,7 +131,10 @@ bool test_real_compiler_error_stops_before_storage_execution() {
 
     CHECK(result.exit_code == 1);
     CHECK(result.output == "OK 0\n");
-    CHECK(result.error.rfind("ERROR compile 2:8 ", 0) == 0);
+    // 默认 stop 策略：首错后不再编译也不再执行，剩余语句记为 SKIPPED；
+    // 语句范围含前导换行，因此跳过范围从上一句分号之后开始。
+    CHECK(result.error.rfind("ERROR semantic 2:", 0) == 0);
+    CHECK(result.error.find("SKIPPED 2:30-3:33 policy") != std::string::npos);
 
     const State& state = tinydbms::testing::fake_storage::state();
     CHECK(state.create_table_calls == 1);
@@ -135,6 +146,38 @@ bool test_real_compiler_error_stops_before_storage_execution() {
         "list_tables",
         "create_table",
         "close_storage"}));
+    return true;
+}
+
+bool test_real_compiler_diagnostics_reach_cli() {
+    tinydbms::testing::fake_storage::reset();
+
+    const InvocationResult keyword = invoke_cli(
+        "CREATE TABLE students (id INT);\n"
+        "SELETC id FROM students;\n");
+    CHECK(keyword.exit_code == 1);
+    CHECK(keyword.output == "OK 0\n");
+    CHECK(keyword.error ==
+        "ERROR syntax 2:1-2:7 expected CREATE, INSERT, SELECT, DELETE, or UPDATE\n"
+        "SUGGESTION did you mean 'SELECT'?\n"
+        "FIX 2:1-2:7 SELECT\n");
+
+    tinydbms::testing::fake_storage::reset();
+    const InvocationResult table = invoke_cli(
+        "CREATE TABLE students (id INT);\n"
+        "SELECT * FROM studnets;\n");
+    CHECK(table.exit_code == 1);
+    CHECK(table.output == "OK 0\n");
+    CHECK(table.error ==
+        "ERROR semantic 2:15-2:23 table 'studnets' does not exist\n"
+        "SUGGESTION did you mean 'students'?\n");
+
+    tinydbms::testing::fake_storage::reset();
+    const InvocationResult semicolon = invoke_cli("SELECT id FROM nowhere");
+    CHECK(semicolon.exit_code == 1);
+    CHECK(semicolon.error ==
+        "ERROR syntax 1:23-1:23 expected ';' after SELECT statement\n"
+        "FIX 1:23-1:23 ;\n");
     return true;
 }
 
@@ -169,6 +212,76 @@ bool test_real_compiler_keeps_table_records_isolated() {
     return true;
 }
 
+bool test_order_by_reaches_cli_without_storage_sort_state() {
+    tinydbms::testing::fake_storage::reset();
+
+    const InvocationResult result = invoke_cli(
+        "CREATE TABLE students (id INT, name VARCHAR, age INT);\n"
+        "INSERT INTO students VALUES "
+        "(1,'bob',17),(2,'carol',20),(3,'alice',20);\n"
+        "SELECT name FROM students WHERE id >= 1 ORDER BY age DESC,name;\n");
+
+    CHECK(result.exit_code == 0);
+    CHECK(result.error.empty());
+    CHECK(result.output == "OK 0\nOK 3\nname\nalice\ncarol\nbob\n");
+    const State& state = tinydbms::testing::fake_storage::state();
+    CHECK(state.open_table_calls == 1);
+    CHECK(state.scan_next_calls == 4);
+    CHECK(state.close_cursor_calls == 1);
+    CHECK(state.insert_calls == 1);
+    CHECK(state.update_calls == 0);
+    CHECK(state.delete_calls == 0);
+    return true;
+}
+
+bool test_inner_join_reaches_cli_without_storage_join_state() {
+    tinydbms::testing::fake_storage::reset();
+
+    const InvocationResult result = invoke_cli(
+        "CREATE TABLE students (id INT, name VARCHAR);\n"
+        "CREATE TABLE roles (id INT, role VARCHAR, rank INT);\n"
+        "INSERT INTO students VALUES (1,'alice'),(2,'bob');\n"
+        "INSERT INTO roles VALUES (1,'reader',2),(1,'admin',1),(2,'writer',3);\n"
+        "SELECT students.name,roles.role FROM students JOIN roles "
+        "ON students.id=roles.id ORDER BY roles.rank DESC;\n");
+
+    CHECK(result.exit_code == 0);
+    CHECK(result.error.empty());
+    CHECK(result.output ==
+        "OK 0\nOK 0\nOK 2\nOK 3\nname\trole\nbob\twriter\nalice\treader\nalice\tadmin\n");
+    const State& state = tinydbms::testing::fake_storage::state();
+    CHECK(state.tables.size() == 2);
+    CHECK(state.open_table_calls == 2);
+    CHECK(state.scan_next_calls == 7);
+    CHECK(state.close_cursor_calls == 2);
+    CHECK(state.update_calls == 0);
+    CHECK(state.delete_calls == 0);
+    return true;
+}
+
+bool test_grouped_aggregate_reaches_cli_without_storage_aggregate_state() {
+    tinydbms::testing::fake_storage::reset();
+
+    const InvocationResult result = invoke_cli(
+        "CREATE TABLE sales (dept VARCHAR NULL, amount INT NULL);\n"
+        "INSERT INTO sales VALUES ('A',10),('A',20),('B',NULL),(NULL,30);\n"
+        "SELECT dept,COUNT(*),COUNT(amount),SUM(amount),AVG(amount) "
+        "FROM sales GROUP BY dept ORDER BY dept;\n");
+
+    CHECK(result.exit_code == 0);
+    CHECK(result.error.empty());
+    CHECK(result.output ==
+        "OK 0\nOK 4\ndept\tCOUNT(*)\tCOUNT(amount)\tSUM(amount)\tAVG(amount)\n"
+        "A\t2\t2\t30\t15.0\nB\t1\t0\tNULL\tNULL\nNULL\t1\t1\t30\t30.0\n");
+    const State& state = tinydbms::testing::fake_storage::state();
+    CHECK(state.open_table_calls == 1);
+    CHECK(state.scan_next_calls == 5);
+    CHECK(state.close_cursor_calls == 1);
+    CHECK(state.update_calls == 0);
+    CHECK(state.delete_calls == 0);
+    return true;
+}
+
 bool test_core_session_retries_failed_close() {
     tinydbms::testing::fake_storage::reset();
 
@@ -191,11 +304,10 @@ bool test_core_session_retries_failed_close() {
 
     const auto after_close =
         session.execute_script(tinydbms::core::ExecuteScriptRequest{"SELECT * FROM students;"});
-    CHECK(after_close.outcomes.size() == 1);
-    const auto* error = std::get_if<tinydbms::core::Error>(&after_close.outcomes.front().outcome);
-    CHECK(error != nullptr);
-    CHECK(error->kind == tinydbms::core::ErrorKind::kExecute);
-    CHECK(error->message == "session is not open");
+    CHECK(after_close.statements.empty());
+    CHECK(after_close.script_error.has_value());
+    CHECK(after_close.script_error->kind == tinydbms::core::ErrorKind::kExecute);
+    CHECK(after_close.script_error->message == "session is not open");
     return true;
 }
 
@@ -204,7 +316,11 @@ bool test_core_session_retries_failed_close() {
 int main() {
     return test_real_compiler_drives_core_and_cli() &&
             test_real_compiler_error_stops_before_storage_execution() &&
+            test_real_compiler_diagnostics_reach_cli() &&
             test_real_compiler_keeps_table_records_isolated() &&
+            test_order_by_reaches_cli_without_storage_sort_state() &&
+            test_inner_join_reaches_cli_without_storage_join_state() &&
+            test_grouped_aggregate_reaches_cli_without_storage_aggregate_state() &&
             test_core_session_retries_failed_close()
         ? 0
         : 1;

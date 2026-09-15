@@ -6,10 +6,15 @@
 
 namespace tinydbms::compiler::internal {
 
+struct PlannerResult {
+    std::variant<Plan, CompileError> outcome;
+};
+
 [[nodiscard]] Plan generate_plan(BoundCreateTable statement);
 [[nodiscard]] Plan generate_plan(BoundInsert statement);
-[[nodiscard]] Plan generate_plan(BoundSelect statement);
-[[nodiscard]] Plan generate_plan(BoundDelete statement);
+[[nodiscard]] PlannerResult generate_plan(BoundSelect statement, CatalogView catalog);
+[[nodiscard]] PlannerResult generate_plan(BoundDelete statement, CatalogView catalog);
+[[nodiscard]] PlannerResult generate_plan(BoundUpdate statement, CatalogView catalog);
 
 }  // namespace tinydbms::compiler::internal
 

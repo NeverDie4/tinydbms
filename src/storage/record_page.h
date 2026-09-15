@@ -23,11 +23,22 @@ struct NextRecordResult {
 };
 class RecordPage {
 public:
+    static NextRecordResult next_record(
+        const RawPage&, PageId, RowFormat, const TableMeta&, std::size_t start);
     static NextRecordResult next_record(const RawPage&, PageId, const TableMeta&, std::size_t start);
     static std::optional<RecordPageError> initialize(RawPage&, PageId);
+    static RecordPageResult<RecordId> insert_record(
+        RawPage&, PageId, RowFormat, const TableMeta&, const std::vector<Value>&);
     static RecordPageResult<RecordId> insert_record(RawPage&, PageId, const TableMeta&,
                                                      const std::vector<Value>&);
+    static RecordPageResult<Record> get_record(
+        const RawPage&, PageId, RowFormat, const TableMeta&, RecordId);
     static RecordPageResult<Record> get_record(const RawPage&, PageId, const TableMeta&, RecordId);
+    static std::optional<RecordPageError> replace_record(
+        RawPage&, PageId, RowFormat, const TableMeta&, RecordId,
+        const std::vector<Value>&);
+    static std::optional<RecordPageError> replace_record(
+        RawPage&, PageId, const TableMeta&, RecordId, const std::vector<Value>&);
     static std::optional<RecordPageError> erase_record(RawPage&, PageId, RecordId);
 };
 }

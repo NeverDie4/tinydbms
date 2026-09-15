@@ -16,9 +16,15 @@ enum class CliAction {
     kVersion
 };
 
+enum class ErrorPolicy {
+    kStop,
+    kAnalyze
+};
+
 struct ParsedArguments {
     CliAction action = CliAction::kRun;
     std::string data_dir;
+    ErrorPolicy error_policy = ErrorPolicy::kStop;
 };
 
 struct ArgumentError {

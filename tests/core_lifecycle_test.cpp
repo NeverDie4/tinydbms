@@ -13,12 +13,12 @@
 namespace {
 
 using tinydbms::ColumnMeta;
+using tinydbms::CompileStage;
 using tinydbms::TableId;
 using tinydbms::TableMeta;
 using tinydbms::Type;
 using tinydbms::compiler::CreateTablePlan;
 using tinydbms::compiler::CompileError;
-using tinydbms::compiler::CompileErrorKind;
 using tinydbms::compiler::CompileResult;
 using tinydbms::compiler::Plan;
 using tinydbms::core::CommandResult;
@@ -28,6 +28,7 @@ using tinydbms::core::ErrorKind;
 using tinydbms::core::ExecuteResult;
 using tinydbms::core::ExecuteScriptResult;
 using tinydbms::core::ExecuteScriptRequest;
+using tinydbms::core::StatementStatus;
 namespace fake = tinydbms::testing::fake_storage;
 namespace fake_compiler = tinydbms::testing::fake_compiler;
 
@@ -54,6 +55,30 @@ ExecuteScriptResult execute_one_plan(Database& database, Plan plan) {
     return database.execute_script(ExecuteScriptRequest{"synthetic statement;"});
 }
 
+const ExecuteResult& first_outcome(const ExecuteScriptResult& script) {
+    return *script.statements.front().outcome();
+}
+
+std::size_t statement_count(const ExecuteScriptResult& script) {
+    return script.statements.size();
+}
+
+tinydbms::core::StatementStatus status_of(
+    const ExecuteScriptResult& script,
+    std::size_t index = 0) {
+    return script.statements.at(index).status();
+}
+
+bool script_error_is(const ExecuteScriptResult& script, ErrorKind kind) {
+    return script.script_error.has_value() && script.script_error->kind == kind;
+}
+
+bool is_empty_insertion_point(const tinydbms::SourceRange& range) {
+    return range.begin.line == 1 && range.begin.column == 1 &&
+        range.end.line == 1 && range.end.column == 1 &&
+        range.begin.byte_offset == 0 && range.end.byte_offset == 0;
+}
+
 bool is_error(const ExecuteResult& result, ErrorKind expected) {
     const Error* error = std::get_if<Error>(&result.outcome);
     return error != nullptr && error->kind == expected;
@@ -76,8 +101,10 @@ bool test_open_recovers_catalog_and_allocates_next_id() {
     CHECK(fake::state().list_tables_calls == 1);
 
     const auto script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(script.outcomes.size() == 1);
-    const ExecuteResult& result = script.outcomes.front();
+    CHECK(!script.script_error.has_value());
+    CHECK(statement_count(script) == 1);
+    CHECK(status_of(script) == StatementStatus::kExecuted);
+    const ExecuteResult& result = first_outcome(script);
     const CommandResult* command = std::get_if<CommandResult>(&result.outcome);
     CHECK(command != nullptr);
     CHECK(!command->error.has_value());
@@ -99,15 +126,17 @@ bool test_create_failure_does_not_consume_id() {
         tinydbms::storage::StorageErrorKind::kIoError,
         "injected create failure"});
     const auto failed_script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(failed_script.outcomes.size() == 1);
-    const ExecuteResult& failed = failed_script.outcomes.front();
+    CHECK(statement_count(failed_script) == 1);
+    CHECK(status_of(failed_script) == StatementStatus::kExecutionError);
+    const ExecuteResult& failed = first_outcome(failed_script);
     CHECK(is_error(failed, ErrorKind::kStorage));
     CHECK(fake::state().last_create_request->table_id == 0);
 
     fake::clear_create_table_error();
     const auto retried_script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(retried_script.outcomes.size() == 1);
-    const ExecuteResult& retried = retried_script.outcomes.front();
+    CHECK(statement_count(retried_script) == 1);
+    CHECK(status_of(retried_script) == StatementStatus::kExecuted);
+    const ExecuteResult& retried = first_outcome(retried_script);
     const CommandResult* command = std::get_if<CommandResult>(&retried.outcome);
     CHECK(command != nullptr);
     CHECK(!command->error.has_value());
@@ -127,8 +156,9 @@ bool test_table_id_exhaustion_does_not_call_storage() {
     CHECK(open_database(database));
     const std::size_t create_calls = fake::state().create_table_calls;
     const auto script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(script.outcomes.size() == 1);
-    const ExecuteResult& result = script.outcomes.front();
+    CHECK(statement_count(script) == 1);
+    CHECK(status_of(script) == StatementStatus::kExecutionError);
+    const ExecuteResult& result = first_outcome(script);
     CHECK(is_error(result, ErrorKind::kExecute));
     CHECK(fake::state().create_table_calls == create_calls);
     CHECK(!database.close().error.has_value());
@@ -262,8 +292,8 @@ bool test_moved_from_is_safe_and_returns_error() {
     CHECK(moved_from_close.error->kind == ErrorKind::kExecute);
 
     const auto script = source.execute_script(ExecuteScriptRequest{""});
-    CHECK(script.outcomes.size() == 1);
-    CHECK(is_error(script.outcomes.front(), ErrorKind::kExecute));
+    CHECK(statement_count(script) == 0);
+    CHECK(script_error_is(script, ErrorKind::kExecute));
 
     CHECK(!destination.close().error.has_value());
     return true;
@@ -330,9 +360,8 @@ bool test_invalid_open_and_unopened_plan_do_not_touch_storage() {
     CHECK(fake::state().open_calls == 0);
 
     const auto unopened_script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(unopened_script.outcomes.size() == 1);
-    const ExecuteResult& unopened_plan = unopened_script.outcomes.front();
-    CHECK(is_error(unopened_plan, ErrorKind::kExecute));
+    CHECK(statement_count(unopened_script) == 0);
+    CHECK(script_error_is(unopened_script, ErrorKind::kExecute));
     CHECK(fake::state().create_table_calls == 0);
     return true;
 }
@@ -361,15 +390,19 @@ bool test_unexpected_storage_exceptions_are_contained() {
 
     fake::set_throw_on_create_table(true);
     const auto create_exception_script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(create_exception_script.outcomes.size() == 1);
-    const ExecuteResult& create_exception = create_exception_script.outcomes.front();
-    CHECK(is_error(create_exception, ErrorKind::kInternal));
+    CHECK(statement_count(create_exception_script) == 1);
+    CHECK(status_of(create_exception_script) == StatementStatus::kExecutionIndeterminate);
+    CHECK(script_error_is(create_exception_script, ErrorKind::kInternal));
+    CHECK(create_exception_script.script_error->source.has_value());
+    CHECK(create_exception_script.script_error->source->begin.line == 1);
+    CHECK(create_exception_script.script_error->source->begin.column == 1);
     fake::set_throw_on_create_table(false);
     CHECK(!database.close().error.has_value());
     CHECK(open_database(database));
     const auto retry_script = execute_one_plan(database, create_table_plan("events"));
-    CHECK(retry_script.outcomes.size() == 1);
-    const ExecuteResult& retry = retry_script.outcomes.front();
+    CHECK(statement_count(retry_script) == 1);
+    CHECK(status_of(retry_script) == StatementStatus::kExecuted);
+    const ExecuteResult& retry = first_outcome(retry_script);
     CHECK(std::holds_alternative<CommandResult>(retry.outcome));
 
     fake::set_throw_on_close(true);
@@ -412,6 +445,43 @@ bool test_storage_cleanup_is_retryable_after_pre_close_exception() {
 
     CHECK(!database.close().error.has_value());
     CHECK(!fake::state().opened);
+    CHECK(open_database(database));
+    CHECK(!database.close().error.has_value());
+    return true;
+}
+
+bool test_cleanup_pending_execute_script_is_rejected_without_storage() {
+    fake::reset();
+    Database database;
+    CHECK(open_database(database));
+
+    fake::set_throw_before_close(true);
+    const auto close_exception = database.close();
+    CHECK(close_exception.error.has_value());
+    CHECK(close_exception.error->kind == ErrorKind::kInternal);
+
+    // cleanup-pending：execute_script 沿用未打开语义返回 kExecute script_error，
+    // 不调用 compiler/storage，也不破坏后续 close 重试。
+    fake_compiler::reset();
+    std::deque<CompileResult> compile_results;
+    compile_results.emplace_back(create_table_plan("events"));
+    fake_compiler::set_compile_results(std::move(compile_results));
+    const std::size_t split_calls = fake_compiler::state().split_calls;
+    const std::size_t compile_calls = fake_compiler::state().compile_calls;
+    const std::size_t create_table_calls = fake::state().create_table_calls;
+
+    const auto script = database.execute_script(
+        ExecuteScriptRequest{"create table events (id int);"});
+    CHECK(script.statements.empty());
+    CHECK(script_error_is(script, ErrorKind::kExecute));
+    CHECK(script.script_error.has_value());
+    CHECK(!script.script_error->source.has_value());
+    CHECK(fake_compiler::state().split_calls == split_calls);
+    CHECK(fake_compiler::state().compile_calls == compile_calls);
+    CHECK(fake::state().create_table_calls == create_table_calls);
+
+    fake::set_throw_before_close(false);
+    CHECK(!database.close().error.has_value());
     CHECK(open_database(database));
     CHECK(!database.close().error.has_value());
     return true;
@@ -491,8 +561,12 @@ bool test_split_error_does_not_touch_storage() {
 
     const auto oversized = database.execute_script(
         ExecuteScriptRequest{std::string(tinydbms::kMaxSqlBytes + 1, ' ')});
-    CHECK(oversized.outcomes.size() == 1);
-    CHECK(is_error(oversized.outcomes.front(), ErrorKind::kCompile));
+    CHECK(statement_count(oversized) == 0);
+    CHECK(script_error_is(oversized, ErrorKind::kCompile));
+    CHECK(oversized.script_error->compile_stage.has_value());
+    CHECK(*oversized.script_error->compile_stage == CompileStage::kLex);
+    CHECK(oversized.script_error->source.has_value());
+    CHECK(is_empty_insertion_point(*oversized.script_error->source));
     CHECK(fake_compiler::state().split_calls == 1);
     CHECK(fake_compiler::state().compile_calls == 0);
     CHECK(fake::state().close_calls == 0);
@@ -509,23 +583,34 @@ bool test_execute_script_compiles_in_order_and_stops_on_error() {
     Database database;
     CHECK(open_database(database));
 
+    const std::string text = "create events;\ninvalid statement;";
+    // 分段原文含前导换行，compile() 的相对偏移必须以分段为基准。
+    const std::string second_segment = fake_compiler::statement_segment(text, 1);
     std::deque<CompileResult> compile_results;
     compile_results.emplace_back(create_table_plan("events"));
-    compile_results.emplace_back(CompileError{
-        CompileErrorKind::kSyntax,
-        tinydbms::SourceLocation{1, 3},
-        "injected syntax error"});
+    compile_results.emplace_back(fake_compiler::make_compile_error(
+        CompileStage::kSyntax,
+        second_segment,
+        1,
+        8,
+        "injected syntax error"));
     fake_compiler::set_compile_results(std::move(compile_results));
 
-    const auto script = database.execute_script(
-        ExecuteScriptRequest{"create events;\ninvalid statement;"});
-    CHECK(script.outcomes.size() == 2);
-    CHECK(std::holds_alternative<CommandResult>(script.outcomes[0].outcome));
-    CHECK(is_error(script.outcomes[1], ErrorKind::kCompile));
-    const Error& compile_error = std::get<Error>(script.outcomes[1].outcome);
-    CHECK(compile_error.location.has_value());
-    CHECK(compile_error.location->line == 2);
-    CHECK(compile_error.location->column == 3);
+    const auto script = database.execute_script(ExecuteScriptRequest{text});
+    CHECK(statement_count(script) == 2);
+    CHECK(status_of(script, 0) == StatementStatus::kExecuted);
+    CHECK(std::holds_alternative<CommandResult>(first_outcome(script).outcome));
+    CHECK(status_of(script, 1) == StatementStatus::kCompileError);
+    CHECK(!script.script_error.has_value());
+    const Error& compile_error = std::get<Error>(script.statements[1].outcome()->outcome);
+    CHECK(compile_error.kind == ErrorKind::kCompile);
+    CHECK(compile_error.compile_stage.has_value());
+    CHECK(*compile_error.compile_stage == CompileStage::kSyntax);
+    CHECK(compile_error.source.has_value());
+    CHECK(compile_error.source->begin.line == 2);
+    CHECK(compile_error.source->begin.column == 1);
+    CHECK(compile_error.source->end.line == 2);
+    CHECK(compile_error.source->end.column == 8);
     CHECK(fake_compiler::state().split_calls == 1);
     CHECK(fake_compiler::state().compile_calls == 2);
     CHECK(fake_compiler::state().catalog_sizes.size() == 2);
@@ -555,6 +640,7 @@ int main() {
         test_invalid_open_and_unopened_plan_do_not_touch_storage() &&
         test_unexpected_storage_exceptions_are_contained() &&
         test_storage_cleanup_is_retryable_after_pre_close_exception() &&
+        test_cleanup_pending_execute_script_is_rejected_without_storage() &&
         test_destructor_releases_guard_after_cleanup_retry_failure() &&
         test_open_cleanup_is_retryable_after_pre_close_exception() &&
         test_list_tables_exception_cleans_up() &&

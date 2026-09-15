@@ -15,18 +15,40 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "TINYDBMS_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "gui",
+      "displayName": "Debug (Ninja, Qt6 GUI)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/gui-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "TINYDBMS_BUILD_TESTS": "ON",
+        "TINYDBMS_BUILD_GUI": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "debug",
       "configurePreset": "debug"
+    },
+    {
+      "name": "gui",
+      "configurePreset": "gui"
     }
   ],
   "testPresets": [
     {
       "name": "debug",
       "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "gui",
+      "configurePreset": "gui",
       "output": {
         "outputOnFailure": true
       }

@@ -20,12 +20,16 @@ struct Database::Impl {
     bool open = false;
     bool forced_close_pending = false;
     bool cleanup_retry_needed = false;
+    // 当前 Plan 是否已经调用过 Storage；只用于把执行器 kInternal 区分为
+    // kExecutionIndeterminate 或 kSkippedExecution，不进入公共头文件。
+    bool current_plan_storage_called = false;
 
     void clear() noexcept;
     void abort_after_storage_exception() noexcept;
     ExecuteResult execute_create_table(const compiler::CreateTablePlan& plan);
     ExecuteResult execute_insert(const compiler::InsertPlan& plan);
     ExecuteResult execute_delete(const compiler::DeletePlan& plan);
+    ExecuteResult execute_update(const compiler::UpdatePlan& plan);
     ExecuteResult execute_query(const compiler::QueryPlan& plan);
     ExecuteResult execute_plan_impl(compiler::Plan plan);
 };
@@ -33,7 +37,38 @@ struct Database::Impl {
 namespace internal {
 
 inline Error make_error(ErrorKind kind, std::string message) {
-    return Error{kind, std::nullopt, std::move(message)};
+    return Error{
+        kind,
+        std::nullopt,
+        std::nullopt,
+        std::move(message),
+        std::nullopt,
+        std::nullopt};
+}
+
+inline Error make_error(ErrorKind kind, SourceRange source, std::string message) {
+    return Error{
+        kind,
+        std::nullopt,
+        std::optional<SourceRange>{source},
+        std::move(message),
+        std::nullopt,
+        std::nullopt};
+}
+
+inline Error make_compile_error(
+    CompileStage stage,
+    SourceRange source,
+    std::string message,
+    std::optional<std::string> suggestion = std::nullopt,
+    std::optional<FixIt> fix_it = std::nullopt) {
+    return Error{
+        ErrorKind::kCompile,
+        stage,
+        std::optional<SourceRange>{source},
+        std::move(message),
+        std::move(suggestion),
+        std::move(fix_it)};
 }
 
 inline ExecuteResult make_execute_error(ErrorKind kind, std::string message) {
@@ -56,7 +91,8 @@ inline bool has_duplicate_table(
 }
 
 inline bool is_supported_type(Type type) noexcept {
-    return type == Type::kInt || type == Type::kVarchar;
+    return type == Type::kInt || type == Type::kBigInt || type == Type::kDouble ||
+        type == Type::kBoolean || type == Type::kVarchar;
 }
 
 inline bool is_valid_identifier(std::string_view value) noexcept {

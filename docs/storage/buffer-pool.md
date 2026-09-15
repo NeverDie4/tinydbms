@@ -25,7 +25,7 @@
 
 所有 guard 必须先于 BufferPool 销毁，FileManager 必须比池活得久。违反 guard 生命周期或内部 unpin 不变量会 terminate，而非静默产生悬空引用。析构不执行 I/O，不能替代显式成功的 close；销毁尚未成功写回的池会丢失其内存修改，失败后应保留池和文件处理错误。
 
-池存续期间不得绕过它改写、free、关闭再重开已缓存页面/文件。3C 可先成功 release_table，再由调用者关闭对应文件；release_table 本身不关闭文件。不存在长期 PageFile*；fetch/write 仅临时 find_table_file。该检查不是跨 close/reopen identity generation 防护。
+池存续期间不得绕过它改写、free、关闭再重开已缓存页面/文件。3C 可先成功 release_table，再由调用者关闭对应文件；release_table 本身不关闭文件。所有生产 I/O 均短暂取得 `FileManager::acquire_file()` 返回的 `PageFileLease`；不保存长期 PageFile*。该检查不是跨 close/reopen identity generation 防护。
 
 ## HIT/MISS 与提交
 
@@ -34,13 +34,16 @@
 - HIT：计 hit，检查 pin 溢出，增加 pin，返回 guard，不调用 read。
 - MISS：计 miss，优先寻找 empty Frame；没有 empty 才按所选策略选择最老的 unpinned Frame，全部 pinned 则 kNoVictim 且不执行 I/O。
 - 有 empty：PageFile read 到临时 RawPage，成功后提交映射、Frame 与 FIFO，pin=1，不计 eviction。
-- 单线程且禁止适配器重入，中间提交状态不可被外部观察。标准内存分配异常可传播，但不留下半提交 Frame。
+- metadata mutex 保护 Frame、PageTable、loading table 与统计的提交；同一 PageKey 的 LOADING 由 `LoadCompletion` 去重，等待者复用同一结果。读写与 lease 均在锁外执行，完成后在锁内验证 ticket/映射再发布，取消 speculative replacement 时保留原 frame。
+- 适配器不得重入池；标准内存分配异常可传播，但不留下半提交 Frame。启用预取时另有一个内部 worker；默认关闭，提交永不等待队列或 I/O。
 
 ## 错误与统计
 
 private errors：kInvalidArgument、kNoVictim、kIo、kCorrupt。PageFile 三类错误按含义直接映射，不新增公共 StorageErrorKind。invalid/free/out-of-range page 不缓存。
 
 fetch_count = hit_count + miss_count；基础检查失败不计数，read failure/no empty 仍计 miss。hit_rate 在零 fetch 时为 0，否则使用浮点除法。pin/count 都在递增前检查溢出，unpin 在递减前检查零值。
+
+`PageFileStats` 在 `read_raw_page_locked`/`write_raw_page_locked` 统计物理 stream read/write 的尝试、成功、失败、字节数与耗时；它不是 BufferPool miss 计数。另记录 flush 次数/耗时以及成功逻辑 read/write 的顺序局部性距离。
 
 ## 测试与 I/O 适配口
 

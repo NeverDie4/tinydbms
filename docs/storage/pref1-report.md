@@ -22,7 +22,7 @@
 
 ## B. Worker Architecture
 
-BufferPool 拥有一个 `std::thread`，状态为 RUNNING → STOPPING → STOPPED。默认 construction 参数 `prefetch_enabled=false`；benchmark/test 通过内部 `BufferPool::create(..., true)` 启用。没有新增 FrameState，仍为 FREE/LOADING/READY；`LoadCompletion::origin` 区分 Demand/Prefetch。
+BufferPool 拥有一个 `std::thread`，状态为 RUNNING → STOPPING → STOPPED。默认 construction 参数 `prefetch_enabled=false`；benchmark/test 通过内部 `BufferPool::create(..., true)` 启用。实验 benchmark 还必须显式设置 CMake `-DTINYDBMS_BUILD_STORAGE_BENCHMARKS=ON`，默认构建不生成它们。没有新增 FrameState，仍为 FREE/LOADING/READY；`LoadCompletion::origin` 区分 Demand/Prefetch。
 
 沿现有 HeapTable → RecordPage → BufferPool → PageFile 调用链实现。架构参考仓库 `docs/miniob-study/storage-engine.md` 的 record/page/buffer 分层；采用 tinydbms 现有 CONC 协议，不引入 MiniOB 的日志、事务或调度器。磁盘格式没有变化。
 

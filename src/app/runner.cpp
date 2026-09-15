@@ -40,7 +40,10 @@ void report_exception_noexcept(
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
-            std::move(message)});
+            std::nullopt,
+            std::move(message),
+            std::nullopt,
+            std::nullopt});
 }
 
 void report_unknown_exception_noexcept(std::ostream& output) noexcept {
@@ -49,7 +52,10 @@ void report_unknown_exception_noexcept(std::ostream& output) noexcept {
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
-            "application raised an unknown exception"});
+            std::nullopt,
+            "application raised an unknown exception",
+            std::nullopt,
+            std::nullopt});
 }
 
 bool close_once(Session& session, bool& opened, std::ostream& error_output) noexcept {
@@ -94,28 +100,53 @@ void report_input_error(CliEnvironment& environment, std::string_view message) {
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
-            std::string{"input error: "} + std::string{message}});
+            std::nullopt,
+            std::string{"input error: "} + std::string{message},
+            std::nullopt,
+            std::nullopt});
 }
 
 RenderResult render_script_result(
     const tinydbms::core::ExecuteScriptResult& result,
     CliEnvironment& environment) {
     RenderResult aggregate;
-    for (const auto& outcome : result.outcomes) {
-        const RenderResult current =
-            render_execute_result(outcome, environment.output, environment.error);
+    bool script_error_written = false;
+
+    for (const auto& statement : result.statements) {
+        if (!script_error_written && result.script_error.has_value() &&
+            statement.status() == tinydbms::core::StatementStatus::kSkippedExecution) {
+            if (!write_error(*result.script_error, environment.error)) {
+                aggregate.output_ok = false;
+                return aggregate;
+            }
+            script_error_written = true;
+        }
+
+        const RenderResult current = render_statement_result(
+            statement,
+            result.script_error.has_value(),
+            environment.output,
+            environment.error);
         aggregate.output_ok = aggregate.output_ok && current.output_ok;
         aggregate.had_error = aggregate.had_error || current.had_error;
         if (!current.output_ok) {
             break;
         }
     }
+
+    if (aggregate.output_ok && !script_error_written && result.script_error.has_value()) {
+        if (!write_error(*result.script_error, environment.error)) {
+            aggregate.output_ok = false;
+        }
+    }
+    aggregate.had_error = aggregate.had_error || result.script_error.has_value();
     return aggregate;
 }
 
 bool run_batch(
     Session& session,
     CliEnvironment& environment,
+    tinydbms::core::ScriptErrorPolicy policy,
     bool& failed) {
     std::string text;
     std::string input_error;
@@ -125,8 +156,10 @@ bool run_batch(
         return false;
     }
 
-    const tinydbms::core::ExecuteScriptResult result =
-        session.execute_script(tinydbms::core::ExecuteScriptRequest{std::move(text)});
+    tinydbms::core::ExecuteScriptRequest request;
+    request.text = std::move(text);
+    request.error_policy = policy;
+    const tinydbms::core::ExecuteScriptResult result = session.execute_script(request);
     const RenderResult rendered = render_script_result(result, environment);
     failed = failed || rendered.had_error || !rendered.output_ok;
     return rendered.output_ok;
@@ -135,6 +168,7 @@ bool run_batch(
 bool run_repl(
     Session& session,
     CliEnvironment& environment,
+    tinydbms::core::ScriptErrorPolicy policy,
     bool& failed) {
     for (;;) {
         environment.error << "tinydbms> " << std::flush;
@@ -155,15 +189,21 @@ bool run_repl(
             return true;
         }
 
+        tinydbms::core::ExecuteScriptRequest request;
+        request.text = std::move(line);
+        request.error_policy = policy;
         const tinydbms::core::ExecuteScriptResult result =
-            session.execute_script(tinydbms::core::ExecuteScriptRequest{std::move(line)});
-        for (const auto& outcome : result.outcomes) {
-            const RenderResult rendered =
-                render_execute_result(outcome, environment.output, environment.error);
-            failed = failed || rendered.had_error || !rendered.output_ok;
-            if (!rendered.output_ok) {
-                return false;
-            }
+            session.execute_script(request);
+
+        const RenderResult rendered = render_script_result(result, environment);
+        failed = failed || rendered.had_error || !rendered.output_ok;
+        if (!rendered.output_ok) {
+            return false;
+        }
+        if (result.script_error.has_value()) {
+            // 任何 script_error 都按 REPL 致命处理：停止读取后续输入，
+            // 由 run_cli 统一 best-effort close 并返回退出码 1。
+            return true;
         }
     }
 }
@@ -200,11 +240,16 @@ int run_cli(
         }
         opened = true;
 
+        const tinydbms::core::ScriptErrorPolicy policy =
+            arguments.error_policy == ErrorPolicy::kAnalyze
+            ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
+            : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
+
         bool failed = false;
         if (environment.interactive) {
-            (void)run_repl(session, environment, failed);
+            (void)run_repl(session, environment, policy, failed);
         } else {
-            (void)run_batch(session, environment, failed);
+            (void)run_batch(session, environment, policy, failed);
         }
 
         const bool close_ok = close_once(session, opened, environment.error);

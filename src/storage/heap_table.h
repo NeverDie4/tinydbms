@@ -19,6 +19,10 @@ struct HeapDeleteResult {
     std::uint64_t deleted_count = 0;
     std::optional<HeapTableError> error;
 };
+struct HeapUpdateResult {
+    std::uint64_t updated_count = 0;
+    std::optional<HeapTableError> error;
+};
 
 struct HeapScanPosition {
     std::uint64_t next_page = 1;
@@ -36,14 +40,19 @@ struct NewRecordPageIo {
 };
 
 // Resolved immutable schema copy. Owners outlive this object and all its calls.
-// Single-threaded; callers must not free/reopen files behind the BufferPool.
+// Each operation owns a PageFileLease, so FileManager close cannot invalidate
+// the file while HeapTable is using it.
 class HeapTable {
 public:
+    HeapTable(
+        TableMeta meta, RowFormat format, FileManager& files, BufferPool& pool,
+        NewRecordPageIo io = {});
     HeapTable(TableMeta meta, FileManager& files, BufferPool& pool, NewRecordPageIo io = {});
     HeapTableResult<RecordId> insert_record(const std::vector<Value>& values);
     HeapTableBatchResult insert_batch(const std::vector<std::vector<Value>>& rows);
     std::optional<HeapTableError> delete_record(RecordId rid);
     HeapDeleteResult delete_batch(const std::vector<RecordId>& record_ids);
+    HeapUpdateResult update_batch(const std::vector<UpdateRow>& rows);
     HeapTableResult<HeapScanPosition> begin_scan() const;
     // Owned record / empty EOF / error. Position commits only on success or EOF.
     HeapTableResult<Record> next_record(HeapScanPosition& position);
@@ -52,7 +61,10 @@ private:
     friend struct HeapTableTestAccess; // Exercise the post-prevalidation failure boundary.
     HeapTableResult<RecordId> create_record_page(PageFile& file, const std::vector<Value>& values);
     HeapTableResult<PageFileLease> acquire_file() const;
+    std::optional<HeapTableError> validate_update(const UpdateRow& row);
+    std::optional<HeapTableError> update_record(const UpdateRow& row);
     TableMeta meta_;
+    RowFormat format_;
     FileManager& files_;
     BufferPool& pool_;
     NewRecordPageIo io_;

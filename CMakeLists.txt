@@ -12,10 +12,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TINYDBMS_BUILD_TESTS "Build tinydbms tests" ON)
 option(
+    TINYDBMS_BUILD_STORAGE_BENCHMARKS
+    "Build Storage-only I/O and prefetch experiment benchmarks"
+    OFF
+)
+option(
     TINYDBMS_ENABLE_REAL_MODULES
     "Connect the product CLI to the delivered compiler and storage implementations"
     OFF
 )
+option(TINYDBMS_BUILD_GUI "Build the optional Qt6 GUI frontend" OFF)
 
 add_compile_options(
     $<$<COMPILE_LANGUAGE:CXX>:-Wall>
@@ -29,6 +35,10 @@ add_subdirectory(src/compiler)
 add_subdirectory(src/storage)
 add_subdirectory(src/core)
 add_subdirectory(src/app)
+
+if(TINYDBMS_BUILD_GUI)
+    add_subdirectory(src/gui)
+endif()
 
 if(TINYDBMS_BUILD_TESTS)
     enable_testing()

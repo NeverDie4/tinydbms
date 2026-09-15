@@ -1,7 +1,0 @@
-workload,strategy,pages,capacity,seed,repetition,buffer_pool_initial_state,os_page_cache_state,device_cache_state,dirty_pages,evictions,ordering_time_us,flush_io_time_us,total_scheduled_flush_time_us,physical_writes,physical_write_successes,physical_write_failures,bytes_written,flush_count,write_logical_page_distance,sequential_write_count,verification
-dirty-batch-flush,current,32,32,6072051097480939855,1,empty,uncontrolled,uncontrolled,32,0,1,82,84,32,32,0,131072,32,330,6,pass
-dirty-batch-flush,current,32,32,6072051097480939855,2,empty,uncontrolled,uncontrolled,32,0,1,60,61,32,32,0,131072,32,330,6,pass
-dirty-batch-flush,current,32,32,6072051097480939855,3,empty,uncontrolled,uncontrolled,32,0,1,60,62,32,32,0,131072,32,330,6,pass
-dirty-batch-flush,ascending-page-id,32,32,6072051097480939855,1,empty,uncontrolled,uncontrolled,32,0,5,61,66,32,32,0,131072,32,62,31,pass
-dirty-batch-flush,ascending-page-id,32,32,6072051097480939855,2,empty,uncontrolled,uncontrolled,32,0,3,60,63,32,32,0,131072,32,62,31,pass
-dirty-batch-flush,ascending-page-id,32,32,6072051097480939855,3,empty,uncontrolled,uncontrolled,32,0,3,60,64,32,32,0,131072,32,62,31,pass

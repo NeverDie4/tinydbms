@@ -183,6 +183,7 @@ public:
     void prefetch_page(PageKey key) noexcept;
     std::optional<BufferPoolError> flush_page(PageKey key);
     std::optional<BufferPoolError> flush_all();
+    // Benchmark-only; not a Storage production API.
     BufferPoolResult<std::vector<DirtyFrameSnapshotEntry>> snapshot_dirty_frames_for_experiment() const;
     BufferPoolResult<DirtyFrameFlushResult> flush_dirty_frames_for_experiment(
         const std::vector<DirtyFrameSnapshotEntry>& snapshot);
