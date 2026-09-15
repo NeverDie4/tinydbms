@@ -25,6 +25,17 @@ PageFileResult<T> success(T value) {
 FileManager::FileManager(std::filesystem::path data_dir)
     : data_dir_(std::move(data_dir)), tables_dir_(data_dir_ / "tables") {}
 
+PageFileLease::PageFileLease(FileManager& manager, TableId table_id, PageFile& file) noexcept
+    : manager_(&manager), file_(&file), table_id_(table_id) {}
+PageFileLease::~PageFileLease() noexcept { release(); }
+PageFileLease::PageFileLease(PageFileLease&& other) noexcept
+    : manager_(std::exchange(other.manager_, nullptr)), file_(std::exchange(other.file_, nullptr)), table_id_(other.table_id_) {}
+PageFileLease& PageFileLease::operator=(PageFileLease&& other) noexcept {
+    if (this != &other) { release(); manager_ = std::exchange(other.manager_, nullptr); file_ = std::exchange(other.file_, nullptr); table_id_ = other.table_id_; }
+    return *this;
+}
+void PageFileLease::release() noexcept { if (auto* manager = std::exchange(manager_, nullptr)) { file_ = nullptr; manager->release_lease(table_id_); } }
+
 FileManager::~FileManager() {
     (void)close_all();
 }
@@ -67,7 +78,9 @@ std::filesystem::path FileManager::table_file_path(TableId table_id) const {
 }
 
 PageFileResult<PageFile*> FileManager::create_table_file(TableId table_id) {
-    if (find_table_file(table_id) != nullptr) {
+    std::lock_guard lock(mutex_);
+    if (close_all_in_progress_ || closing_tables_.contains(table_id)) return failure<PageFile*>(PageFileErrorKind::kInvalidArgument, "table PageFile is closing");
+    if (open_files_.contains(table_id)) {
         return failure<PageFile*>(PageFileErrorKind::kInvalidArgument,
                                   "table PageFile is already open");
     }
@@ -81,9 +94,9 @@ PageFileResult<PageFile*> FileManager::create_table_file(TableId table_id) {
 }
 
 PageFileResult<PageFile*> FileManager::open_table_file(TableId table_id) {
-    if (PageFile* existing = find_table_file(table_id); existing != nullptr) {
-        return success(existing);
-    }
+    std::lock_guard lock(mutex_);
+    if (close_all_in_progress_ || closing_tables_.contains(table_id)) return failure<PageFile*>(PageFileErrorKind::kInvalidArgument, "table PageFile is closing");
+    if (const auto found=open_files_.find(table_id); found!=open_files_.end()) return success(found->second.get());
 
     std::error_code filesystem_error;
     const auto path = table_file_path(table_id);
@@ -106,38 +119,57 @@ PageFileResult<PageFile*> FileManager::open_table_file(TableId table_id) {
 }
 
 PageFile* FileManager::find_table_file(TableId table_id) const noexcept {
+    std::lock_guard lock(mutex_);
     const auto found = open_files_.find(table_id);
     return found == open_files_.end() ? nullptr : found->second.get();
 }
 
-std::optional<PageFileError> FileManager::close_table_file(TableId table_id) {
+PageFileResult<PageFileLease> FileManager::acquire_file(TableId table_id) {
+    std::lock_guard lock(mutex_);
+    if (close_all_in_progress_ || closing_tables_.contains(table_id)) return failure<PageFileLease>(PageFileErrorKind::kInvalidArgument, "table PageFile is closing");
     const auto found = open_files_.find(table_id);
-    if (found == open_files_.end()) {
-        return std::nullopt;
-    }
-    auto close_error = found->second->close();
-    if (close_error.has_value()) {
-        return close_error;
-    }
-    open_files_.erase(found);
-    return std::nullopt;
+    if (found == open_files_.end()) return failure<PageFileLease>(PageFileErrorKind::kInvalidArgument, "table PageFile is not open");
+    ++in_flight_[table_id];
+    return success(PageFileLease(*this, table_id, *found->second));
+}
+
+void FileManager::release_lease(TableId table_id) noexcept {
+    std::lock_guard lock(mutex_);
+    auto found=in_flight_.find(table_id);
+    if (found==in_flight_.end() || found->second==0) std::terminate();
+    if (--found->second==0) in_flight_.erase(found);
+    state_changed_.notify_all();
+}
+
+std::optional<PageFileError> FileManager::close_table_file(TableId table_id) {
+    PageFile* file=nullptr;
+    { std::unique_lock lock(mutex_);
+      if (close_all_in_progress_ || closing_tables_.contains(table_id)) return make_error(PageFileErrorKind::kInvalidArgument,"table PageFile is closing");
+      if(open_files_.find(table_id)==open_files_.end()) return std::nullopt;
+      closing_tables_.insert(table_id); state_changed_.notify_all();
+      state_changed_.wait(lock,[&]{ return !in_flight_.contains(table_id); });
+      // wait() releases mutex_: another table may create/open and rehash
+      // open_files_, so no iterator obtained before wait may be used here.
+      const auto found=open_files_.find(table_id);
+      if(found==open_files_.end()) std::terminate();
+      file=found->second.get(); }
+    const auto result=file->close();
+    { std::lock_guard lock(mutex_); if(!result) open_files_.erase(table_id); closing_tables_.erase(table_id); state_changed_.notify_all(); }
+    return result;
 }
 
 std::optional<PageFileError> FileManager::close_all() {
-    if (open_files_.empty() && PageFile::take_close_failure_for_testing()) {
-        return make_error(PageFileErrorKind::kIo, "injected PageFile close failure");
-    }
+    std::vector<std::pair<TableId,PageFile*>> files;
+    { std::unique_lock lock(mutex_);
+      if(close_all_in_progress_) return make_error(PageFileErrorKind::kInvalidArgument,"FileManager is closing");
+      close_all_in_progress_=true; state_changed_.notify_all();
+      state_changed_.wait(lock,[&]{ return in_flight_.empty() && closing_tables_.empty(); });
+      if(open_files_.empty() && PageFile::take_close_failure_for_testing()) { close_all_in_progress_=false; state_changed_.notify_all(); return make_error(PageFileErrorKind::kIo,"injected PageFile close failure"); }
+      for(auto& [id,file]:open_files_) { closing_tables_.insert(id); files.emplace_back(id,file.get()); } }
     std::optional<PageFileError> first_error;
-    for (auto file = open_files_.begin(); file != open_files_.end();) {
-        if (auto close_error = file->second->close(); close_error.has_value()) {
-            if (!first_error.has_value()) {
-                first_error = std::move(close_error);
-            }
-            ++file;
-        } else {
-            file = open_files_.erase(file);
-        }
-    }
+    std::vector<TableId> closed;
+    for(auto [id,file]:files) { if(auto e=file->close()) { if(!first_error) first_error=std::move(e); } else closed.push_back(id); }
+    { std::lock_guard lock(mutex_); for(auto id:closed) open_files_.erase(id); closing_tables_.clear(); close_all_in_progress_=false; state_changed_.notify_all(); }
     return first_error;
 }
 

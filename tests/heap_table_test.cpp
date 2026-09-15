@@ -1,8 +1,12 @@
 #include "heap_table.h"
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
 #include <source_location>
 #include <stdexcept>
+#include <thread>
 
 namespace tinydbms::storage::internal {
 struct BufferPoolTestAccess {
@@ -256,10 +260,47 @@ void update_and_prevalidation() {
     auto empty=table.update_batch({});
     check(!empty.error && empty.updated_count==0);
 }
+void poisoned_transition_is_serialized_with_pagefile_operations() {
+    Fixture f;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool compensation_waiting = false;
+    bool release_compensation = false;
+    NewRecordPageIo ops;
+    ops.bootstrap_write=[](PageFile&,PageId,const RawPage&)->std::optional<PageFileError>{return io_error();};
+    ops.compensate_free=[&](PageFile&,PageId)->std::optional<PageFileError>{
+        std::unique_lock lock(mutex);
+        compensation_waiting = true;
+        changed.notify_all();
+        changed.wait(lock, [&] { return release_compensation; });
+        return io_error();
+    };
+    HeapTable table(schema(),*f.files,*f.pool,ops);
+    std::atomic<bool> writer_failed_as_expected = false;
+    std::thread writer([&] {
+        auto result = table.insert_record(row());
+        writer_failed_as_expected = result.error && result.error->kind == HeapTableErrorKind::kIo;
+    });
+    {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [&] { return compensation_waiting; });
+        release_compensation = true;
+    }
+    changed.notify_all();
+    bool saw_poison = false;
+    for (unsigned attempt = 0; attempt < 10000 && !saw_poison; ++attempt) {
+        auto state = f.file().page_allocation_state(1);
+        saw_poison = state.error && state.error->kind == PageFileErrorKind::kIo;
+        std::this_thread::yield();
+    }
+    writer.join();
+    check(writer_failed_as_expected.load());
+    check(saw_poison);
+}
 }
 int main() try {
     first_fit_and_persistence(); free_and_corrupt(); prevalidation(); failures(); no_victim_and_batch();
     holes_and_empty_directory(); stop_on_existing_io_and_preserve_clean();
-    update_and_prevalidation();
+    update_and_prevalidation(); poisoned_transition_is_serialized_with_pagefile_operations();
     std::cout << "heap-table tests passed\n";
 } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

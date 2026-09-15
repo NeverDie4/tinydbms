@@ -51,12 +51,12 @@ HeapTable::HeapTable(TableMeta meta, FileManager& files, BufferPool& pool, NewRe
     : HeapTable(std::move(meta), RowFormat::kV1, files, pool, std::move(io)) {}
 
 HeapTableResult<HeapScanPosition> HeapTable::begin_scan() const {
-    if (auto error=check_file()) return {std::nullopt,std::move(error)};
-    return {HeapScanPosition{1,0,files_.find_table_file(meta_.table_id)->page_count()},std::nullopt};
+    auto lease=acquire_file(); if(lease.error) return {std::nullopt,std::move(lease.error)};
+    return {HeapScanPosition{1,0,(**lease.value).page_count()},std::nullopt};
 }
 HeapTableResult<Record> HeapTable::next_record(HeapScanPosition& position) {
-    if (auto error=check_file()) return {std::nullopt,std::move(error)};
-    auto& file=*files_.find_table_file(meta_.table_id);
+    auto lease=acquire_file(); if(lease.error) return {std::nullopt,std::move(lease.error)};
+    auto& file=**lease.value;
     constexpr auto max_end=std::uint64_t{std::numeric_limits<PageId>::max()}+1;
     if (position.next_page<1 || position.page_end_exclusive<1 ||
         position.next_page>position.page_end_exclusive || position.page_end_exclusive>max_end ||
@@ -72,6 +72,8 @@ HeapTableResult<Record> HeapTable::next_record(HeapScanPosition& position) {
         if (*state.value==PageAllocationState::kAllocated) {
             auto guard=pool_.fetch_page({meta_.table_id,id});
             if (guard.error) return {std::nullopt,translate(*guard.error)};
+            if (candidate.next_slot == 0 && candidate.next_page + 1 < candidate.page_end_exclusive)
+                pool_.prefetch_page({meta_.table_id, static_cast<PageId>(candidate.next_page + 1)});
             auto next=RecordPage::next_record(
                 guard.value->page(),id,format_,meta_,candidate.next_slot);
             if (next.error) return {std::nullopt,translate(*next.error)};
@@ -88,19 +90,19 @@ HeapTableResult<Record> HeapTable::next_record(HeapScanPosition& position) {
     return {std::nullopt,std::nullopt};
 }
 
-std::optional<HeapTableError> HeapTable::check_file() const {
-    auto* file = files_.find_table_file(meta_.table_id);
-    if (!file) return HeapTableError{HeapTableErrorKind::kInvalidArgument,"HeapTable requires an opened table file"};
-    if (auto error = file->require_open()) return translate(*error);
-    return std::nullopt;
+HeapTableResult<PageFileLease> HeapTable::acquire_file() const {
+    auto lease=files_.acquire_file(meta_.table_id);
+    if(!lease.value) return {std::nullopt,translate(*lease.error)};
+    if(auto error=(**lease.value).require_open()) return {std::nullopt,translate(*error)};
+    return {std::move(*lease.value),std::nullopt};
 }
 
 HeapTableResult<RecordId> HeapTable::insert_record(const std::vector<Value>& values) {
     auto size = RecordCodec::encoded_size(format_,meta_,values);
     if (size.error) return {std::nullopt,translate(*size.error)};
     if (*size.value == 0) return {std::nullopt,HeapTableError{HeapTableErrorKind::kInvalidArgument,"empty record schema"}};
-    if (auto error = check_file()) return {std::nullopt,std::move(error)};
-    auto& file = *files_.find_table_file(meta_.table_id); // Borrow only during this synchronous call.
+    auto lease=acquire_file(); if(lease.error) return {std::nullopt,std::move(lease.error)};
+    auto& file = **lease.value;
     // uint64 loop also handles page_count == UINT32_MAX + 1 without wraparound.
     for (std::uint64_t next = 1; next < file.page_count(); ++next) {
         const auto id = static_cast<PageId>(next);
@@ -131,7 +133,7 @@ HeapTableResult<RecordId> HeapTable::create_record_page(PageFile& file, const st
         if (error) {
             // All lightweight HeapTable instances see the same file health latch.
             // No on-disk recovery format, and no attempt to hide a damaged allocation.
-            file.poisoned_ = true;
+            file.mark_poisoned();
             return {std::nullopt,HeapTableError{HeapTableErrorKind::kIo,
                 "bootstrap failed: " + original.message + "; compensation failed: " + error->message}};
         }
@@ -154,7 +156,7 @@ HeapTableResult<RecordId> HeapTable::create_record_page(PageFile& file, const st
 }
 
 HeapTableBatchResult HeapTable::insert_batch(const std::vector<std::vector<Value>>& rows) {
-    if (auto error = check_file()) return {{},std::move(error)};
+    auto lease=acquire_file(); if(lease.error) return {{},std::move(lease.error)};
     HeapTableBatchResult result;
     result.record_ids.reserve(rows.size());
     for (const auto& values : rows) {
@@ -167,8 +169,8 @@ HeapTableBatchResult HeapTable::insert_batch(const std::vector<std::vector<Value
 std::optional<HeapTableError> HeapTable::delete_record(RecordId rid) {
     auto parts=RecordIdCodec::decode(rid);
     if(parts.error)return translate(*parts.error);
-    if(auto error=check_file())return error;
-    auto& file=*files_.find_table_file(meta_.table_id);
+    auto lease=acquire_file(); if(lease.error)return lease.error;
+    auto& file=**lease.value;
     const auto id=parts.value->page_id;
     auto state=file.page_allocation_state(id); // Also checks logical range.
     if(state.error)return translate(*state.error);
@@ -185,7 +187,7 @@ std::optional<HeapTableError> HeapTable::delete_record(RecordId rid) {
     return std::nullopt;
 }
 HeapDeleteResult HeapTable::delete_batch(const std::vector<RecordId>& record_ids) {
-    if(auto error=check_file())return {0,std::move(error)};
+    auto lease=acquire_file(); if(lease.error) return {0,std::move(lease.error)};
     HeapDeleteResult result;
     for(auto rid:record_ids) {
         if(auto error=delete_record(rid)){result.error=std::move(error);break;}
@@ -195,11 +197,12 @@ HeapDeleteResult HeapTable::delete_batch(const std::vector<RecordId>& record_ids
 }
 
 std::optional<HeapTableError> HeapTable::validate_update(const UpdateRow& row) {
+    auto lease=acquire_file(); if(lease.error)return lease.error;
     auto encoded=RecordCodec::encoded_size(format_,meta_,row.values);
     if(encoded.error)return translate(*encoded.error);
     auto parts=RecordIdCodec::decode(row.rid);
     if(parts.error)return translate(*parts.error);
-    auto& file=*files_.find_table_file(meta_.table_id);
+    auto& file=**lease.value;
     auto state=file.page_allocation_state(parts.value->page_id);
     if(state.error)return translate(*state.error);
     if(*state.value==PageAllocationState::kFree)
@@ -213,6 +216,7 @@ std::optional<HeapTableError> HeapTable::validate_update(const UpdateRow& row) {
 }
 
 std::optional<HeapTableError> HeapTable::update_record(const UpdateRow& row) {
+    auto lease=acquire_file(); if(lease.error)return lease.error;
     auto parts=RecordIdCodec::decode(row.rid);
     if(parts.error)return translate(*parts.error);
     auto guard=pool_.fetch_page({meta_.table_id,parts.value->page_id});
@@ -230,7 +234,7 @@ std::optional<HeapTableError> HeapTable::update_record(const UpdateRow& row) {
 }
 
 HeapUpdateResult HeapTable::update_batch(const std::vector<UpdateRow>& rows) {
-    if(auto error=check_file())return {0,std::move(error)};
+    auto lease=acquire_file(); if(lease.error)return {0,std::move(lease.error)};
     for(std::size_t index=0;index<rows.size();++index) {
         for(std::size_t previous=0;previous<index;++previous) {
             if(rows[index].rid.value==rows[previous].rid.value) {

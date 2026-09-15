@@ -12,6 +12,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TINYDBMS_BUILD_TESTS "Build tinydbms tests" ON)
 option(
+    TINYDBMS_BUILD_STORAGE_BENCHMARKS
+    "Build Storage-only I/O and prefetch experiment benchmarks"
+    OFF
+)
+option(
     TINYDBMS_ENABLE_REAL_MODULES
     "Connect the product CLI to the delivered compiler and storage implementations"
     OFF

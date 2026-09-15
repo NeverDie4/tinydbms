@@ -48,6 +48,22 @@ target_include_directories(tinydbms.buffer_pool_flush_test PRIVATE ${PROJECT_SOU
 target_link_libraries(tinydbms.buffer_pool_flush_test PRIVATE tinydbms_storage)
 add_test(NAME tinydbms.buffer_pool_flush COMMAND $<TARGET_FILE:tinydbms.buffer_pool_flush_test>)
 
+add_executable(tinydbms.buffer_pool_concurrency_test buffer_pool_concurrency_test.cpp)
+target_include_directories(tinydbms.buffer_pool_concurrency_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.buffer_pool_concurrency_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.buffer_pool_concurrency COMMAND $<TARGET_FILE:tinydbms.buffer_pool_concurrency_test>)
+
+add_executable(tinydbms.buffer_pool_dirty_victim_test buffer_pool_dirty_victim_test.cpp)
+target_include_directories(tinydbms.buffer_pool_dirty_victim_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.buffer_pool_dirty_victim_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.buffer_pool_dirty_victim COMMAND $<TARGET_FILE:tinydbms.buffer_pool_dirty_victim_test>)
+
+add_executable(tinydbms.buffer_pool_prefetch_test buffer_pool_prefetch_test.cpp)
+target_include_directories(tinydbms.buffer_pool_prefetch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.buffer_pool_prefetch_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.buffer_pool_prefetch COMMAND $<TARGET_FILE:tinydbms.buffer_pool_prefetch_test>)
+set_tests_properties(tinydbms.buffer_pool_prefetch PROPERTIES TIMEOUT 60)
+
 add_executable(tinydbms.buffer_pool_fifo_test buffer_pool_fifo_test.cpp)
 target_include_directories(tinydbms.buffer_pool_fifo_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
 target_link_libraries(tinydbms.buffer_pool_fifo_test PRIVATE tinydbms_storage)
@@ -117,6 +133,11 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms.page_file_test>
 )
 
+add_executable(tinydbms.page_file_concurrency_test page_file_concurrency_test.cpp)
+target_include_directories(tinydbms.page_file_concurrency_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.page_file_concurrency_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.page_file_concurrency COMMAND $<TARGET_FILE:tinydbms.page_file_concurrency_test>)
+
 add_executable(tinydbms.file_manager_test file_manager_test.cpp)
 
 target_include_directories(tinydbms.file_manager_test PRIVATE
@@ -131,6 +152,11 @@ add_test(
     NAME tinydbms.file_manager
     COMMAND $<TARGET_FILE:tinydbms.file_manager_test>
 )
+
+add_executable(tinydbms.file_manager_concurrency_test file_manager_concurrency_test.cpp)
+target_include_directories(tinydbms.file_manager_concurrency_test PRIVATE ${PROJECT_SOURCE_DIR}/src/storage)
+target_link_libraries(tinydbms.file_manager_concurrency_test PRIVATE tinydbms_storage)
+add_test(NAME tinydbms.file_manager_concurrency COMMAND $<TARGET_FILE:tinydbms.file_manager_concurrency_test>)
 
 add_executable(tinydbms.storage_page_file_integration_test
     storage_page_file_integration_test.cpp

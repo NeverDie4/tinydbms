@@ -4,11 +4,36 @@
 #include "tinydbms/common.hpp"
 
 #include <filesystem>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <unordered_set>
 #include <unordered_map>
 
 namespace tinydbms::storage::internal {
+
+class FileManager;
+class PageFileLease {
+public:
+    PageFileLease() noexcept = default;
+    ~PageFileLease() noexcept;
+    PageFileLease(const PageFileLease&) = delete;
+    PageFileLease& operator=(const PageFileLease&) = delete;
+    PageFileLease(PageFileLease&& other) noexcept;
+    PageFileLease& operator=(PageFileLease&& other) noexcept;
+    PageFile* get() const noexcept { return file_; }
+    PageFile& operator*() const noexcept { return *file_; }
+    PageFile* operator->() const noexcept { return file_; }
+    explicit operator bool() const noexcept { return file_ != nullptr; }
+    void release() noexcept;
+private:
+    friend class FileManager;
+    PageFileLease(FileManager& manager, TableId table_id, PageFile& file) noexcept;
+    FileManager* manager_ = nullptr;
+    PageFile* file_ = nullptr;
+    TableId table_id_ = 0;
+};
 
 class FileManager {
 public:
@@ -24,6 +49,9 @@ public:
 
     PageFileResult<PageFile*> create_table_file(TableId table_id);
     PageFileResult<PageFile*> open_table_file(TableId table_id);
+    PageFileResult<PageFileLease> acquire_file(TableId table_id);
+    // Legacy single-threaded diagnostic/test lookup only. It does not extend the
+    // PageFile lifetime; concurrent production code must use acquire_file().
     PageFile* find_table_file(TableId table_id) const noexcept;
     std::optional<PageFileError> close_table_file(TableId table_id);
     std::optional<PageFileError> close_all();
@@ -34,11 +62,19 @@ public:
     [[nodiscard]] std::filesystem::path table_file_path(TableId table_id) const;
 
 private:
+    friend class PageFileLease;
+    friend struct FileManagerTestAccess;
     explicit FileManager(std::filesystem::path data_dir);
 
+    void release_lease(TableId table_id) noexcept;
     std::filesystem::path data_dir_;
     std::filesystem::path tables_dir_;
+    mutable std::mutex mutex_;
+    std::condition_variable state_changed_;
     std::unordered_map<TableId, std::unique_ptr<PageFile>> open_files_;
+    std::unordered_map<TableId, std::size_t> in_flight_;
+    std::unordered_set<TableId> closing_tables_;
+    bool close_all_in_progress_ = false;
 };
 
 }  // namespace tinydbms::storage::internal
