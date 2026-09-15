@@ -106,11 +106,13 @@ GUI 不自己分句：整段编辑器内容作为一次 `ExecuteScriptRequest.te
 
 - 只有一个工作线程，`Database` 的构造、`open`、`execute_script`、`close` 都在该线程上发生；
   UI 线程从不触碰 `Database`；
-- 队列顺序即执行顺序，天然串行，因此不需要用锁保护 `Database`；
+- 队列顺序即执行顺序；core 自身也按调用级互斥串行化，因此"只用一条工作线程"是入口层的
+  选择，而不是 core 强加的限制（见 [进程内并发设计](../core-cli/进程内并发设计.md)）；
 - 结果与错误通过队列连接回到 UI 线程，UI 线程只做展示与本地编辑。
 
-依据：契约不承诺 `Database` 线程安全；Storage 是进程级单例，同一时刻最多一个对象处于
-open 或 cleanup-pending 状态。
+依据：core 契约承诺同一实例的公开方法可被并发调用但**串行执行**，不会给出并行度；
+Storage 是进程级单例，同一时刻最多一个 `Database` 实例处于 open 或 cleanup-pending 状态。
+单工作线程让结果顺序与 UI 快照天然对齐，仍然是本设计选择的入口层结构。
 
 实现约定：
 
