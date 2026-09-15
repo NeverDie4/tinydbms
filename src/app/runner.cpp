@@ -4,6 +4,9 @@
 #include "input.hpp"
 #include "output.hpp"
 
+#include <atomic>
+#include <cstddef>
+#include <csignal>
 #include <exception>
 #include <optional>
 #include <ostream>
@@ -13,6 +16,61 @@
 
 namespace tinydbms::app {
 namespace {
+
+// 进程级"当前活动令牌"指针：信号处理器只读它，因此要求无锁原子。
+std::atomic<const tinydbms::core::CancelToken*> g_active_token{nullptr};
+static_assert(
+    std::atomic<const tinydbms::core::CancelToken*>::is_always_lock_free,
+    "SIGINT handler requires lock-free atomic pointers");
+
+}  // namespace
+
+// 信号处理器需要 C 语言链接，定义放在文件作用域：只做一次原子置位，不展示、不写流、
+// 不分配内存。空闲期（没有活动令牌）或第二次中断恢复默认处置并重新触发，进程立即终止。
+extern "C" void tinydbms_sigint_handler(int);
+extern "C" void tinydbms_sigint_handler(int) {
+    const tinydbms::core::CancelToken* token =
+        g_active_token.load(std::memory_order_relaxed);
+    if (token != nullptr && !token->cancel_requested()) {
+        token->request_cancel();
+        return;
+    }
+    std::signal(SIGINT, SIG_DFL);
+    std::raise(SIGINT);
+}
+
+void install_sigint_handler() noexcept {
+    std::signal(SIGINT, tinydbms_sigint_handler);
+}
+
+namespace {
+
+// 活动令牌的 RAII 维护：设置在 execute_script 之前，清除在令牌析构之前，
+// 避免处理器读到悬垂指针；恢复上一层值以便将来嵌套调用。
+class ActiveCancelToken {
+public:
+    explicit ActiveCancelToken(const tinydbms::core::CancelToken& token) noexcept
+        : previous_{g_active_token.exchange(&token, std::memory_order_relaxed)} {}
+
+    ActiveCancelToken(const ActiveCancelToken&) = delete;
+    ActiveCancelToken& operator=(const ActiveCancelToken&) = delete;
+
+    ~ActiveCancelToken() {
+        g_active_token.store(previous_, std::memory_order_relaxed);
+    }
+
+private:
+    const tinydbms::core::CancelToken* previous_;
+};
+
+// CLI 运行期选项：由参数解析结果构造一次，批处理与 REPL 共用同一组语义。
+struct ExecutionOptions {
+    OutputFormat format = OutputFormat::kTable;
+    tinydbms::core::ExecutionMode mode = tinydbms::core::ExecutionMode::kExecute;
+    tinydbms::core::ScriptErrorPolicy policy =
+        tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
+    std::size_t max_query_rows = tinydbms::core::kMaxQueryRows;
+};
 
 void report_error_noexcept(
     std::ostream& output,
@@ -162,24 +220,31 @@ RenderResult render_script_result(
 bool run_batch(
     Session& session,
     CliEnvironment& environment,
-    OutputFormat format,
-    tinydbms::core::ExecutionMode mode,
-    tinydbms::core::ScriptErrorPolicy policy,
+    const ExecutionOptions& options,
     bool& failed) {
     std::string text;
     std::string input_error;
     if (!read_batch(environment.input, text, input_error)) {
         failed = true;
-        report_input_error(environment, format, input_error);
+        report_input_error(environment, options.format, input_error);
         return false;
     }
 
     tinydbms::core::ExecuteScriptRequest request;
     request.text = std::move(text);
-    request.error_policy = policy;
-    request.mode = mode;
-    const tinydbms::core::ExecuteScriptResult result = session.execute_script(request);
-    const RenderResult rendered = render_script_result(result, format, environment);
+    request.error_policy = options.policy;
+    request.mode = options.mode;
+    request.max_query_rows = options.max_query_rows;
+    // 每次调用使用独立令牌：批处理整段文本共享一个令牌，空闲期按下的 Ctrl+C 不会残留。
+    request.cancel = tinydbms::core::CancelToken{};
+
+    tinydbms::core::ExecuteScriptResult result;
+    {
+        const ActiveCancelToken active{request.cancel};
+        result = session.execute_script(request);
+    }
+
+    const RenderResult rendered = render_script_result(result, options.format, environment);
     failed = failed || rendered.had_error || !rendered.output_ok;
     return rendered.output_ok;
 }
@@ -187,9 +252,7 @@ bool run_batch(
 bool run_repl(
     Session& session,
     CliEnvironment& environment,
-    OutputFormat format,
-    tinydbms::core::ExecutionMode mode,
-    tinydbms::core::ScriptErrorPolicy policy,
+    const ExecutionOptions& options,
     bool& failed) {
     for (;;) {
         environment.error << "tinydbms> " << std::flush;
@@ -203,7 +266,7 @@ bool run_repl(
         std::string input_error;
         if (!read_line(environment.input, line, reached_eof, input_error)) {
             failed = true;
-            report_input_error(environment, format, input_error);
+            report_input_error(environment, options.format, input_error);
             return false;
         }
         if (reached_eof) {
@@ -212,12 +275,19 @@ bool run_repl(
 
         tinydbms::core::ExecuteScriptRequest request;
         request.text = std::move(line);
-        request.error_policy = policy;
-        request.mode = mode;
-        const tinydbms::core::ExecuteScriptResult result =
-            session.execute_script(request);
+        request.error_policy = options.policy;
+        request.mode = options.mode;
+        request.max_query_rows = options.max_query_rows;
+        // REPL 每一行使用新令牌：上一行被取消不会毒化后续输入。
+        request.cancel = tinydbms::core::CancelToken{};
 
-        const RenderResult rendered = render_script_result(result, format, environment);
+        tinydbms::core::ExecuteScriptResult result;
+        {
+            const ActiveCancelToken active{request.cancel};
+            result = session.execute_script(request);
+        }
+
+        const RenderResult rendered = render_script_result(result, options.format, environment);
         failed = failed || rendered.had_error || !rendered.output_ok;
         if (!rendered.output_ok) {
             return false;
@@ -265,20 +335,24 @@ int run_cli(
         }
         opened = true;
 
-        const tinydbms::core::ExecutionMode mode =
+        ExecutionOptions options;
+        options.format = format;
+        options.mode =
             arguments.plan_only
             ? tinydbms::core::ExecutionMode::kPlanOnly
             : tinydbms::core::ExecutionMode::kExecute;
-        const tinydbms::core::ScriptErrorPolicy policy =
+        options.policy =
             arguments.error_policy == ErrorPolicy::kAnalyze
             ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
             : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
+        options.max_query_rows =
+            arguments.max_query_rows.value_or(tinydbms::core::kMaxQueryRows);
 
         bool failed = false;
         if (environment.interactive) {
-            (void)run_repl(session, environment, format, mode, policy, failed);
+            (void)run_repl(session, environment, options, failed);
         } else {
-            (void)run_batch(session, environment, format, mode, policy, failed);
+            (void)run_batch(session, environment, options, failed);
         }
 
         const bool close_ok = close_once(session, opened, format, environment.error);

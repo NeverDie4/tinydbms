@@ -2,6 +2,7 @@
 #define TINYDBMS_APP_ARGUMENTS_HPP
 
 #include <iosfwd>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,6 +30,8 @@ struct ParsedArguments {
     ErrorPolicy error_policy = ErrorPolicy::kStop;
     OutputFormat format = OutputFormat::kTable;
     bool plan_only = false;
+    // 未提供时为 nullopt；由 runner 决定默认值，app 参数层不复制 core 的常量。
+    std::optional<std::size_t> max_query_rows;
 };
 
 struct ArgumentError {

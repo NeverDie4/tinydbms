@@ -41,6 +41,12 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             ErrorKind::kExecute,
             "database is not open"));
     }
+    if (request.max_query_rows == 0U) {
+        // 调用方违约：不静默回退到默认值，直接拒绝整段脚本。
+        return make_script_error_result(internal::make_error(
+            ErrorKind::kExecute,
+            "max_query_rows must be at least 1"));
+    }
 
     const bool analyze = request.error_policy == ScriptErrorPolicy::kAnalyzeRemaining;
     const bool plan_only = request.mode == ExecutionMode::kPlanOnly;
@@ -58,6 +64,13 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
         for (std::size_t index = from; index < statements.size(); ++index) {
             result.statements.push_back(
                 StatementResult::skipped(index, statements[index].source));
+        }
+    };
+    // 取消优先于错误策略：剩余语句既不编译也不执行，直接记为 kCancelled。
+    auto fill_cancelled = [&](std::size_t from) {
+        for (std::size_t index = from; index < statements.size(); ++index) {
+            result.statements.push_back(
+                StatementResult::cancelled(index, statements[index].source));
         }
     };
     // 致命中止发生在已识别语句上时，script_error 必须指向该语句；只有完全
@@ -166,6 +179,12 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             const compiler::SplitStatement& statement = statements[index];
             active_index = index;
             impl_->current_plan_storage_called = false;
+
+            // 语句边界检查点：取消后不再编译剩余语句，也不产生 skipped/analysis 状态。
+            if (request.cancel.cancel_requested()) {
+                fill_cancelled(index);
+                return result;
+            }
 
             // execution_allowed 关闭只可能出现在 analyze 策略（stop 策略首错后
             // 立即返回），因此此时影子 Catalog 必然已建立。
@@ -294,7 +313,18 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
 
             const bool creates_table =
                 std::holds_alternative<compiler::CreateTablePlan>(plan.kind);
-            ExecuteResult execution = impl_->execute_plan_impl(std::move(plan));
+            PlanExecutionResult plan_execution = impl_->execute_plan_impl(
+                std::move(plan), request.max_query_rows, &request.cancel);
+
+            if (plan_execution.cancelled) {
+                // 取消只发生在无副作用检查点：不产生 script_error，也不使会话失效。
+                result.statements.push_back(
+                    StatementResult::cancelled(index, statement.source));
+                fill_cancelled(index + 1U);
+                return result;
+            }
+
+            ExecuteResult execution = std::move(plan_execution.outcome);
 
             if (const Error* internal_error = std::get_if<Error>(&execution.outcome);
                 internal_error != nullptr && internal_error->kind == ErrorKind::kInternal) {

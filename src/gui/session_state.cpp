@@ -81,6 +81,8 @@ StatementDisplay display_of(const StatementResult& statement) {
         return StatementDisplay::kAnalysisOnly;
     case StatementStatus::kSkippedExecution:
         return StatementDisplay::kSkipped;
+    case StatementStatus::kCancelled:
+        return StatementDisplay::kCancelled;
     case StatementStatus::kExecutionIndeterminate:
         return StatementDisplay::kIndeterminate;
     }
@@ -193,6 +195,9 @@ std::vector<StatementView> build_statement_views(const ExecuteScriptResult& resu
             break;
         case StatementDisplay::kSkipped:
             view.summary = statement_prefix(view.index) + QStringLiteral("已跳过");
+            break;
+        case StatementDisplay::kCancelled:
+            view.summary = statement_prefix(view.index) + QStringLiteral("已取消");
             break;
         case StatementDisplay::kIndeterminate:
             view.summary = statement_prefix(view.index) +

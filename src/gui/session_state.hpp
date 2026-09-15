@@ -29,6 +29,7 @@ enum class StatementDisplay {
     kAnalysisError,
     kAnalysisOnly,
     kSkipped,
+    kCancelled,
     kIndeterminate
 };
 

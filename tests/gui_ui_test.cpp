@@ -365,9 +365,10 @@ bool test_statement_views_cover_all_states() {
     result.statements.push_back(StatementResult::analysis_only(5, range_of(51, 60)));
     result.statements.push_back(StatementResult::skipped(6, range_of(61, 70)));
     result.statements.push_back(StatementResult::execution_indeterminate(7, range_of(71, 80)));
+    result.statements.push_back(StatementResult::cancelled(8, range_of(81, 90)));
 
     const std::vector<StatementView> views = tinydbms::gui::build_statement_views(result);
-    CHECK(views.size() == 8);
+    CHECK(views.size() == 9);
     CHECK(views[0].display == StatementDisplay::kQuery);
     CHECK(views[0].query != nullptr);
     CHECK(views[0].summary.contains(QStringLiteral("查询返回 2 行")));
@@ -383,6 +384,8 @@ bool test_statement_views_cover_all_states() {
     CHECK(views[6].display == StatementDisplay::kSkipped);
     CHECK(views[7].display == StatementDisplay::kIndeterminate);
     CHECK(views[7].summary.contains(QStringLiteral("状态未知")));
+    CHECK(views[8].display == StatementDisplay::kCancelled);
+    CHECK(views[8].summary.contains(QStringLiteral("已取消")));
 
     // 只有带诊断的三条语句进入诊断列表
     CHECK(views[0].detail.isEmpty());

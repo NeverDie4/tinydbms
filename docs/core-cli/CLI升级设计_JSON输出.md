@@ -76,8 +76,10 @@ JSON 就是最小的机器可读输出层，因此放在入口而不是新增协
 - `type` 恒为第一个字段，其余字段顺序固定，便于 golden 测试。
 - `range` 使用与 table 格式相同的 `line:column-line:column` 半开区间字符串；无来源时省略该字段。
 - `suggestion`、`fix_it` 仅在存在时出现；`fix_it` 是对象，不再拆成 table 格式的 `FIX` 行。
-- `status` 取自 `kAnalysisOnly` / `kSkippedExecution` / `kExecutionIndeterminate` 三个状态；
-  `kSkippedExecution` 的 `reason` 为 `policy` 或 `aborted`，与 table 格式一致。
+- `status` 取自 `kAnalysisOnly`（`analyzed`）/ `kSkippedExecution`（`skipped`）/
+  `kExecutionIndeterminate`（`indeterminate`）/ `kCancelled`（`cancelled`，U5 运行中取消）
+  四个状态；`kSkippedExecution` 的 `reason` 为 `policy` 或 `aborted`，与 table 格式一致，
+  其余状态不带 `reason`。取消同样写 stderr，并把本次调用按失败处理（退出码 1）。
 - `kExecuted` 与 `kPlanOnly`（U3 计划模式）都输出 `query`/`command` 结果对象：
   计划模式的结果是普通的单列 `plan` 查询，不为它增加 schema 字段。
 - 语句级错误带 `statement_index`；`script_error` 不带。

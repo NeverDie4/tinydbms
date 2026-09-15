@@ -345,15 +345,32 @@ Core 在内存中全量物化 Plan 的输出，因此公共契约固定两个上
 inline constexpr std::size_t kMaxQueryRows = 1 << 18;  // 262144，include/tinydbms/core.hpp
 ```
 
-- `kMaxQueryRows` 按物化节点（SeqScan、Join）的累计行数计。超过上限时 Core 返回语句级
-  `ErrorKind::kExecute`（"query/join materialization exceeds the maximum row count"），
-  不使 Database 会话失效、不产生 `script_error`；Sort/Aggregate 的输入已被上游节点限界，
-  不重复计数，DELETE 只收集 RecordId 故不受该上限约束。
+- 上限是请求级配置：`ExecuteScriptRequest::max_query_rows`（`include/tinydbms/core.hpp`）
+  覆盖默认常量 `kMaxQueryRows`，缺省即默认值，`0` 视为调用方违约并在分句前拒绝整段脚本。
+- 上限按物化节点（SeqScan、Join）的累计行数计，与最终结果行数无关：`WHERE` 过滤发生在扫描
+  节点物化之后，因此过滤前的扫描行数同样计入。超过上限时 Core 返回语句级
+  `ErrorKind::kExecute`（"query/join materialization exceeds the maximum row count (limit N)"，
+  并带 suggestion "raise max_query_rows or narrow the query"），不使 Database 会话失效、
+  不产生 `script_error`；Sort/Aggregate 的输入已被上游节点限界，不重复计数，
+  DELETE/UPDATE 只收集 RecordId 故不受该上限约束。
 - Plan 树的遍历深度另有 Core 内部防御性上限 `256`（`kMaxPlanDepth`）：校验与执行在进入第 256 层
   节点前返回 `ErrorKind::kInternal` 致命中止，不递归溢出、不调用 Storage。它是 compiler
   复杂度预算（表达式 256 层）的兜底，不能作为 compiler 的资源限制替代。
 - 两个上限都只保证“不无界增长或以崩溃失败”，不承诺任意规模结果集可用；
   未来引入外部排序或分页属于单独的能力扩展。
+
+### 7.4 运行中取消（U5）
+
+- `ExecuteScriptRequest::cancel`（`CancelToken`）是请求级取消令牌：线程安全、幂等，
+  只做置位与轮询，因此可以在信号处理器中调用；默认从未请求取消，不传令牌时行为与现状一致。
+- Core 在语句开始前、扫描行循环、Join 内层循环与 Sort/Aggregate 行循环检查取消；
+  INSERT 的行循环与 storage 的单次调用（`scan_next`/`insert`/`update_rows`/`delete_records`）
+  不可中断，取消延迟的上界是“一次 storage 调用 + 一次行循环迭代”。
+- 取消后当前语句与尚未开始的语句都记 `StatementStatus::kCancelled`（不携带 outcome），
+  `script_error` 保持为空，`statements` 仍覆盖分句后的全部语句；取消路径必须与普通错误路径
+  一样关闭 cursor。取消优先于 `ScriptErrorPolicy`，不产生 `kSkippedExecution` 或分析态。
+- 取消不代表物理状态未知：检查点只设在无副作用位置，因此不需要重开数据库；
+  这条规则与 `kExecutionIndeterminate` 的区别必须保持。
 
 ## 8. Aggregate 与 GROUP BY
 
@@ -506,12 +523,14 @@ enum class ScriptErrorPolicy {
 
 enum class StatementStatus {
     kExecuted,
+    kPlanOnly,
     kCompileError,
     kExecutionError,
     kExecutionIndeterminate,
     kAnalysisError,
     kAnalysisOnly,
-    kSkippedExecution
+    kSkippedExecution,
+    kCancelled          // 运行中取消：当前语句在无副作用检查点结束，后续语句未开始
 };
 
 struct StatementResult {
@@ -527,7 +546,7 @@ struct ExecuteScriptResult {
 };
 ```
 
-`StatementResult` 只能经命名工厂构造，字段私有且只读，工厂校验“状态 + outcome”组合：kExecuted 携带成功 QueryResult/CommandResult；kCompileError 携带转换后的 `kCompile` Error；kExecutionError 携带 `kExecute`/`kStorage` Error 或带 error 的 partial CommandResult；kAnalysisError 携带 `kAnalysis` Error；kExecutionIndeterminate、kAnalysisOnly、kSkippedExecution 不携带 outcome。`kInternal` 只允许出现在 script_error，不允许作为语句级 outcome。
+`StatementResult` 只能经命名工厂构造，字段私有且只读，工厂校验“状态 + outcome”组合：kExecuted 携带成功 QueryResult/CommandResult；kPlanOnly（U3 计划模式）携带单列 `plan` 的 QueryResult；kCompileError 携带转换后的 `kCompile` Error；kExecutionError 携带 `kExecute`/`kStorage` Error 或带 error 的 partial CommandResult；kAnalysisError 携带 `kAnalysis` Error；kExecutionIndeterminate、kAnalysisOnly、kSkippedExecution、kCancelled 不携带 outcome。`kInternal` 只允许出现在 script_error，不允许作为语句级 outcome。
 
 本阶段不提供 `first_error_index`/`executed_count` 汇总字段（已确认无外部消费者，属一次性破坏性迁移）：需要计数的调用方从 statements 自行派生。`script_error` 只承载整段分句失败、语句数超过 `kMaxStatementsPerScript` 与致命中止三类；普通语句错误必须进入 statements。
 

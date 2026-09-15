@@ -19,6 +19,8 @@ int run_application(int argc, char* const argv[]) {
 #else
         tinydbms::app::UnavailableSession session;
 #endif
+        tinydbms::app::install_sigint_handler();
+
         tinydbms::app::CliEnvironment environment{
             std::cin,
             std::cout,

@@ -324,6 +324,10 @@ RenderResult render_table_statement_result(
         error_output << "SKIPPED " << format_source_range(result.source())
                      << (aborted ? " aborted" : " policy") << '\n';
         return RenderResult{static_cast<bool>(error_output), false};
+    case StatementStatus::kCancelled:
+        // 取消是调用方的主动行为：写出状态即可，但本次调用按失败处理（退出码 1）。
+        error_output << "CANCELLED " << format_source_range(result.source()) << '\n';
+        return RenderResult{static_cast<bool>(error_output), true};
     case StatementStatus::kExecutionIndeterminate:
         error_output << "INDETERMINATE " << format_source_range(result.source()) << '\n';
         return RenderResult{static_cast<bool>(error_output), false};

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -73,6 +74,10 @@ struct State {
     bool throw_after_insert = false;
     bool throw_on_delete = false;
     bool throw_after_delete = false;
+    // 每次 scan_next 记录完之后调用；用于在扫描中途注入取消请求等外部事件。
+    std::function<void()> on_scan_next;
+    // 每次 insert 记录完之后调用（INSERT 首版不设取消检查点，用于验证该边界）。
+    std::function<void()> on_insert;
 };
 
 void reset();
@@ -109,6 +114,8 @@ void set_throw_on_insert(bool enabled);
 void set_throw_after_insert(bool enabled);
 void set_throw_on_delete(bool enabled);
 void set_throw_after_delete(bool enabled);
+void set_on_scan_next(std::function<void()> hook);
+void set_on_insert(std::function<void()> hook);
 void clear_close_error();
 void clear_create_table_error();
 

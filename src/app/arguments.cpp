@@ -1,5 +1,9 @@
 #include "arguments.hpp"
 
+#include "tinydbms/core.hpp"
+
+#include <charconv>
+#include <cstddef>
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -31,6 +35,7 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
     bool error_policy_seen = false;
     bool format_seen = false;
     bool plan_seen = false;
+    bool max_rows_seen = false;
 
     const auto take_value = [&](int index, std::string_view option, std::string& message) {
         if (index + 1 >= argc || argv[index + 1] == nullptr || argv[index + 1][0] == '\0') {
@@ -113,6 +118,26 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
             result.plan_only = true;
             continue;
         }
+        if (argument == "--max-rows") {
+            if (max_rows_seen) {
+                return make_error("--max-rows may appear only once");
+            }
+            max_rows_seen = true;
+
+            std::string message;
+            if (!take_value(index, "--max-rows", message)) {
+                return make_error(std::move(message));
+            }
+            const std::string_view value{argv[++index]};
+            std::size_t parsed = 0;
+            const auto [end, error] =
+                std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (error != std::errc{} || end != value.data() + value.size() || parsed == 0U) {
+                return make_error("--max-rows must be a positive integer");
+            }
+            result.max_query_rows = parsed;
+            continue;
+        }
         if (argument != "--data-dir") {
             return make_error("unknown command-line argument");
         }
@@ -144,7 +169,9 @@ bool write_help(std::ostream& output) {
            << "  --format FORMAT        table (default) or json; json prints one JSON object\n"
            << "                         per line\n"
            << "  --plan                 compile only and print the execution plan; nothing is\n"
-           << "                         executed and no data is modified\n";
+           << "                         executed and no data is modified\n"
+           << "  --max-rows N           maximum rows materialized for one statement\n"
+           << "                         (default: " << tinydbms::core::kMaxQueryRows << ")\n";
     return static_cast<bool>(output);
 }
 

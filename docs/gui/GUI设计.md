@@ -126,8 +126,10 @@ open 或 cleanup-pending 状态。
 ### 3.2 任务进行中的 UI 状态
 
 - 任务进行中禁用「执行」与「切换数据库」按钮；
-- 第一版**不提供运行中取消**：公共契约没有取消入口，`execute_script` 是同步调用，强杀线程会
-  破坏 Storage 状态；「分析模式」开关只决定 `ScriptErrorPolicy`，不是取消；
+- 第一版**不提供取消按钮**：core 自 U5 起提供 `CancelToken`（见
+  [运行中取消设计](../core-cli/运行中取消设计.md)），`Backend` 可以在 worker 线程持有的
+  请求上传入同一个令牌，UI 线程调用 `request_cancel()` 即可跨线程取消；本版只登记该边界，
+  按钮与交互留作 GUI 侧的独立工作项。「分析模式」开关只决定 `ScriptErrorPolicy`，不是取消；
 - 运行期间状态栏显示「执行中」，长脚本由 core 的上限（SQL 字节数、语句数、表达式深度）约束。
 
 ### 3.3 open / close 时机
@@ -244,6 +246,7 @@ GUI 的展示完全是结构化字段到控件的映射，不做文本推断：
 | `kAnalysisError` | 诊断列表一条，标记为「分析」 | analyze 策略下影子状态明确拒绝 |
 | `kAnalysisOnly` | 结果区灰色行「已分析，未执行」 | analyze 策略首错之后 |
 | `kSkippedExecution` | 结果区灰色行「已跳过」 | stop 策略剩余语句，或致命中止之后 |
+| `kCancelled` | 结果区灰色行「已取消」 | U5 运行中取消：当前语句在无副作用检查点结束，或取消后未开始的语句；不携带 outcome，也不表示状态未知 |
 | `kExecutionIndeterminate` | 醒目警告「状态未知：storage 可能已产生副作用，请重新打开数据库核对」 | 必须显式提示，不能静默 |
 
 展示规则：
@@ -464,8 +467,8 @@ endif()
 
 GUI 测试全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不写真实数据目录。用例覆盖：
 
-- 八态 `StatementStatus`（含 U3 的 `kPlanOnly`）各自的渲染映射，以及 `script_error` 与
-  `statements` 并存的情况；
+- 九态 `StatementStatus`（含 U3 的 `kPlanOnly` 与 U5 的 `kCancelled`）各自的渲染映射，
+  以及 `script_error` 与 `statements` 并存的情况；
 - `CommandResult` 部分成功：同时显示 affected_rows 与错误；
 - 空结果集仍渲染表头；INT 与 VARCHAR（含 UTF-8）单元格文本；
 - 大结果集只转换可见行（表格模型按需转换，不预生成整表字符串）；
@@ -519,7 +522,7 @@ GUI 测试全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不
 
 1. 本文评审通过；
 2. 根开关 + `src/gui/CMakeLists.txt` + 空窗口骨架 + `Backend`/`FakeBackend`；
-3. `tinydbms_gui_ui_test` 与八态渲染、范围换算、fix-it 测试（此时不依赖 core）；
+3. `tinydbms_gui_ui_test` 与九态渲染、范围换算、fix-it 测试（此时不依赖 core）；
 4. 编辑器、结果表格模型、诊断列表、表浏览器；
 5. compiler 适配完成后补 `CoreBackend` 与真实链路手工验收；
 6. 补 README 与预设说明，执行 `debug`、`gui-debug` 两棵构建树的完整构建与 CTest。
@@ -552,11 +555,11 @@ offline 运行与 README 说明均已落地；第 5 步（真实链路）等待 
 
 ## 14. 第一版不做的事
 
-SQL 语法高亮与补全、多标签或多连接、结果导出、运行中取消、结果分页、查询历史、
+SQL 语法高亮与补全、多标签或多连接、结果导出、取消按钮、结果分页、查询历史、
 用户偏好持久化、国际化、皮肤主题、Windows 打包，以及编辑器内的「光标语句提示」
 （需要可靠的分句信息与光标位置联动，第一版不做）。
 
-这些能力都依赖公共契约目前没有的接口（例如取消、流式结果）或额外的产品决策，等出现真实需求
+这些能力都依赖公共契约目前没有的接口（例如流式结果）或额外的产品决策，等出现真实需求
 再单独设计，不在第一版预留抽象。
 
 ## 15. 已确认决策

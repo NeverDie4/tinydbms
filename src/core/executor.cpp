@@ -283,9 +283,14 @@ template <typename Abort, typename Handler>
 std::optional<Error> scan_records(
     CursorGuard& cursor,
     storage::CursorId cursor_id,
+    const CancelToken* cancel,
     Abort&& abort,
     Handler&& handler) {
     while (true) {
+        // 取消检查点在 storage 调用之前：命中时数组与 cursor 都由既有 RAII 路径回收，
+        // 且此时还没有产生任何副作用。
+        internal::throw_if_cancelled(cancel);
+
         storage::ScanNextResult next;
         try {
             next = storage::scan_next(storage::ScanNextRequest{cursor_id});
@@ -557,6 +562,7 @@ ExecuteResult Database::Impl::execute_delete(
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
+        cancel_token,
         [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             SlotRowResult materialized =
@@ -699,6 +705,7 @@ ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
+        cancel_token,
         [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             SlotRowResult materialized =
@@ -1340,7 +1347,8 @@ void sort_rows(
 }  // namespace
 
 ExecuteResult Database::Impl::execute_query(
-    const compiler::QueryPlan& plan) {
+    const compiler::QueryPlan& plan,
+    const std::size_t max_query_rows) {
     QueryValidationResult validation = validate_query_plan(catalog, plan);
     if (const Error* error = std::get_if<Error>(&validation)) {
         return ExecuteResult{*error};
@@ -1349,7 +1357,7 @@ ExecuteResult Database::Impl::execute_query(
 
     QueryResult result;
     result.columns = std::move(query.result_columns);
-    const auto execute_node = [this](
+    const auto execute_node = [this, max_query_rows](
                                   auto&& self,
                                   const compiler::PlanNode& node,
                                   std::size_t depth) -> DataflowRowsResult {
@@ -1398,6 +1406,7 @@ ExecuteResult Database::Impl::execute_query(
             const std::optional<Error> scan_error = scan_records(
                 cursor,
                 *opened.cursor,
+                cancel_token,
                 [this]() noexcept { abort_after_storage_exception(); },
                 [&](const storage::Record& record) -> std::optional<Error> {
                     SlotRowResult materialized =
@@ -1408,10 +1417,12 @@ ExecuteResult Database::Impl::execute_query(
                         abort_after_storage_exception();
                         return *error;
                     }
-                    if (rows.size() >= kMaxQueryRows) {
+                    if (rows.size() >= max_query_rows) {
                         return internal::make_error(
                             ErrorKind::kExecute,
-                            "query materialization exceeds the maximum row count");
+                            "query materialization exceeds the maximum row count (limit " +
+                                std::to_string(max_query_rows) + ")",
+                            std::string{"raise max_query_rows or narrow the query"});
                     }
                     rows.push_back(std::get<SlotRow>(std::move(materialized)));
                     return std::nullopt;
@@ -1463,6 +1474,7 @@ ExecuteResult Database::Impl::execute_query(
             std::vector<SlotRow> rows;
             rows.reserve(sortable.size());
             for (SortableRow& row : sortable) {
+                internal::throw_if_cancelled(cancel_token);
                 rows.push_back(std::move(row.row));
             }
             return rows;
@@ -1484,6 +1496,7 @@ ExecuteResult Database::Impl::execute_query(
             std::vector<SlotRow> joined;
             for (const SlotRow& left : left_rows) {
                 for (const SlotRow& right : right_rows) {
+                    internal::throw_if_cancelled(cancel_token);
                     SlotRowResult merged = merge_slot_rows(left, right);
                     if (const Error* error = std::get_if<Error>(&merged)) {
                         return *error;
@@ -1495,10 +1508,12 @@ ExecuteResult Database::Impl::execute_query(
                         return internal::make_error(ErrorKind::kInternal, error->message);
                     }
                     if (std::get<bool>(matches)) {
-                        if (joined.size() >= kMaxQueryRows) {
+                        if (joined.size() >= max_query_rows) {
                             return internal::make_error(
                                 ErrorKind::kExecute,
-                                "join materialization exceeds the maximum row count");
+                                "join materialization exceeds the maximum row count (limit " +
+                                    std::to_string(max_query_rows) + ")",
+                                std::string{"raise max_query_rows or narrow the query"});
                         }
                         joined.push_back(std::move(row));
                     }
@@ -1518,6 +1533,7 @@ ExecuteResult Database::Impl::execute_query(
                     {}, std::vector<AggregateState>(aggregate->aggregates.size())});
             }
             for (const SlotRow& row : std::get<std::vector<SlotRow>>(child_result)) {
+                internal::throw_if_cancelled(cancel_token);
                 std::vector<Value> keys;
                 keys.reserve(aggregate->group_keys.size());
                 for (SlotId slot_id : aggregate->group_keys) {
@@ -1594,16 +1610,26 @@ ExecuteResult Database::Impl::execute_query(
     return ExecuteResult{std::move(result)};
 }
 
-ExecuteResult Database::Impl::execute_plan_impl(compiler::Plan plan) {
+PlanExecutionResult Database::Impl::execute_plan_impl(
+    compiler::Plan plan,
+    const std::size_t max_query_rows,
+    const CancelToken* cancel) {
     if (!open) {
-        return internal::make_execute_error(ErrorKind::kExecute, "database is not open");
+        return PlanExecutionResult{
+            internal::make_execute_error(ErrorKind::kExecute, "database is not open"),
+            false};
     }
 
     // 每条语句执行前复位：异常中断后 script.cpp 依赖该标记判断是否可能有副作用。
     current_plan_storage_called = false;
+    cancel_token = cancel;
+
+    ExecuteResult result = internal::make_execute_error(
+        ErrorKind::kInternal, "statement execution did not complete");
+    bool cancelled = false;
     try {
-        return std::visit(
-            [this](auto&& typed_plan) -> ExecuteResult {
+        result = std::visit(
+            [this, max_query_rows](auto&& typed_plan) -> ExecuteResult {
                 using PlanType = std::decay_t<decltype(typed_plan)>;
 
                 if constexpr (std::is_same_v<PlanType, compiler::CreateTablePlan>) {
@@ -1615,17 +1641,23 @@ ExecuteResult Database::Impl::execute_plan_impl(compiler::Plan plan) {
                 } else if constexpr (std::is_same_v<PlanType, compiler::UpdatePlan>) {
                     return execute_update(typed_plan);
                 } else {
-                    return execute_query(typed_plan);
+                    return execute_query(typed_plan, max_query_rows);
                 }
             },
             std::move(plan.kind));
+    } catch (const internal::CancellationSignal&) {
+        // 取消只发生在无副作用检查点：不产生 outcome，也不使会话失效。
+        cancelled = true;
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
-        return make_internal_error(exception.what());
+        result = make_internal_error(exception.what());
     } catch (...) {
         abort_after_storage_exception();
-        return make_internal_error("unknown exception while executing plan");
+        result = make_internal_error("unknown exception while executing plan");
     }
+
+    cancel_token = nullptr;
+    return PlanExecutionResult{std::move(result), cancelled};
 }
 
 }  // namespace tinydbms::core

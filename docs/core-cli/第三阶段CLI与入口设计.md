@@ -102,6 +102,8 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --error-policy stop|analyze：脚本错误策略，最多出现一次；默认 stop；
 - --format table|json：结果展示格式，最多出现一次；默认 table（见 [JSON 输出设计](CLI升级设计_JSON输出.md)）；
 - --plan：整个调用进入计划模式，只编译并输出执行计划，最多出现一次（见 [Plan 整理输出设计](Plan整理输出设计.md)）；
+- --max-rows N：单条语句在内存中物化的最大行数，最多出现一次；N 为 `1..SIZE_MAX` 的十进制
+  整数，缺省使用 core 的 `kMaxQueryRows`（见 [结果集上限与分页设计](结果集上限与分页设计.md)）；
 - 未提供 --data-dir 时，使用 ./tinydbms-data。
 
 --help 或 --version 单独出现时立即成功退出，不创建 Database，也不访问 data_dir。
@@ -119,6 +121,8 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --error-policy 缺少值、值为空、未知值或重复出现；
 - --format 缺少值、值为空、未知值（非 table/json）或重复出现；
 - --plan 重复出现；
+- --max-rows 缺少值、值为空、非十进制数字（含前导 `+`/`-`、十六进制）、尾随字符、
+  数值为 `0` 或超出 `size_t` 范围，以及重复出现；
 - --help/--version 与其他参数混用。
 
 不支持位置参数、短选项、`--data-dir=DIR` 或未列出的 `--` 变体；它们均按未知参数处理。
@@ -225,6 +229,8 @@ best-effort close。`runner` 对 open 成功的 Session 保证最多调用一次
 - `kSkippedExecution`：stderr 输出 `SKIPPED <range> policy|aborted\\n`；本次脚本存在
   script_error 时为 `aborted`，仅因策略跳过时为 `policy`；
 - `kExecutionIndeterminate`：stderr 输出 `INDETERMINATE <range>\\n`；
+- `kCancelled`：stderr 输出 `CANCELLED <range>\\n`，并把本次调用标记为失败（退出码 1）；
+  JSON 模式下输出 `{"type":"status",...,"status":"cancelled",...}`，同样写 stderr；
 - `kPlanOnly`：与 `kExecuted` + QueryResult 一样输出查询结果（列名固定为 `plan`），
   但它表示“计划已生成”而不是“语句已执行”，只在 `--plan` 下出现；
 - 以上诊断文本（message/suggestion/replacement）使用与 VARCHAR 相同的单行转义。
@@ -246,6 +252,26 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 - `--plan` 只改变 core 的执行模式，不改变展示层：table 模式下按普通 QueryResult 打印
   （列头 `plan`，每行一行计划文本），JSON 模式下按普通 `query` 对象输出，不新增 schema 字段。
 - `--plan` 与 `--format` 正交，可任意组合；REPL 下 `--plan` 对整个会话生效。
+- `--max-rows N` 只透传到 `ExecuteScriptRequest::max_query_rows`：批处理与 REPL 的每一行都使用
+  同一个值，`--plan` 下该参数不生效但不报错。超限错误沿用既有通道，不新增 schema：
+  table 模式输出 `ERROR execute <range> <message>` 与 `SUGGESTION ...` 行，
+  JSON 模式在 `message` 之外附 `suggestion` 字段。
+
+### 6.4 运行中取消（SIGINT）
+
+- CLI 在 `main` 启动时安装 SIGINT 处理器：处理器只读取进程级"当前活动令牌"指针，非空且
+  尚未请求取消时调用一次 `request_cancel()`，不做展示、不写流、不分配内存。
+- 令牌生命周期：批处理在读取完 stdin 后构造一个令牌，REPL 每读取一行构造新令牌；
+  令牌由 RAII guard 在 `execute_script` 调用前后设置/清除，因此空闲期按下的 Ctrl+C
+  不会毒化后续执行，也不会让处理器读到悬垂指针。
+- 指针为空（空闲期、读输入期间）或该令牌已经请求过取消（执行期间第二次 Ctrl+C）时，
+  处理器恢复默认处置并重新触发 SIGINT，进程按信号默认处置终止（shell 观察到 130），
+  不引入新的应用退出码。
+- 首次 Ctrl+C 的效果：当前语句在下一个检查点结束并记 `kCancelled`，后续语句不再编译或
+  执行，同样记 `kCancelled`；`script_error` 为空。REPL 继续读取下一行，最终退出码为 1；
+  批处理按失败结束（退出码 1）。INSERT 首版不设检查点，因此长 INSERT 结束后才在语句
+  边界生效。
+- 取消的输出与 `SKIPPED`/`INDETERMINATE` 同流向（stderr），不改变 stdout 结果对象。
 
 ## 7. 退出码与错误策略
 
@@ -258,7 +284,8 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 
 `kAnalyzeRemaining` 中后续语句分析成功不能把退出码从 1 恢复为 0；`kAnalysisOnly`、
 `kSkippedExecution`、`kExecutionIndeterminate` 行本身不改变退出码，因为致命中止必然伴随
-`script_error`。
+`script_error`。`kCancelled` 例外：它不伴随 `script_error`，但取消是调用方的主动行为，
+本次调用按失败处理（退出码 1）。
 
 优先级如下：
 
@@ -282,9 +309,12 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 - 解析结果和默认 data_dir；
 - 批处理与 REPL 的模式判定；
 - 不输出 REPL 提示符的批处理路径；
-- QueryResult、CommandResult 与八态 StatementStatus 的 stdout/stderr 分流，包括
-  制表符/换行/反斜杠转义；kAnalysisOnly 与 kSkippedExecution 不输出 OK 或查询行；
+- QueryResult、CommandResult 与九态 StatementStatus（含 U5 的 kCancelled）的 stdout/stderr
+  分流，包括制表符/换行/反斜杠转义；kAnalysisOnly、kSkippedExecution 与 kCancelled
+  不输出 OK 或查询行；
 - `--format` 的缺值、空值、未知值、重复值四类参数错误，以及 `--plan` 的重复与混用参数错误；
+- `--max-rows` 的缺值与空值、非数字、带符号、尾随字符、`0`、溢出与重复八类参数错误，
+  以及批处理/REPL 的透传值（未提供时为 `kMaxQueryRows`）与两种格式下的超限错误展示；
 - JSON 模式的 golden 文本、字段顺序、转义边界与 rows/row_count 一致性，配合测试内置的
   极简 JSON 解析校验器；kPlanOnly 在 table 与 JSON 两种格式下都按查询结果展示；
 - SKIPPED（policy/aborted）、INDETERMINATE 与 script_error 的插入顺序和 stderr 归属；
@@ -360,7 +390,21 @@ UTF-8 VARCHAR 展示、编译与语义错误位置、storage 运行期错误（�
 - 真实 compiler + fake storage 的联调目标不链接 fake compiler 或真实 storage；
 - `--format json` 与 `--plan` 的验收：默认行为零变化、JSON 每行可被标准解析器解析、
   计划模式零副作用（真实链路用临时目录前后文件清单与数据校验断言）；
+- `--max-rows` 的验收：不提供时默认行为与现状一致（唯一有意变化是超限消息新增 `(limit N)`
+  与 suggestion）；提供后上限真实生效、超限语句使退出码为 1 且会话仍可用、数据文件未被修改；
+- U5 取消的验收：不请求取消时全部现有测试与输出零变化；请求取消后无 `script_error`、
+  无副作用、cursor 无泄漏、Database 仍可继续使用；table 与 JSON 两种格式的 `CANCELLED`
+  输出与退出码 1；REPL 每行使用独立令牌（第一行取消后第二行正常执行）；
+  真实链路用预置令牌验证数据文件未被修改，SIGINT 的首次/空闲期/第二次三条路径由手工冒烟覆盖；
 - 本轮为 U3（计划模式）修改了 include/tinydbms/core.hpp：新增 `ExecutionMode`、
   `StatementStatus::kPlanOnly`、`StatementResult::plan_only` 与 `ExecuteScriptRequest.mode`，
   已登记到 [消息契约详细设计](../消息契约详细设计.md) 并需要通知其他模块成员；
   除此之外不修改 include/tinydbms/。
+- 本轮为 U4（结果集上限）再次修改 include/tinydbms/core.hpp：新增
+  `ExecuteScriptRequest::max_query_rows`（带默认值，源兼容）；`kMaxQueryRows` 常量保留为
+  默认值锚点，已登记到 [消息契约详细设计](../消息契约详细设计.md) 与
+  [SQLv2 扩展契约](../SQLv2扩展契约.md) §7.3。
+- 本轮为 U5（运行中取消）第三次修改 include/tinydbms/core.hpp：新增 `CancelToken`、
+  `ExecuteScriptRequest::cancel`（带默认值）与 `StatementStatus::kCancelled`；新增枚举项会让
+  穷举 `StatementStatus` 的 switch 编译告警/报错，调用方需要补分支（已同步 core、app、GUI
+  与测试 fake）。请求对象因此不再是字面类型，`constexpr` 场景需要改用运行期校验。

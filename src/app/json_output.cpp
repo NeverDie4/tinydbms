@@ -483,6 +483,16 @@ RenderResult render_json_statement_result(
                 aborted ? "aborted" : "policy",
                 error_output),
             false};
+    case StatementStatus::kCancelled:
+        // 与 SKIPPED/INDETERMINATE 同样写 stderr；取消按失败计入退出码。
+        return RenderResult{
+            write_status_object(
+                "cancelled",
+                result.statement_index(),
+                result.source(),
+                std::nullopt,
+                error_output),
+            true};
     case StatementStatus::kExecutionIndeterminate:
         return RenderResult{
             write_status_object(

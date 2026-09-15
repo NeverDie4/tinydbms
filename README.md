@@ -62,8 +62,15 @@ SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子�
 
 CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|json`
 （JSON 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断）、`--plan`
-（只编译并打印执行计划，零副作用）。`--format` 与 `--plan` 可组合，行为契约见
+（只编译并打印执行计划，零副作用）、`--max-rows N`（单条语句在内存中物化的最大行数，
+缺省为 `kMaxQueryRows` = 262144，`0` 与非法值按参数错误处理）。`--format`、`--plan`
+与 `--max-rows` 可组合，行为契约见
 [docs/core-cli/第三阶段CLI与入口设计.md](docs/core-cli/第三阶段CLI与入口设计.md)。
+
+运行中取消：CLI 在 `execute_script` 期间按 Ctrl+C 会请求取消（`CancelToken`），当前语句在
+下一个无副作用检查点结束、剩余语句不再执行并记为 `CANCELLED`，本次调用退出码为 1；
+空闲期或第二次 Ctrl+C 按默认处置终止进程。GUI 侧只登记该能力边界，本版不提供取消按钮。
+规格见 [docs/core-cli/运行中取消设计.md](docs/core-cli/运行中取消设计.md)。
 
 ## 公共契约
 
@@ -88,6 +95,8 @@ core/CLI 的阶段设计入口：
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
 - [CLI 升级设计：JSON 输出（U2，已实现）](docs/core-cli/CLI升级设计_JSON输出.md)
 - [CLI 升级设计：Plan 整理输出（U3，已实现）](docs/core-cli/Plan整理输出设计.md)
+- [CLI 升级设计：结果集上限与分页（U4，设计中）](docs/core-cli/结果集上限与分页设计.md)
+- [CLI 升级设计：运行中取消（U5，设计中）](docs/core-cli/运行中取消设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
 - [GUI 设计（Qt6 可选前端）](docs/gui/GUI设计.md)
 

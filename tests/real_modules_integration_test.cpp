@@ -561,6 +561,105 @@ bool test_plan_mode_real_chain_has_no_side_effects() {
     return true;
 }
 
+bool test_real_chain_cancellation_leaves_data_unchanged() {
+    TemporaryDirectory data_dir{"tinydbms-integration-cancel"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "CREATE TABLE emp (id INT, amount BIGINT);\n"
+        "INSERT INTO emp VALUES (1, 10), (2, 20), (3, 30);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+    CHECK(setup.output == "OK 0\nOK 3\n");
+
+    const std::vector<std::string> before = list_data_files(data_dir.path());
+    CHECK(!before.empty());
+
+    // 真实 compiler + storage：请求前已置位的令牌让整段脚本在编译前结束。
+    {
+        Database database;
+        CHECK(!database.open({data_dir.path().string()}).error.has_value());
+        tinydbms::core::CancelToken cancel;
+        cancel.request_cancel();
+        ExecuteScriptRequest request{
+            "INSERT INTO emp VALUES (4, 40);\nSELECT * FROM emp;\n"};
+        request.cancel = cancel;
+        const auto result = database.execute_script(request);
+        CHECK(!result.script_error.has_value());
+        CHECK(result.statements.size() == 2);
+        for (const auto& statement : result.statements) {
+            CHECK(
+                statement.status() ==
+                tinydbms::core::StatementStatus::kCancelled);
+            CHECK(!statement.outcome().has_value());
+        }
+        CHECK(!database.close().error.has_value());
+    }
+
+    // 取消不产生任何副作用：文件清单与数据都保持不变。
+    CHECK(list_data_files(data_dir.path()) == before);
+    const InvocationResult verify =
+        invoke_cli(data_dir.path(), "SELECT * FROM emp;\n", false);
+    CHECK(verify.exit_code == 0);
+    CHECK(verify.error.empty());
+    CHECK(verify.output == "id\tamount\n1\t10\n2\t20\n3\t30\n");
+    return true;
+}
+
+bool test_real_chain_row_limit_is_reported_and_recoverable() {
+    TemporaryDirectory data_dir{"tinydbms-integration-row-limit"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "CREATE TABLE emp (id INT, amount BIGINT);\n"
+        "INSERT INTO emp VALUES (1, 10), (2, 20), (3, 30);\n"
+        "CREATE TABLE marker (id INT);\n"
+        "INSERT INTO marker VALUES (7);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+    CHECK(setup.output == "OK 0\nOK 3\nOK 0\nOK 1\n");
+    CHECK(setup.error.empty());
+
+    const std::vector<std::string> before = list_data_files(data_dir.path());
+    CHECK(!before.empty());
+
+    // 上限按物化节点计：emp 扫描 3 行，上限 2 必然超限。退出码 1，错误带当前上限与
+    // suggestion，且不写任何文件。
+    const InvocationResult limited = invoke_cli(
+        data_dir.path(), "SELECT * FROM emp;\n", false, {"--max-rows", "2"});
+    CHECK(limited.exit_code == 1);
+    CHECK(limited.output.empty());
+    CHECK(limited.error.rfind("ERROR execute 1:", 0) == 0);
+    CHECK(
+        limited.error.find(
+            "query materialization exceeds the maximum row count (limit 2)") !=
+        std::string::npos);
+    CHECK(
+        limited.error.find(
+            "SUGGESTION raise max_query_rows or narrow the query") !=
+        std::string::npos);
+    CHECK(list_data_files(data_dir.path()) == before);
+
+    // REPL：超限语句报错后会话仍可用，只扫描 1 行的语句在同一上限下正常返回；
+    // 有语句失败时退出码为 1。
+    const InvocationResult repl = invoke_cli(
+        data_dir.path(),
+        "SELECT * FROM emp;\nSELECT * FROM marker;\n",
+        true,
+        {"--max-rows", "2"});
+    CHECK(repl.exit_code == 1);
+    CHECK(repl.error.find("(limit 2)") != std::string::npos);
+    CHECK(repl.output == "id\n7\n");
+    CHECK(list_data_files(data_dir.path()) == before);
+
+    // 默认上限下数据完好：三条记录都在，文件集合也没有变化。
+    const InvocationResult verify = invoke_cli(
+        data_dir.path(), "SELECT * FROM emp;\n", false);
+    CHECK(verify.exit_code == 0);
+    CHECK(verify.error.empty());
+    CHECK(verify.output == "id\tamount\n1\t10\n2\t20\n3\t30\n");
+    CHECK(list_data_files(data_dir.path()) == before);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -574,7 +673,9 @@ int main() {
                 test_open_error_has_storage_exit_status() &&
                 test_sql_multipage_restart_acceptance() &&
                 test_json_batch_output_is_parseable() &&
-                test_plan_mode_real_chain_has_no_side_effects()
+                test_plan_mode_real_chain_has_no_side_effects() &&
+                test_real_chain_cancellation_leaves_data_unchanged() &&
+                test_real_chain_row_limit_is_reported_and_recoverable()
             ? 0
             : 1;
     } catch (const std::exception& exception) {

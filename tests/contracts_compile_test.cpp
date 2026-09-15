@@ -120,11 +120,22 @@ static_assert(std::is_same_v<
     std::optional<CompileStage>>);
 static_assert(core::kMaxStatementsPerScript == 4096);
 static_assert(core::kMaxQueryRows == (std::size_t{1} << 18));
-// U3 计划模式的公共契约：默认仍是执行模式（现有调用方零改动），工厂与字段类型固定。
-static_assert(core::ExecuteScriptRequest{}.mode == core::ExecutionMode::kExecute);
+// U3 计划模式 / U4 上限 / U5 取消令牌的公共契约：字段类型固定，默认值在 main() 运行期校验
+// （请求对象含 CancelToken，不再是字面类型，不能用于常量表达式）。
 static_assert(std::is_same_v<
     std::remove_cvref_t<decltype(core::ExecuteScriptRequest{}.mode)>,
     core::ExecutionMode>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::ExecuteScriptRequest{}.max_query_rows)>,
+    std::size_t>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::ExecuteScriptRequest{}.cancel)>,
+    core::CancelToken>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::cancelled(
+        std::declval<std::size_t>(),
+        std::declval<SourceRange>())),
+    core::StatementResult>);
 static_assert(std::is_same_v<
     decltype(core::StatementResult::plan_only(
         std::declval<std::size_t>(),
@@ -270,6 +281,19 @@ int main() {
     const ColumnMeta nullable_column{"name", Type::kVarchar, true};
     const SourceRange range{SourceLocation{2, 3, 7}, SourceLocation{4, 5, 19}};
 
+    // 请求默认值：执行模式、默认上限、从未请求取消的令牌。
+    const core::ExecuteScriptRequest default_request;
+    core::CancelToken cancellable;
+    const bool request_defaults_ok =
+        default_request.error_policy == core::ScriptErrorPolicy::kStopOnFirstError &&
+        default_request.mode == core::ExecutionMode::kExecute &&
+        default_request.max_query_rows == core::kMaxQueryRows &&
+        !default_request.cancel.cancel_requested() &&
+        !cancellable.cancel_requested();
+    cancellable.request_cancel();
+    const bool cancel_ok = cancellable.cancel_requested() &&
+        !default_request.cancel.cancel_requested();
+
     const bool common_contract =
         Type::kBigInt != Type::kInt &&
         Type::kDouble != Type::kInt &&
@@ -312,5 +336,5 @@ int main() {
     (void)deletion;
     (void)update;
     (void)update_request;
-    return common_contract ? 0 : 1;
+    return (common_contract && request_defaults_ok && cancel_ok) ? 0 : 1;
 }

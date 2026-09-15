@@ -263,6 +263,65 @@ ExecuteScriptResult execute_plans(
     return database.execute_script(ExecuteScriptRequest{std::move(script)});
 }
 
+ExecuteScriptResult execute_plan_with_limit(
+    Database& database,
+    Plan plan,
+    std::size_t max_query_rows,
+    tinydbms::core::ExecutionMode mode = tinydbms::core::ExecutionMode::kExecute) {
+    fake_compiler::reset();
+    std::deque<CompileResult> results;
+    results.emplace_back(std::move(plan));
+    fake_compiler::set_compile_results(std::move(results));
+    ExecuteScriptRequest request{"synthetic statement;"};
+    request.max_query_rows = max_query_rows;
+    request.mode = mode;
+    return database.execute_script(request);
+}
+
+ExecuteScriptResult execute_plans_with_limit(
+    Database& database,
+    std::deque<CompileResult> results,
+    std::size_t max_query_rows) {
+    fake_compiler::reset();
+    std::string script;
+    for (std::size_t index = 0; index < results.size(); ++index) {
+        script += "statement_" + std::to_string(index) + ';';
+    }
+    fake_compiler::set_compile_results(std::move(results));
+    ExecuteScriptRequest request{std::move(script)};
+    request.max_query_rows = max_query_rows;
+    return database.execute_script(request);
+}
+
+// 取消测试共用入口：令牌按值放进请求，测试侧持有的副本与请求共享同一标志。
+ExecuteScriptResult execute_plan_cancellable(
+    Database& database,
+    Plan plan,
+    const tinydbms::core::CancelToken& cancel) {
+    fake_compiler::reset();
+    std::deque<CompileResult> results;
+    results.emplace_back(std::move(plan));
+    fake_compiler::set_compile_results(std::move(results));
+    ExecuteScriptRequest request{"synthetic statement;"};
+    request.cancel = cancel;
+    return database.execute_script(request);
+}
+
+ExecuteScriptResult execute_plans_cancellable(
+    Database& database,
+    std::deque<CompileResult> results,
+    const tinydbms::core::CancelToken& cancel) {
+    fake_compiler::reset();
+    std::string script;
+    for (std::size_t index = 0; index < results.size(); ++index) {
+        script += "statement_" + std::to_string(index) + ';';
+    }
+    fake_compiler::set_compile_results(std::move(results));
+    ExecuteScriptRequest request{std::move(script)};
+    request.cancel = cancel;
+    return database.execute_script(request);
+}
+
 // storage 返回的行宽与 Catalog 不符：用于验证 core 会结束当前会话而不是继续执行。
 bool start_database_with_mismatched_record(Database& database) {
     fake::reset();
@@ -303,6 +362,10 @@ bool is_error(const ExecuteResult& result, ErrorKind kind) {
 
 bool is_error(const tinydbms::core::StatementResult& statement, ErrorKind kind) {
     return is_error(outcome_of(statement), kind);
+}
+
+const Error* error_of(const tinydbms::core::StatementResult& statement) {
+    return error_of(outcome_of(statement));
 }
 
 bool script_error_is(const ExecuteScriptResult& script, ErrorKind kind) {
@@ -1764,6 +1827,502 @@ bool test_join_materialization_is_bounded() {
     return true;
 }
 
+// 上限是请求级配置：同一 Database 的两次调用可以使用不同上限，错误带数值与 suggestion。
+bool test_query_row_limit_is_configurable_and_annotated() {
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    const TableMeta events = events_table();
+    fake::set_tables({events});
+    fake::set_records_for_table(
+        events.table_id,
+        {record(1, {Value{std::int64_t{1}}}), record(2, {Value{std::int64_t{2}}})});
+    CHECK(open_database(database));
+
+    const std::vector<QueryOutput> outputs{{0, "event_id", Type::kBigInt, false}};
+
+    const auto limited = execute_plan_with_limit(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs),
+        1U);
+    CHECK(limited.statements.size() == 1);
+    CHECK(!limited.script_error.has_value());
+    CHECK(
+        limited.statements.front().status() ==
+        tinydbms::core::StatementStatus::kExecutionError);
+    const Error* error = error_of(limited.statements.front());
+    CHECK(error != nullptr && error->kind == ErrorKind::kExecute);
+    CHECK(error->message == "query materialization exceeds the maximum row count (limit 1)");
+    CHECK(error->suggestion.has_value());
+    CHECK(*error->suggestion == "raise max_query_rows or narrow the query");
+    // 错误范围保持语句范围（CLI 侧据此渲染 `ERROR execute 1:1-1:21 ...`）。
+    const tinydbms::SourceRange limited_source = limited.statements.front().source();
+    CHECK(limited_source.begin.byte_offset == 0);
+    CHECK(limited_source.end.byte_offset == 20);
+
+    // 恰好等于上限不算超限：上限为行数下限（2 行数据在上限 2 下全部物化）。
+    const auto exact = execute_plan_with_limit(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs),
+        2U);
+    CHECK(exact.statements.size() == 1);
+    const QueryResult* exact_rows = query_of(exact.statements.front());
+    CHECK(exact_rows != nullptr && exact_rows->rows.size() == 2);
+
+    // 未提供新字段时仍走 kMaxQueryRows 默认值。
+    const auto defaulted = execute_plan(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs));
+    CHECK(defaulted.statements.size() == 1);
+    const QueryResult* default_rows = query_of(defaulted.statements.front());
+    CHECK(default_rows != nullptr && default_rows->rows.size() == 2);
+    CHECK(close_database(database));
+    return true;
+}
+
+bool test_join_row_limit_is_configurable() {
+    const TableMeta left_table = events_table();
+    const TableMeta right_table = measurements_table();
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({left_table, right_table});
+    fake::set_records_for_table(
+        left_table.table_id,
+        {record(1, {Value{std::int64_t{1}}}), record(2, {Value{std::int64_t{2}}})});
+    fake::set_records_for_table(
+        right_table.table_id,
+        {record(1, {Value{1.5}}), record(2, {Value{2.5}})});
+    CHECK(open_database(database));
+
+    // 2 × 2 的笛卡尔积：上限 3 必超限，上限 4 恰好完成。
+    const auto make_join = [&]() {
+        auto join_root = std::make_unique<PlanNode>(JoinNode{
+            JoinKind::kInner,
+            literal(Value{true}),
+            scan(left_table.table_id, {{0, 0}}),
+            scan(right_table.table_id, {{0, 5}})});
+        return query(
+            std::make_unique<PlanNode>(ProjectNode{{0}, std::move(join_root)}),
+            {{0, "event_id", Type::kBigInt, false}});
+    };
+
+    const auto limited = execute_plan_with_limit(database, make_join(), 3U);
+    CHECK(limited.statements.size() == 1);
+    CHECK(!limited.script_error.has_value());
+    CHECK(
+        limited.statements.front().status() ==
+        tinydbms::core::StatementStatus::kExecutionError);
+    const Error* error = error_of(limited.statements.front());
+    CHECK(error != nullptr && error->kind == ErrorKind::kExecute);
+    CHECK(error->message == "join materialization exceeds the maximum row count (limit 3)");
+    CHECK(error->suggestion.has_value());
+    CHECK(*error->suggestion == "raise max_query_rows or narrow the query");
+
+    const auto relaxed = execute_plan_with_limit(database, make_join(), 4U);
+    CHECK(relaxed.statements.size() == 1);
+    const QueryResult* rows = query_of(relaxed.statements.front());
+    CHECK(rows != nullptr && rows->rows.size() == 4);
+    CHECK(close_database(database));
+    return true;
+}
+
+// 0 是调用方违约：整段脚本在分句之前就被拒绝，不触碰 compiler 与 storage。
+bool test_zero_row_limit_is_rejected_before_any_work() {
+    Database database;
+    CHECK(start_database(
+        database,
+        {record(1, {int_value(1), text_value("alice"), int_value(30)})}));
+
+    const auto rejected = execute_plan_with_limit(database, query(scan()), 0U);
+    CHECK(rejected.statements.empty());
+    CHECK(script_error_is(rejected, ErrorKind::kExecute));
+    CHECK(rejected.script_error->message == "max_query_rows must be at least 1");
+    CHECK(!rejected.script_error->suggestion.has_value());
+    CHECK(!rejected.script_error->source.has_value());
+    CHECK(fake_compiler::state().split_calls == 0);
+    CHECK(fake_compiler::state().compile_calls == 0);
+    CHECK(fake::state().open_table_calls == 0);
+
+    // 违约不会毒化会话：同一实例在合法上限下继续工作。
+    const auto follow_up = execute_plan(database, query(scan()));
+    CHECK(follow_up.statements.size() == 1);
+    const QueryResult* rows = query_of(follow_up.statements.front());
+    CHECK(rows != nullptr && rows->rows.size() == 1);
+    CHECK(close_database(database));
+    return true;
+}
+
+// 上限只约束按行物化的节点：DELETE/UPDATE 只收集 RecordId，计划模式不进入执行器。
+bool test_row_limit_does_not_bound_delete_update_or_plan_mode() {
+    const std::vector<tinydbms::storage::Record> two_rows{
+        record(1, {int_value(1), text_value("alice"), int_value(30)}),
+        record(2, {int_value(2), text_value("bob"), int_value(40)})};
+
+    Database deleting;
+    CHECK(start_database(deleting, two_rows));
+    const auto deleted = execute_plan_with_limit(deleting, delete_plan(1), 1U);
+    CHECK(deleted.statements.size() == 1);
+    const CommandResult* delete_command = command_of(deleted.statements.front());
+    CHECK(delete_command != nullptr);
+    CHECK(delete_command->affected_rows == 2);
+    CHECK(!delete_command->error.has_value());
+    CHECK(close_database(deleting));
+
+    Database updating;
+    CHECK(start_database(updating, two_rows));
+    const auto updated = execute_plan_with_limit(
+        updating,
+        update_plan({UpdateAssignment{2, int_value(50)}}),
+        1U);
+    CHECK(updated.statements.size() == 1);
+    const CommandResult* update_command = command_of(updated.statements.front());
+    CHECK(update_command != nullptr);
+    CHECK(update_command->affected_rows == 2);
+    CHECK(!update_command->error.has_value());
+    CHECK(close_database(updating));
+
+    Database planning;
+    CHECK(start_database(planning, two_rows));
+    const auto planned = execute_plan_with_limit(
+        planning,
+        query(scan()),
+        1U,
+        tinydbms::core::ExecutionMode::kPlanOnly);
+    CHECK(planned.statements.size() == 1);
+    CHECK(
+        planned.statements.front().status() ==
+        tinydbms::core::StatementStatus::kPlanOnly);
+    const QueryResult* plan_rows = query_of(planned.statements.front());
+    // 计划文本按行返回：上限 1 下仍然产出多行，证明计划模式不经过物化检查。
+    CHECK(plan_rows != nullptr && plan_rows->rows.size() >= 2);
+    CHECK(close_database(planning));
+    return true;
+}
+
+// 上限按语句独立计数：同一脚本里两条各自触顶的查询都能成功。
+bool test_row_limit_counts_per_statement() {
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    const TableMeta events = events_table();
+    fake::set_tables({events});
+    fake::set_records_for_table(
+        events.table_id,
+        {record(1, {Value{std::int64_t{1}}}), record(2, {Value{std::int64_t{2}}})});
+    CHECK(open_database(database));
+
+    const std::vector<QueryOutput> outputs{{0, "event_id", Type::kBigInt, false}};
+    std::deque<CompileResult> results;
+    results.emplace_back(query(scan(events.table_id, {{0, 0}}), outputs));
+    results.emplace_back(query(scan(events.table_id, {{0, 0}}), outputs));
+
+    const auto script = execute_plans_with_limit(database, std::move(results), 2U);
+    CHECK(script.statements.size() == 2);
+    for (const auto& statement : script.statements) {
+        const QueryResult* rows = query_of(statement);
+        CHECK(rows != nullptr && rows->rows.size() == 2);
+    }
+    CHECK(close_database(database));
+    return true;
+}
+
+// 取消发生在扫描中途：当前语句记 kCancelled，不产生 script_error，cursor 正常关闭。
+bool test_scan_cancellation_marks_statement() {
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    const TableMeta events = events_table();
+    fake::set_tables({events});
+    fake::set_records_for_table(
+        events.table_id,
+        {record(1, {Value{std::int64_t{1}}}),
+         record(2, {Value{std::int64_t{2}}}),
+         record(3, {Value{std::int64_t{3}}})});
+    CHECK(open_database(database));
+
+    const std::vector<QueryOutput> outputs{{0, "event_id", Type::kBigInt, false}};
+    tinydbms::core::CancelToken cancel;
+    // 第一条记录返回后请求取消：下一个扫描迭代开始处的检查点命中。
+    fake::set_on_scan_next([&cancel]() { cancel.request_cancel(); });
+
+    const auto cancelled = execute_plan_cancellable(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs),
+        cancel);
+    CHECK(cancelled.statements.size() == 1);
+    CHECK(!cancelled.script_error.has_value());
+    CHECK(
+        cancelled.statements.front().status() ==
+        tinydbms::core::StatementStatus::kCancelled);
+    CHECK(!cancelled.statements.front().outcome().has_value());
+    // 取消路径与普通错误路径一样关闭 cursor，不泄漏。
+    CHECK(fake::state().close_cursor_calls == 1);
+    CHECK(!fake::state().cursor_opened);
+
+    // 会话仍可用：换一个未请求取消的令牌继续执行。
+    fake::set_on_scan_next(nullptr);
+    const auto follow_up = execute_plan(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs));
+    CHECK(follow_up.statements.size() == 1);
+    const QueryResult* rows = query_of(follow_up.statements.front());
+    CHECK(rows != nullptr && rows->rows.size() == 3);
+    CHECK(close_database(database));
+    return true;
+}
+
+// 语句边界取消：前一条语句在无检查点的 storage 调用后完成，后续语句不再编译、不再执行。
+bool test_statement_boundary_cancellation_stops_script() {
+    Database database;
+    CHECK(start_database(database));
+
+    tinydbms::core::CancelToken cancel;
+    // INSERT 首版不设检查点：钩子在 insert 返回后置位取消，语句本身仍然完成。
+    fake::set_on_insert([&cancel]() { cancel.request_cancel(); });
+
+    std::deque<CompileResult> results;
+    results.emplace_back(
+        insert_plan({}, {{int_value(1), text_value("alice"), int_value(30)}}));
+    results.emplace_back(query(scan()));
+
+    const auto script = execute_plans_cancellable(database, std::move(results), cancel);
+    CHECK(script.statements.size() == 2);
+    CHECK(!script.script_error.has_value());
+    const CommandResult* command = command_of(script.statements[0]);
+    CHECK(command != nullptr);
+    CHECK(command->affected_rows == 1);
+    CHECK(
+        script.statements[1].status() ==
+        tinydbms::core::StatementStatus::kCancelled);
+    // 被取消的语句没有编译，也没有打开任何表。
+    CHECK(fake_compiler::state().compile_calls == 1);
+    CHECK(fake::state().open_table_calls == 0);
+    CHECK(close_database(database));
+    return true;
+}
+
+// Join / Sort / Aggregate 的内存行循环各自设检查点：扫描结束后才请求取消时，
+// 取消必须在这些循环里命中，而不是等到语句边界。
+bool test_memory_loop_cancellation_covers_join_sort_and_aggregate() {
+    const std::vector<ScanColumn> mapping{{1, 3}, {0, 7}, {2, 11}};
+
+    // Join：左右各 1 条记录，各产生一次结束调用；在第 4 次 scan_next 之后请求取消。
+    {
+        Database database;
+        fake::reset();
+        fake_compiler::reset();
+        const TableMeta left_table = events_table();
+        const TableMeta right_table = measurements_table();
+        fake::set_tables({left_table, right_table});
+        fake::set_records_for_table(
+            left_table.table_id,
+            {record(1, {Value{std::int64_t{1}}})});
+        fake::set_records_for_table(
+            right_table.table_id,
+            {record(1, {Value{1.5}})});
+        CHECK(open_database(database));
+
+        tinydbms::core::CancelToken cancel;
+        fake::set_on_scan_next([&cancel]() {
+            if (fake::state().scan_next_calls >= 4U) {
+                cancel.request_cancel();
+            }
+        });
+
+        auto join_root = std::make_unique<PlanNode>(JoinNode{
+            JoinKind::kInner,
+            literal(Value{true}),
+            scan(left_table.table_id, {{0, 0}}),
+            scan(right_table.table_id, {{0, 5}})});
+        const auto cancelled = execute_plan_cancellable(
+            database,
+            query(
+                std::make_unique<PlanNode>(ProjectNode{{0}, std::move(join_root)}),
+                {{0, "event_id", Type::kBigInt, false}}),
+            cancel);
+        CHECK(cancelled.statements.size() == 1);
+        CHECK(!cancelled.script_error.has_value());
+        CHECK(
+            cancelled.statements.front().status() ==
+            tinydbms::core::StatementStatus::kCancelled);
+        // 两个扫描的 cursor 都已正常关闭；取消不产生物化错误。
+        CHECK(fake::state().close_cursor_calls == 2);
+        CHECK(!fake::state().cursor_opened);
+        CHECK(close_database(database));
+    }
+
+    // Sort：扫描 1 条记录后在结束调用上请求取消，取消在排序输出循环命中。
+    {
+        Database database;
+        fake::reset();
+        fake_compiler::reset();
+        fake::set_tables({users_table()});
+        fake::set_records_for_table(
+            users_table().table_id,
+            {record(1, {int_value(1), text_value("alice"), int_value(30)})});
+        CHECK(open_database(database));
+
+        tinydbms::core::CancelToken cancel;
+        fake::set_on_scan_next([&cancel]() {
+            if (fake::state().scan_next_calls >= 2U) {
+                cancel.request_cancel();
+            }
+        });
+
+        auto sort = std::make_unique<PlanNode>(SortNode{
+            {{7, SortDirection::kAsc}},
+            scan(1, mapping)});
+        auto projected = std::make_unique<PlanNode>(ProjectNode{{7}, std::move(sort)});
+        const auto cancelled = execute_plan_cancellable(
+            database,
+            query(std::move(projected), {{7, "id", Type::kInt, false}}),
+            cancel);
+        CHECK(cancelled.statements.size() == 1);
+        CHECK(!cancelled.script_error.has_value());
+        CHECK(
+            cancelled.statements.front().status() ==
+            tinydbms::core::StatementStatus::kCancelled);
+        CHECK(fake::state().close_cursor_calls == 1);
+        CHECK(close_database(database));
+    }
+
+    // Aggregate：同样在扫描结束调用上请求取消，取消在分组行循环命中。
+    {
+        Database database;
+        fake::reset();
+        fake_compiler::reset();
+        fake::set_tables({users_table()});
+        fake::set_records_for_table(
+            users_table().table_id,
+            {record(1, {int_value(1), text_value("alice"), int_value(30)})});
+        CHECK(open_database(database));
+
+        tinydbms::core::CancelToken cancel;
+        fake::set_on_scan_next([&cancel]() {
+            if (fake::state().scan_next_calls >= 2U) {
+                cancel.request_cancel();
+            }
+        });
+
+        auto aggregate = std::make_unique<PlanNode>(AggregateNode{
+            {},
+            {{AggregateKind::kCount, std::nullopt, 20, Type::kBigInt, false}},
+            scan(1, mapping)});
+        auto projected = std::make_unique<PlanNode>(ProjectNode{{20}, std::move(aggregate)});
+        const auto cancelled = execute_plan_cancellable(
+            database,
+            query(std::move(projected), {{20, "COUNT(*)", Type::kBigInt, false}}),
+            cancel);
+        CHECK(cancelled.statements.size() == 1);
+        CHECK(!cancelled.script_error.has_value());
+        CHECK(
+            cancelled.statements.front().status() ==
+            tinydbms::core::StatementStatus::kCancelled);
+        CHECK(fake::state().close_cursor_calls == 1);
+        CHECK(close_database(database));
+    }
+    return true;
+}
+
+// 取消发生在 DELETE/UPDATE 的收集阶段：不得调用写接口，也不得改动数据。
+bool test_cancellation_during_delete_and_update_collection_writes_nothing() {
+    const std::vector<tinydbms::storage::Record> records{
+        record(1, {int_value(1), text_value("alice"), int_value(30)}),
+        record(2, {int_value(2), text_value("bob"), int_value(40)})};
+
+    {
+        Database database;
+        CHECK(start_database(database, records));
+        tinydbms::core::CancelToken cancel;
+        fake::set_on_scan_next([&cancel]() { cancel.request_cancel(); });
+        const auto cancelled =
+            execute_plan_cancellable(database, delete_plan(1), cancel);
+        CHECK(cancelled.statements.size() == 1);
+        CHECK(!cancelled.script_error.has_value());
+        CHECK(
+            cancelled.statements.front().status() ==
+            tinydbms::core::StatementStatus::kCancelled);
+        CHECK(fake::state().delete_calls == 0);
+        CHECK(fake::state().close_cursor_calls == 1);
+        CHECK(close_database(database));
+    }
+
+    {
+        Database database;
+        CHECK(start_database(database, records));
+        tinydbms::core::CancelToken cancel;
+        fake::set_on_scan_next([&cancel]() { cancel.request_cancel(); });
+        const auto cancelled = execute_plan_cancellable(
+            database,
+            update_plan({UpdateAssignment{2, int_value(50)}}),
+            cancel);
+        CHECK(cancelled.statements.size() == 1);
+        CHECK(!cancelled.script_error.has_value());
+        CHECK(
+            cancelled.statements.front().status() ==
+            tinydbms::core::StatementStatus::kCancelled);
+        CHECK(fake::state().update_calls == 0);
+        CHECK(fake::state().close_cursor_calls == 1);
+        CHECK(close_database(database));
+    }
+    return true;
+}
+
+// 请求前就已置位的令牌：整段脚本在编译前被取消，statements 仍覆盖全部已识别语句。
+bool test_pre_cancelled_request_covers_all_statements_without_work() {
+    Database database;
+    CHECK(start_database(database));
+
+    tinydbms::core::CancelToken cancel;
+    cancel.request_cancel();
+
+    std::deque<CompileResult> results;
+    results.emplace_back(query(scan()));
+    results.emplace_back(query(scan()));
+    const auto script = execute_plans_cancellable(database, std::move(results), cancel);
+
+    CHECK(script.statements.size() == 2);
+    CHECK(!script.script_error.has_value());
+    for (const auto& statement : script.statements) {
+        CHECK(statement.status() == tinydbms::core::StatementStatus::kCancelled);
+        CHECK(!statement.outcome().has_value());
+    }
+    CHECK(fake_compiler::state().split_calls == 1);
+    CHECK(fake_compiler::state().compile_calls == 0);
+    CHECK(fake::state().open_table_calls == 0);
+    CHECK(close_database(database));
+    return true;
+}
+
+// 计划模式不进入执行器，取消退化为语句边界检查。
+bool test_plan_mode_cancellation_uses_statement_boundary() {
+    Database database;
+    CHECK(start_database(database));
+
+    tinydbms::core::CancelToken cancel;
+    cancel.request_cancel();
+
+    fake_compiler::reset();
+    std::deque<CompileResult> results;
+    results.emplace_back(query(scan()));
+    fake_compiler::set_compile_results(std::move(results));
+    ExecuteScriptRequest request{"synthetic statement;"};
+    request.mode = tinydbms::core::ExecutionMode::kPlanOnly;
+    request.cancel = cancel;
+    const auto script = database.execute_script(request);
+
+    CHECK(script.statements.size() == 1);
+    CHECK(!script.script_error.has_value());
+    CHECK(
+        script.statements.front().status() ==
+        tinydbms::core::StatementStatus::kCancelled);
+    CHECK(fake_compiler::state().compile_calls == 0);
+    CHECK(fake::state().open_table_calls == 0);
+    CHECK(close_database(database));
+    return true;
+}
+
 bool test_scan_row_schema_violation_invalidates_session() {
     Database database;
     CHECK(start_database_with_mismatched_record(database));
@@ -2117,6 +2676,17 @@ int main() {
         test_query_plan_depth_is_bounded() &&
         test_query_materialization_is_bounded() &&
         test_join_materialization_is_bounded() &&
+        test_query_row_limit_is_configurable_and_annotated() &&
+        test_join_row_limit_is_configurable() &&
+        test_zero_row_limit_is_rejected_before_any_work() &&
+        test_row_limit_does_not_bound_delete_update_or_plan_mode() &&
+        test_row_limit_counts_per_statement() &&
+        test_scan_cancellation_marks_statement() &&
+        test_statement_boundary_cancellation_stops_script() &&
+        test_memory_loop_cancellation_covers_join_sort_and_aggregate() &&
+        test_cancellation_during_delete_and_update_collection_writes_nothing() &&
+        test_pre_cancelled_request_covers_all_statements_without_work() &&
+        test_plan_mode_cancellation_uses_statement_boundary() &&
         test_scan_row_schema_violation_invalidates_session() &&
         test_open_and_scan_result_invariants_close_cursor_once() &&
         test_scan_row_and_close_failures_discard_query_and_delete() &&

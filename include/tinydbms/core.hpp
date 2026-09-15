@@ -1,6 +1,7 @@
 #ifndef TINYDBMS_CORE_HPP
 #define TINYDBMS_CORE_HPP
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -76,7 +77,10 @@ enum class StatementStatus {
     kExecutionIndeterminate,
     kAnalysisError,
     kAnalysisOnly,
-    kSkippedExecution
+    kSkippedExecution,
+    // 运行中取消：当前语句在无副作用检查点结束，后续语句未开始。不携带 outcome，
+    // 不产生 script_error，也不代表"状态未知"。
+    kCancelled
 };
 
 inline constexpr std::size_t kMaxStatementsPerScript = 4096;
@@ -85,6 +89,28 @@ inline constexpr std::size_t kMaxStatementsPerScript = 4096;
 // 该上限保证超越内存的结果规模以执行错误结束，而不是让进程无界增长或中止会话。
 // 计数按物化节点（扫描、连接）的行数计算，不包含 Storage 内部页与结果编码。
 inline constexpr std::size_t kMaxQueryRows = std::size_t{1} << 18;  // 262144
+
+// 运行中取消的请求级令牌：只做"置位 + 轮询"，不注册回调、不分配内存，
+// 因此 request_cancel() 可以在信号处理器里调用。拷贝共享同一标志。
+class CancelToken {
+public:
+    CancelToken() : flag_{std::make_shared<std::atomic<bool>>(false)} {}
+
+    void request_cancel() const noexcept {
+        flag_->store(true, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool cancel_requested() const noexcept {
+        return flag_->load(std::memory_order_relaxed);
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> flag_;
+};
+
+// 信号处理器可用性依赖无锁实现：标准没有显式担保，因此把前提固定在编译期，
+// 而不是留下运行时不确定性。
+static_assert(std::atomic<bool>::is_always_lock_free, "CancelToken requires lock-free atomics");
 
 namespace detail {
 
@@ -157,6 +183,7 @@ inline void validate_statement_result(
     case StatementStatus::kExecutionIndeterminate:
     case StatementStatus::kAnalysisOnly:
     case StatementStatus::kSkippedExecution:
+    case StatementStatus::kCancelled:
         if (value != nullptr) {
             invalid_statement_result("status must not carry an outcome");
         }
@@ -242,6 +269,14 @@ public:
             statement_index, source, StatementStatus::kSkippedExecution, std::nullopt};
     }
 
+    // 取消只发生在无副作用检查点：既不携带结果，也不表示物理状态未知。
+    static StatementResult cancelled(
+        std::size_t statement_index,
+        SourceRange source) {
+        return StatementResult{
+            statement_index, source, StatementStatus::kCancelled, std::nullopt};
+    }
+
     std::size_t statement_index() const noexcept {
         return statement_index_;
     }
@@ -291,6 +326,12 @@ struct ExecuteScriptRequest {
     std::string text;  // REPL 一行，或 stdin 批处理的整段文本
     ScriptErrorPolicy error_policy{ScriptErrorPolicy::kStopOnFirstError};
     ExecutionMode mode{ExecutionMode::kExecute};
+    // 单条语句在内存中物化的最大行数；必须 >= 1，默认值保持现行行为。
+    // 只约束按行物化的节点（SeqScan、Join），不约束只收集 RecordId 的 DELETE/UPDATE。
+    std::size_t max_query_rows{kMaxQueryRows};
+    // 运行中取消令牌：默认从未请求取消，因此不传令牌时行为与现状完全一致。
+    // 令牌不跨调用存活，调用方每次 execute_script 使用独立令牌。
+    CancelToken cancel{};
 };
 
 struct ExecuteScriptResult {

@@ -167,6 +167,14 @@ void set_throw_after_delete(bool enabled) {
     fake_state.throw_after_delete = enabled;
 }
 
+void set_on_scan_next(std::function<void()> hook) {
+    fake_state.on_scan_next = std::move(hook);
+}
+
+void set_on_insert(std::function<void()> hook) {
+    fake_state.on_insert = std::move(hook);
+}
+
 void clear_close_error() {
     fake_state.close_error.reset();
 }
@@ -348,6 +356,17 @@ ScanNextResult scan_next(const ScanNextRequest& request) {
     ++testing::fake_storage::state().scan_next_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
 
+    // 返回（含错误返回）后触发注入钩子：测试用它模拟"扫描中途发生外部事件"，
+    // 例如信号处理器请求取消当前脚本。
+    struct HookGuard {
+        testing::fake_storage::State& state;
+        ~HookGuard() {
+            if (state.on_scan_next) {
+                state.on_scan_next();
+            }
+        }
+    } hook_guard{fake};
+
     if (!fake.opened || !fake.cursor_opened || request.cursor != fake.active_cursor) {
         return ScanNextResult{std::nullopt, invalid_request("cursor is invalid")};
     }
@@ -409,6 +428,16 @@ InsertResult insert(const InsertRequest& request) {
     ++testing::fake_storage::state().insert_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_insert_request = request;
+
+    // 每次 insert 返回后触发注入钩子：用于验证 INSERT 首版不设取消检查点。
+    struct HookGuard {
+        testing::fake_storage::State& state;
+        ~HookGuard() {
+            if (state.on_insert) {
+                state.on_insert();
+            }
+        }
+    } hook_guard{fake};
 
     if (!fake.opened) {
         return InsertResult{{}, invalid_request("storage is not open")};

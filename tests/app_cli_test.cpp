@@ -57,6 +57,12 @@ public:
     std::vector<std::string> execute_texts;
     std::vector<ScriptErrorPolicy> execute_policies;
     std::vector<ExecutionMode> execute_modes;
+    std::vector<std::size_t> execute_max_query_rows;
+    // 每次 execute_script 进入时看到的取消状态；用来验证入口的令牌生命周期。
+    std::vector<bool> execute_cancel_requested;
+    // 非 0 时，第 N 次 execute_script 会请求该次请求的令牌（模拟信号处理器），
+    // 并返回一条被取消的语句。
+    std::size_t request_cancel_on_call = 0;
     std::string opened_data_dir;
     bool throw_on_execute = false;
     bool throw_bad_alloc_on_execute = false;
@@ -74,6 +80,17 @@ public:
         execute_texts.push_back(request.text);
         execute_policies.push_back(request.error_policy);
         execute_modes.push_back(request.mode);
+        execute_max_query_rows.push_back(request.max_query_rows);
+        execute_cancel_requested.push_back(request.cancel.cancel_requested());
+        if (request_cancel_on_call != 0 &&
+            request_cancel_on_call == execute_texts.size()) {
+            request.cancel.request_cancel();
+            ExecuteScriptResult cancelled_result;
+            cancelled_result.statements.push_back(StatementResult::cancelled(
+                0,
+                SourceRange{SourceLocation{1, 1, 0}, SourceLocation{1, 1, 0}}));
+            return cancelled_result;
+        }
         if (throw_bad_alloc_on_execute) {
             throw std::bad_alloc{};
         }
@@ -142,6 +159,19 @@ Error make_error(ErrorKind kind, std::string message) {
         std::nullopt,
         std::move(message),
         std::nullopt,
+        std::nullopt};
+}
+
+Error make_error(
+    ErrorKind kind,
+    std::string message,
+    std::string suggestion) {
+    return Error{
+        kind,
+        std::nullopt,
+        std::nullopt,
+        std::move(message),
+        std::optional<std::string>{std::move(suggestion)},
         std::nullopt};
 }
 
@@ -736,6 +766,199 @@ bool test_plan_flag_is_forwarded_as_mode() {
     return true;
 }
 
+bool test_max_rows_argument_errors() {
+    const std::vector<std::vector<std::string>> invalid_arguments{
+        {"tinydbms", "--max-rows"},
+        {"tinydbms", "--max-rows", ""},
+        {"tinydbms", "--max-rows", "--plan"},
+        {"tinydbms", "--max-rows", "abc"},
+        {"tinydbms", "--max-rows", "12x"},
+        {"tinydbms", "--max-rows", "+12"},
+        {"tinydbms", "--max-rows", "-1"},
+        {"tinydbms", "--max-rows", "0"},
+        {"tinydbms", "--max-rows", "0x10"},
+        {"tinydbms", "--max-rows", "99999999999999999999999999"},
+        {"tinydbms", "--max-rows=12"},
+        {"tinydbms", "--max-rows", "12", "--max-rows", "13"},
+        {"tinydbms", "--max-rows", "12", "--max-rows"},
+    };
+
+    for (const auto& arguments : invalid_arguments) {
+        FakeSession session;
+        std::string output;
+        std::string error;
+        CHECK(invoke(session, arguments, "", false, output, error) == 2);
+        CHECK(session.calls.empty());
+        CHECK(output.empty());
+        CHECK(error.find("argument error:") != std::string::npos);
+        CHECK(error.find("Usage: tinydbms") != std::string::npos);
+    }
+
+    FakeSession help_session;
+    std::string output;
+    std::string error;
+    CHECK(invoke(help_session, {"tinydbms", "--help"}, "", false, output, error) == 0);
+    CHECK(output.find("--max-rows") != std::string::npos);
+    return true;
+}
+
+bool test_max_rows_is_forwarded() {
+    FakeSession default_session;
+    std::string output;
+    std::string error;
+    CHECK(invoke(default_session, {"tinydbms"}, "SELECT 1;", false, output, error) == 0);
+    CHECK((default_session.execute_max_query_rows ==
+           std::vector<std::size_t>{tinydbms::core::kMaxQueryRows}));
+
+    FakeSession limited_session;
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              limited_session,
+              {"tinydbms", "--max-rows", "7"},
+              "SELECT 1;",
+              false,
+              output,
+              error) == 0);
+    CHECK((limited_session.execute_max_query_rows == std::vector<std::size_t>{7U}));
+
+    // 与 --plan 组合不报错：计划模式不进入执行器，参数照常透传。
+    FakeSession plan_session;
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              plan_session,
+              {"tinydbms", "--plan", "--max-rows", "3"},
+              "SELECT 1;",
+              false,
+              output,
+              error) == 0);
+    CHECK((plan_session.execute_modes == std::vector<ExecutionMode>{ExecutionMode::kPlanOnly}));
+    CHECK((plan_session.execute_max_query_rows == std::vector<std::size_t>{3U}));
+
+    // REPL 每行都沿用同一个参数值。
+    FakeSession repl_session;
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              repl_session,
+              {"tinydbms", "--max-rows", "5"},
+              "SELECT 1;\nSELECT 2;\n",
+              true,
+              output,
+              error) == 0);
+    CHECK((repl_session.execute_max_query_rows == std::vector<std::size_t>{5U, 5U}));
+    return true;
+}
+
+bool test_max_rows_limit_error_rendering() {
+    const std::string message{"query materialization exceeds the maximum row count (limit 5)"};
+    const std::string suggestion{"raise max_query_rows or narrow the query"};
+
+    FakeSession table_session;
+    table_session.execute_results.push_back(make_script({
+        StatementResult::execution_error(
+            0,
+            range(1, 1, 1, 21),
+            ExecuteResult{make_error(ErrorKind::kExecute, message, suggestion)}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(
+              table_session,
+              {"tinydbms", "--max-rows", "5"},
+              "SELECT * FROM events;",
+              false,
+              output,
+              error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "ERROR execute 1:1-1:21 " + message + "\n"
+          "SUGGESTION " + suggestion + "\n");
+
+    FakeSession json_session;
+    json_session.execute_results.push_back(make_script({
+        StatementResult::execution_error(
+            0,
+            range(1, 1, 1, 21),
+            ExecuteResult{make_error(ErrorKind::kExecute, message, suggestion)}),
+    }));
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              json_session,
+              {"tinydbms", "--format", "json", "--max-rows", "5"},
+              "SELECT * FROM events;",
+              false,
+              output,
+              error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "{\"type\":\"error\",\"scope\":\"statement\",\"statement_index\":0,"
+          "\"kind\":\"execute\",\"range\":\"1:1-1:21\","
+          "\"message\":\"query materialization exceeds the maximum row count (limit 5)\","
+          "\"suggestion\":\"raise max_query_rows or narrow the query\"}\n");
+    return true;
+}
+
+bool test_cancelled_statement_rendering() {
+    // table 格式：CANCELLED 写 stderr，本次调用按失败处理（退出码 1）。
+    FakeSession table_session;
+    table_session.execute_results.push_back(make_script({
+        StatementResult::cancelled(0, range(1, 1, 1, 12)),
+        StatementResult::cancelled(1, range(1, 13, 1, 24)),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(table_session, {"tinydbms"}, "SELECT 1;\nSELECT 2;\n", false, output, error) == 1);
+    CHECK(output.empty());
+    CHECK(error == "CANCELLED 1:1-1:12\nCANCELLED 1:13-1:24\n");
+
+    // JSON 格式：与 SKIPPED/INDETERMINATE 同构的 status 对象，同样写 stderr。
+    FakeSession json_session;
+    json_session.execute_results.push_back(make_script({
+        StatementResult::cancelled(0, range(1, 1, 1, 12)),
+    }));
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              json_session,
+              {"tinydbms", "--format", "json"},
+              "SELECT 1;\n",
+              false,
+              output,
+              error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "{\"type\":\"status\",\"statement_index\":0,\"status\":\"cancelled\","
+          "\"range\":\"1:1-1:12\"}\n");
+    return true;
+}
+
+bool test_repl_uses_fresh_cancel_token_per_line() {
+    FakeSession session;
+    // 第一行由"信号处理器"请求取消；第二行必须使用未请求取消的新令牌。
+    session.request_cancel_on_call = 1;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0,
+            range(1, 1, 1, 10),
+            ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms"}, "SELECT 1;\nSELECT 2;\n", true, output, error) == 1);
+    CHECK((session.execute_cancel_requested == std::vector<bool>{false, false}));
+    CHECK((session.execute_texts == std::vector<std::string>{"SELECT 1;", "SELECT 2;"}));
+    // 取消后 REPL 继续读取下一行；被取消的语句本身写 stderr，不影响后续结果。
+    CHECK(output == "OK 1\n");
+    CHECK(error.find("CANCELLED 1:1-1:1") != std::string::npos);
+    return true;
+}
+
 bool test_json_query_and_command_objects() {
     FakeSession session;
     session.execute_results.push_back(make_script({
@@ -1019,6 +1242,11 @@ int main() {
         test_query_result_escaping() &&
         test_format_and_plan_argument_errors() &&
         test_plan_flag_is_forwarded_as_mode() &&
+        test_max_rows_argument_errors() &&
+        test_max_rows_is_forwarded() &&
+        test_max_rows_limit_error_rendering() &&
+        test_cancelled_statement_rendering() &&
+        test_repl_uses_fresh_cancel_token_per_line() &&
         test_json_query_and_command_objects() &&
         test_json_diagnostics_and_ordering() &&
         test_json_analyze_status_and_partial_command() &&

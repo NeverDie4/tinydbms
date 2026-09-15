@@ -27,6 +27,8 @@ inline std::size_t executed_count(const core::ExecuteScriptResult& result) {
         case core::StatementStatus::kAnalysisError:
         case core::StatementStatus::kAnalysisOnly:
         case core::StatementStatus::kSkippedExecution:
+        // 取消没有 outcome：既无结果也无错误，调用方无法据此判断执行到哪一步。
+        case core::StatementStatus::kCancelled:
             break;
         }
     }
@@ -41,6 +43,7 @@ inline std::optional<std::size_t> first_error_index(
         case core::StatementStatus::kPlanOnly:
         case core::StatementStatus::kAnalysisOnly:
         case core::StatementStatus::kSkippedExecution:
+        case core::StatementStatus::kCancelled:
             break;
         case core::StatementStatus::kCompileError:
         case core::StatementStatus::kExecutionError:
