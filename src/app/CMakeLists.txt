@@ -3,8 +3,10 @@ add_library(tinydbms_cli_logic STATIC
     input.cpp
     json_output.cpp
     output.cpp
+    pretty_output.cpp
     runner.cpp
     terminal.cpp
+    value_text.cpp
 )
 
 target_include_directories(tinydbms_cli_logic PRIVATE

@@ -17,4 +17,12 @@ bool stdin_is_terminal() noexcept {
 #endif
 }
 
+bool stdout_is_terminal() noexcept {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return ::isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
 }  // namespace tinydbms::app

@@ -1,33 +1,23 @@
 #include "output.hpp"
 
 #include "json_output.hpp"
+#include "pretty_output.hpp"
+#include "value_text.hpp"
 
-#include <array>
-#include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace tinydbms::app {
 namespace {
-
-// CLI 侧发现的结果不变式破坏：core 的工厂理论上不允许出现，这里只做防御性兜底，
-// 保证任何异常组合都会留下 stderr 诊断而不是静默失败。
-tinydbms::core::Error malformed_result_error(std::string message) {
-    return tinydbms::core::Error{
-        tinydbms::core::ErrorKind::kInternal,
-        std::nullopt,
-        std::nullopt,
-        std::move(message),
-        std::nullopt,
-        std::nullopt};
-}
 
 std::string_view compile_stage_name(tinydbms::CompileStage stage) noexcept {
     switch (stage) {
@@ -73,40 +63,6 @@ std::string_view script_error_kind_name(tinydbms::core::ErrorKind kind) noexcept
         return "internal";
     }
     return "internal";
-}
-
-std::string double_text(double value) {
-    std::array<char, 64> buffer{};
-    const auto [end, error] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-    if (error != std::errc{}) {
-        return "<unsupported DOUBLE value>";
-    }
-    std::string result(buffer.data(), end);
-    if (result.find_first_of(".eE") == std::string::npos) {
-        result += ".0";
-    }
-    return result;
-}
-
-std::string value_text(const tinydbms::Value& value) {
-    return std::visit(
-        [](const auto& item) -> std::string {
-            using Item = std::decay_t<decltype(item)>;
-            if constexpr (std::is_same_v<Item, std::monostate>) {
-                return "NULL";
-            } else if constexpr (std::is_same_v<Item, std::int32_t>) {
-                return std::to_string(item);
-            } else if constexpr (std::is_same_v<Item, std::int64_t>) {
-                return std::to_string(item);
-            } else if constexpr (std::is_same_v<Item, double>) {
-                return double_text(item);
-            } else if constexpr (std::is_same_v<Item, bool>) {
-                return item ? "TRUE" : "FALSE";
-            } else {
-                return item;
-            }
-        },
-        value.data);
 }
 
 bool write_row(
@@ -212,9 +168,38 @@ std::string escape_text(std::string_view text) {
     return escaped;
 }
 
+tinydbms::core::Error malformed_result_error(std::string message) {
+    return tinydbms::core::Error{
+        tinydbms::core::ErrorKind::kInternal,
+        std::nullopt,
+        std::nullopt,
+        std::move(message),
+        std::nullopt,
+        std::nullopt};
+}
+
 std::string format_source_range(const tinydbms::SourceRange& range) {
     return std::to_string(range.begin.line) + ':' + std::to_string(range.begin.column) +
         '-' + std::to_string(range.end.line) + ':' + std::to_string(range.end.column);
+}
+
+std::string format_milliseconds(std::chrono::nanoseconds elapsed) {
+    if (elapsed.count() < 0) {
+        elapsed = std::chrono::nanoseconds{0};
+    }
+    // steady_clock 的时长换算成毫秒后固定三位小数；四舍五入交给 iostream 的 fixed/setprecision。
+    const std::chrono::duration<double, std::milli> milliseconds{elapsed};
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(3) << milliseconds.count();
+    return text.str();
+}
+
+bool write_time_line(
+    std::string_view scope,
+    std::chrono::nanoseconds elapsed,
+    std::ostream& output) {
+    output << "TIME " << scope << ' ' << format_milliseconds(elapsed) << " ms\n";
+    return static_cast<bool>(output);
 }
 
 bool write_statement_error(
@@ -247,9 +232,10 @@ bool write_error(const tinydbms::core::Error& error, std::ostream& output) {
 
 namespace {
 
-RenderResult render_table_statement_result(
+RenderResult render_text_statement_result(
     const tinydbms::core::StatementResult& result,
     bool aborted,
+    bool pretty,
     std::ostream& output,
     std::ostream& error_output) {
     using tinydbms::core::StatementStatus;
@@ -259,7 +245,9 @@ RenderResult render_table_statement_result(
         const tinydbms::core::ExecuteResult& outcome = *result.outcome();
         if (const auto* query = std::get_if<tinydbms::core::QueryResult>(&outcome.outcome);
             query != nullptr) {
-            return write_query_result(*query, output, error_output);
+            return pretty
+                ? write_pretty_query_result(*query, output, error_output)
+                : write_query_result(*query, output, error_output);
         }
         const auto* command = std::get_if<tinydbms::core::CommandResult>(&outcome.outcome);
         if (command == nullptr) {
@@ -272,7 +260,11 @@ RenderResult render_table_statement_result(
                     error_output),
                 true};
         }
-        return RenderResult{write_command_result(*command, output), false};
+        return RenderResult{
+            pretty
+                ? write_pretty_command_result(*command, output)
+                : write_command_result(*command, output),
+            false};
     }
     case StatementStatus::kPlanOnly: {
         const tinydbms::core::ExecuteResult& outcome = *result.outcome();
@@ -287,7 +279,9 @@ RenderResult render_table_statement_result(
                     error_output),
                 true};
         }
-        return write_query_result(*query, output, error_output);
+        return pretty
+            ? write_pretty_query_result(*query, output, error_output)
+            : write_query_result(*query, output, error_output);
     }
     case StatementStatus::kCompileError:
     case StatementStatus::kExecutionError:
@@ -310,7 +304,10 @@ RenderResult render_table_statement_result(
                     error_output),
                 true};
         }
-        if (!write_command_result(*command, output)) {
+        const bool command_written = pretty
+            ? write_pretty_command_result(*command, output)
+            : write_command_result(*command, output);
+        if (!command_written) {
             return RenderResult{false, true};
         }
         return RenderResult{
@@ -361,7 +358,13 @@ RenderResult render_statement_result(
     if (format == OutputFormat::kJson) {
         return render_json_statement_result(result, aborted, output, error_output);
     }
-    return render_table_statement_result(result, aborted, output, error_output);
+    // pretty 只替换成功结果的呈现；诊断、状态与错误路径与 table 完全共用一套实现。
+    return render_text_statement_result(
+        result,
+        aborted,
+        format == OutputFormat::kPretty,
+        output,
+        error_output);
 }
 
 }  // namespace tinydbms::app

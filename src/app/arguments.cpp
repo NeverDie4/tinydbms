@@ -34,6 +34,7 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
     bool data_dir_seen = false;
     bool error_policy_seen = false;
     bool format_seen = false;
+    bool time_seen = false;
     bool plan_seen = false;
     bool max_rows_seen = false;
 
@@ -95,6 +96,7 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
                 return make_error("--format may appear only once");
             }
             format_seen = true;
+            result.format_explicit = true;
 
             std::string message;
             if (!take_value(index, "--format", message)) {
@@ -103,11 +105,21 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
             const std::string_view value{argv[++index]};
             if (value == "table") {
                 result.format = OutputFormat::kTable;
+            } else if (value == "pretty") {
+                result.format = OutputFormat::kPretty;
             } else if (value == "json") {
                 result.format = OutputFormat::kJson;
             } else {
-                return make_error("--format must be table or json");
+                return make_error("--format must be table, pretty or json");
             }
+            continue;
+        }
+        if (argument == "--time") {
+            if (time_seen) {
+                return make_error("--time may appear only once");
+            }
+            time_seen = true;
+            result.show_time = true;
             continue;
         }
         if (argument == "--plan") {
@@ -166,8 +178,11 @@ bool write_help(std::ostream& output) {
            << "  --data-dir DIR         database directory (default: " << kDefaultDataDir << ")\n"
            << "  --error-policy POLICY  stop (default) or analyze; analyze only inspects later\n"
            << "                         statements and never executes them\n"
-           << "  --format FORMAT        table (default) or json; json prints one JSON object\n"
-           << "                         per line\n"
+           << "  --format FORMAT        table, pretty or json; pretty is the default when\n"
+           << "                         stdout is a terminal, table otherwise; json prints\n"
+           << "                         one JSON object per line\n"
+           << "  --time                 print the wall-clock time of each executed script or\n"
+           << "                         REPL line to stderr\n"
            << "  --plan                 compile only and print the execution plan; nothing is\n"
            << "                         executed and no data is modified\n"
            << "  --max-rows N           maximum rows materialized for one statement\n"

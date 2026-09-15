@@ -25,7 +25,8 @@ int run_application(int argc, char* const argv[]) {
             std::cin,
             std::cout,
             std::cerr,
-            tinydbms::app::stdin_is_terminal()};
+            tinydbms::app::stdin_is_terminal(),
+            tinydbms::app::stdout_is_terminal()};
         return tinydbms::app::run_cli(
             argc,
             argv,

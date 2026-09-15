@@ -7,9 +7,11 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -791,6 +793,10 @@ struct ValidatedQuery {
     const compiler::PlanNode* input = nullptr;
     std::vector<SlotId> outputs;
     std::vector<ColumnHeader> result_columns;
+    // 计划校验期间累积的 slot 绑定：slot_id -> 该 slot 的声明类型默认值，覆盖整棵计划
+    // （连接可能被 Aggregate/Filter/Sort 包在中间）。执行器用它区分同类型/跨类型等值
+    // 连接键，不参与结果输出。
+    std::vector<internal::expression::SlotValue> slot_types;
 };
 
 using QueryValidationResult = std::variant<ValidatedQuery, Error>;
@@ -810,10 +816,49 @@ using DataflowValidationResult = std::variant<SlotRow, Error>;
     return merged;
 }
 
+// 执行期专用：校验阶段已经确认左右输入 slot 不相交，这里只做一次线性检查，
+// 之后的每一对行都可以用线性拼接代替 merge_slot_rows 的重复扫描。
+[[nodiscard]] bool slot_sets_disjoint(const SlotRow& left, const SlotRow& right) {
+    for (const internal::expression::SlotValue& left_value : left) {
+        for (const internal::expression::SlotValue& right_value : right) {
+            if (left_value.slot_id == right_value.slot_id) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] SlotRow merge_disjoint_rows(const SlotRow& left, const SlotRow& right) {
+    SlotRow merged;
+    merged.reserve(left.size() + right.size());
+    merged.insert(merged.end(), left.begin(), left.end());
+    merged.insert(merged.end(), right.begin(), right.end());
+    return merged;
+}
+
+// 收集整棵计划的 slot -> 声明类型默认值绑定。连接节点可能被 Aggregate/Filter/Sort
+// 包在中间，执行期无法从顶层输入行推出内层 slot 的类别，所以这里按节点累积：
+// slot 由 SeqScan 与 Aggregate 引入，其余节点只做透传。
+void append_slot_types(
+    std::vector<internal::expression::SlotValue>& slot_types,
+    const SlotRow& row) {
+    for (const internal::expression::SlotValue& entry : row) {
+        const bool known = std::any_of(
+            slot_types.begin(), slot_types.end(), [&entry](const auto& existing) {
+                return existing.slot_id == entry.slot_id;
+            });
+        if (!known) {
+            slot_types.push_back(entry);
+        }
+    }
+}
+
 DataflowValidationResult validate_dataflow_node(
     const std::vector<TableMeta>& catalog,
     const compiler::PlanNode& node,
-    std::size_t depth) {
+    std::size_t depth,
+    std::vector<internal::expression::SlotValue>& slot_types) {
     if (depth >= kMaxPlanDepth) {
         return internal::make_error(
             ErrorKind::kInternal, "query plan depth exceeds core limit");
@@ -829,7 +874,13 @@ DataflowValidationResult validate_dataflow_node(
             table_error.has_value()) {
             return std::move(*table_error);
         }
-        return make_validation_slot_row(*table, scan->columns);
+        SlotRowResult row = make_validation_slot_row(*table, scan->columns);
+        if (const Error* error = std::get_if<Error>(&row)) {
+            return *error;
+        }
+        SlotRow slots = std::get<SlotRow>(std::move(row));
+        append_slot_types(slot_types, slots);
+        return slots;
     }
 
     if (const auto* filter = std::get_if<compiler::FilterNode>(&node.kind)) {
@@ -837,7 +888,7 @@ DataflowValidationResult validate_dataflow_node(
             return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
         }
         DataflowValidationResult child =
-            validate_dataflow_node(catalog, *filter->child, depth + 1U);
+            validate_dataflow_node(catalog, *filter->child, depth + 1U, slot_types);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -858,7 +909,7 @@ DataflowValidationResult validate_dataflow_node(
             return internal::make_error(ErrorKind::kInternal, "sort node has a null child");
         }
         DataflowValidationResult child =
-            validate_dataflow_node(catalog, *sort->child, depth + 1U);
+            validate_dataflow_node(catalog, *sort->child, depth + 1U, slot_types);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -877,12 +928,12 @@ DataflowValidationResult validate_dataflow_node(
             return internal::make_error(ErrorKind::kInternal, "join node has a null child");
         }
         DataflowValidationResult left =
-            validate_dataflow_node(catalog, *join->left, depth + 1U);
+            validate_dataflow_node(catalog, *join->left, depth + 1U, slot_types);
         if (const Error* error = std::get_if<Error>(&left)) {
             return *error;
         }
         DataflowValidationResult right =
-            validate_dataflow_node(catalog, *join->right, depth + 1U);
+            validate_dataflow_node(catalog, *join->right, depth + 1U, slot_types);
         if (const Error* error = std::get_if<Error>(&right)) {
             return *error;
         }
@@ -906,7 +957,7 @@ DataflowValidationResult validate_dataflow_node(
                 ErrorKind::kInternal, "aggregate node has a null child");
         }
         DataflowValidationResult child =
-            validate_dataflow_node(catalog, *aggregate->child, depth + 1U);
+            validate_dataflow_node(catalog, *aggregate->child, depth + 1U, slot_types);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -985,6 +1036,7 @@ DataflowValidationResult validate_dataflow_node(
             output.push_back(internal::expression::SlotValue{
                 call.output_slot, validation_value(call.output_type)});
         }
+        append_slot_types(slot_types, output);
         return output;
     }
 
@@ -1009,14 +1061,17 @@ QueryValidationResult validate_query_plan(
     const compiler::PlanNode* input = project == nullptr
         ? plan.root.get()
         : project->child.get();
+    std::vector<internal::expression::SlotValue> slot_types;
     DataflowValidationResult validation_row =
-        validate_dataflow_node(catalog, *input, 1U);
+        validate_dataflow_node(catalog, *input, 1U, slot_types);
     if (const Error* error = std::get_if<Error>(&validation_row)) {
         return *error;
     }
 
     ValidatedQuery result;
     result.input = input;
+    // 整棵计划的 slot 声明类型绑定：执行期用它判断连接键两侧的值类别。
+    result.slot_types = std::move(slot_types);
     if (project == nullptr) {
         for (const internal::expression::SlotValue& value : std::get<SlotRow>(validation_row)) {
             result.outputs.push_back(value.slot_id);
@@ -1146,6 +1201,171 @@ struct AggregateGroup {
     const std::vector<Value>& rhs) {
     return lhs.size() == rhs.size() && std::equal(
         lhs.begin(), lhs.end(), rhs.begin(), grouping_value_equal);
+}
+
+// 单值哈希必须与 grouping_value_equal / 精确键相等完全一致：变体下标参与区分，
+// -0.0 归一成 0.0（比较语义认为两者相等），其余按值哈希。哈希只用于分桶，
+// 相等判定仍由 grouping_value_equal 决定，所以允许碰撞但不允许"相等却不同桶"。
+[[nodiscard]] std::size_t value_hash(const Value& value) noexcept {
+    return std::visit(
+        [](const auto& item) -> std::size_t {
+            using Item = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<Item, std::monostate>) {
+                return 0U;
+            } else if constexpr (std::is_same_v<Item, double>) {
+                return std::hash<double>{}(item == 0.0 ? 0.0 : item);
+            } else {
+                return std::hash<Item>{}(item);
+            }
+        },
+        value.data);
+}
+
+struct ValueKeyHash {
+    [[nodiscard]] std::size_t operator()(const std::vector<Value>& key) const noexcept {
+        // FNV-1a 风格的顺序混合：分组键与连接键都用它，保持不同排序可区分。
+        std::size_t seed = 1469598103934665603ULL;
+        for (const Value& value : key) {
+            seed = (seed ^ value_hash(value)) * 1099511628211ULL;
+        }
+        return seed;
+    }
+};
+
+struct ValueKeyEqual {
+    [[nodiscard]] bool operator()(
+        const std::vector<Value>& lhs,
+        const std::vector<Value>& rhs) const noexcept {
+        return grouping_keys_equal(lhs, rhs);
+    }
+};
+
+// 连接键的值类别：只有类别完全相同的两侧 slot 才能做精确哈希匹配。
+// INT/BIGINT/DOUBLE 之间会发生数值提升，跨类别等值必须退回嵌套循环。
+enum class SlotKeyType {
+    kNull,
+    kInt,
+    kBigInt,
+    kDouble,
+    kVarchar,
+    kBoolean,
+    kOther
+};
+
+[[nodiscard]] SlotKeyType slot_key_type(const Value& value) noexcept {
+    // 直接按变体分支判断：与 grouping_value_equal 的"变体下标 + 值"口径一致。
+    if (std::holds_alternative<std::monostate>(value.data)) return SlotKeyType::kNull;
+    if (std::holds_alternative<std::int32_t>(value.data)) return SlotKeyType::kInt;
+    if (std::holds_alternative<std::int64_t>(value.data)) return SlotKeyType::kBigInt;
+    if (std::holds_alternative<double>(value.data)) return SlotKeyType::kDouble;
+    if (std::holds_alternative<std::string>(value.data)) return SlotKeyType::kVarchar;
+    if (std::holds_alternative<bool>(value.data)) return SlotKeyType::kBoolean;
+    return SlotKeyType::kOther;
+}
+
+// 哈希连接的键：left_slots[i] 与 right_slots[i] 是一对可建的等值列。
+struct EquiJoinKeyPlan {
+    std::vector<SlotId> left_slots;
+    std::vector<SlotId> right_slots;
+
+    [[nodiscard]] bool usable() const noexcept {
+        return !left_slots.empty() && left_slots.size() == right_slots.size();
+    }
+};
+
+[[nodiscard]] const Value* find_slot_type_value(
+    const std::vector<internal::expression::SlotValue>& slot_types,
+    SlotId slot_id) {
+    for (const internal::expression::SlotValue& entry : slot_types) {
+        if (entry.slot_id == slot_id) {
+            return &entry.value;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] bool contains_slot(const std::vector<SlotId>& slots, SlotId slot_id) {
+    return std::find(slots.begin(), slots.end(), slot_id) != slots.end();
+}
+
+[[nodiscard]] std::vector<SlotId> slot_ids_of(const SlotRow& row) {
+    std::vector<SlotId> ids;
+    ids.reserve(row.size());
+    for (const internal::expression::SlotValue& entry : row) {
+        ids.push_back(entry.slot_id);
+    }
+    return ids;
+}
+
+// 只收集"可以证明安全"的等值项：AND 链上的列=列等值，且两侧 slot 值类别完全相同。
+// 收集不完整不会影响正确性——命中候选后仍要复核完整条件——但收集错一项就会漏结果，
+// 因此这里对类型、方向与操作符都从严判断。
+void collect_equi_join_pairs(
+    const compiler::Expr& condition,
+    const std::vector<SlotId>& left_slots,
+    const std::vector<SlotId>& right_slots,
+    const std::vector<internal::expression::SlotValue>& slot_types,
+    EquiJoinKeyPlan& plan) {
+    const auto* binary = std::get_if<compiler::Binary>(&condition.kind);
+    if (binary == nullptr) {
+        return;
+    }
+    if (const auto* logic = std::get_if<compiler::LogicOp>(&binary->op)) {
+        if (*logic != compiler::LogicOp::kAnd) {
+            return;
+        }
+        if (binary->lhs) {
+            collect_equi_join_pairs(
+                *binary->lhs, left_slots, right_slots, slot_types, plan);
+        }
+        if (binary->rhs) {
+            collect_equi_join_pairs(
+                *binary->rhs, left_slots, right_slots, slot_types, plan);
+        }
+        return;
+    }
+    const auto* comparison = std::get_if<compiler::CmpOp>(&binary->op);
+    if (comparison == nullptr || *comparison != compiler::CmpOp::kEq ||
+        !binary->lhs || !binary->rhs) {
+        return;
+    }
+    const auto* lhs_ref = std::get_if<compiler::ColumnRef>(&binary->lhs->kind);
+    const auto* rhs_ref = std::get_if<compiler::ColumnRef>(&binary->rhs->kind);
+    if (lhs_ref == nullptr || rhs_ref == nullptr) {
+        return;
+    }
+
+    SlotId left_id = 0;
+    SlotId right_id = 0;
+    if (contains_slot(left_slots, lhs_ref->slot_id) &&
+        contains_slot(right_slots, rhs_ref->slot_id)) {
+        left_id = lhs_ref->slot_id;
+        right_id = rhs_ref->slot_id;
+    } else if (contains_slot(right_slots, lhs_ref->slot_id) &&
+               contains_slot(left_slots, rhs_ref->slot_id)) {
+        left_id = rhs_ref->slot_id;
+        right_id = lhs_ref->slot_id;
+    } else {
+        return;
+    }
+
+    const Value* left_type = find_slot_type_value(slot_types, left_id);
+    const Value* right_type = find_slot_type_value(slot_types, right_id);
+    if (left_type == nullptr || right_type == nullptr) {
+        return;
+    }
+    const SlotKeyType left_key = slot_key_type(*left_type);
+    if (left_key != slot_key_type(*right_type) || left_key == SlotKeyType::kNull ||
+        left_key == SlotKeyType::kOther) {
+        return;
+    }
+
+    if (contains_slot(plan.left_slots, left_id) &&
+        contains_slot(plan.right_slots, right_id)) {
+        return;
+    }
+    plan.left_slots.push_back(left_id);
+    plan.right_slots.push_back(right_id);
 }
 
 [[nodiscard]] std::variant<std::int64_t, Error> checked_increment(
@@ -1363,7 +1583,7 @@ ExecuteResult Database::Impl::execute_query(
 
     QueryResult result;
     result.columns = std::move(query.result_columns);
-    const auto execute_node = [this, max_query_rows, &context](
+    const auto execute_node = [this, max_query_rows, &context, &query](
                                   auto&& self,
                                   const compiler::PlanNode& node,
                                   std::size_t depth) -> DataflowRowsResult {
@@ -1500,28 +1720,118 @@ ExecuteResult Database::Impl::execute_query(
             const std::vector<SlotRow>& right_rows =
                 std::get<std::vector<SlotRow>>(right_result);
             std::vector<SlotRow> joined;
+            if (left_rows.empty() || right_rows.empty()) {
+                return joined;
+            }
+            // 校验阶段已用 merge_slot_rows 拒绝过重复 slot；这里只做一次线性复核，
+            // 之后每一对行都可以直接拼接，去掉逐对的 O((n+m)²) 查重。
+            if (!slot_sets_disjoint(left_rows.front(), right_rows.front())) {
+                return internal::make_error(
+                    ErrorKind::kInternal,
+                    "join inputs contain duplicate slot bindings");
+            }
+
+            const auto push_match = [&](SlotRow candidate) -> std::optional<Error> {
+                const std::variant<bool, ExpressionError> matches =
+                    internal::expression::evaluate_predicate(join->condition, candidate);
+                if (const ExpressionError* error = std::get_if<ExpressionError>(&matches)) {
+                    return internal::make_error(ErrorKind::kInternal, error->message);
+                }
+                if (!std::get<bool>(matches)) {
+                    return std::nullopt;
+                }
+                if (joined.size() >= max_query_rows) {
+                    return internal::make_error(
+                        ErrorKind::kExecute,
+                        "join materialization exceeds the maximum row count (limit " +
+                            std::to_string(max_query_rows) + ")",
+                        std::string{"raise max_query_rows or narrow the query"});
+                }
+                joined.push_back(std::move(candidate));
+                return std::nullopt;
+            };
+
+            // 等值键只做"候选筛选"：命中后仍然求值完整条件，因此非等值合取项、
+            // OR/NOT/IS NULL 与混合类型比较的语义与嵌套循环完全一致。
+            EquiJoinKeyPlan key_plan;
+            collect_equi_join_pairs(
+                join->condition,
+                slot_ids_of(left_rows.front()),
+                slot_ids_of(right_rows.front()),
+                query.slot_types,
+                key_plan);
+
+            if (key_plan.usable()) {
+                std::unordered_map<
+                    std::vector<Value>, std::vector<std::size_t>, ValueKeyHash, ValueKeyEqual>
+                    right_index;
+                for (std::size_t index = 0; index < right_rows.size(); ++index) {
+                    internal::throw_if_cancelled(context.cancel_token);
+                    std::vector<Value> key;
+                    key.reserve(key_plan.right_slots.size());
+                    bool has_null = false;
+                    for (SlotId slot_id : key_plan.right_slots) {
+                        SlotLookupResult value = lookup_slot(right_rows[index], slot_id);
+                        if (const Error* error = std::get_if<Error>(&value)) {
+                            return *error;
+                        }
+                        const Value& found = **std::get_if<const Value*>(&value);
+                        if (is_null(found)) {
+                            has_null = true;
+                            break;
+                        }
+                        key.push_back(found);
+                    }
+                    // NULL 键与任何值的比较都是 UNKNOWN，不可能成为结果，直接跳过。
+                    if (!has_null) {
+                        right_index[std::move(key)].push_back(index);
+                    }
+                }
+
+                for (const SlotRow& left : left_rows) {
+                    internal::throw_if_cancelled(context.cancel_token);
+                    std::vector<Value> key;
+                    key.reserve(key_plan.left_slots.size());
+                    bool has_null = false;
+                    for (SlotId slot_id : key_plan.left_slots) {
+                        SlotLookupResult value = lookup_slot(left, slot_id);
+                        if (const Error* error = std::get_if<Error>(&value)) {
+                            return *error;
+                        }
+                        const Value& found = **std::get_if<const Value*>(&value);
+                        if (is_null(found)) {
+                            has_null = true;
+                            break;
+                        }
+                        key.push_back(found);
+                    }
+                    if (has_null) {
+                        continue;
+                    }
+                    const auto candidates = right_index.find(key);
+                    if (candidates == right_index.end()) {
+                        continue;
+                    }
+                    // 右行按插入顺序收集，因此输出顺序与嵌套循环逐对推进时一致。
+                    for (std::size_t index : candidates->second) {
+                        internal::throw_if_cancelled(context.cancel_token);
+                        const std::optional<Error> error =
+                            push_match(merge_disjoint_rows(left, right_rows[index]));
+                        if (error.has_value()) {
+                            return *error;
+                        }
+                    }
+                }
+                return joined;
+            }
+
             for (const SlotRow& left : left_rows) {
                 for (const SlotRow& right : right_rows) {
                     internal::throw_if_cancelled(context.cancel_token);
-                    SlotRowResult merged = merge_slot_rows(left, right);
-                    if (const Error* error = std::get_if<Error>(&merged)) {
+                    const std::optional<Error> error =
+                        push_match(merge_disjoint_rows(left, right));
+                    if (error.has_value()) {
                         return *error;
-                    }
-                    SlotRow row = std::get<SlotRow>(std::move(merged));
-                    const std::variant<bool, ExpressionError> matches =
-                        internal::expression::evaluate_predicate(join->condition, row);
-                    if (const ExpressionError* error = std::get_if<ExpressionError>(&matches)) {
-                        return internal::make_error(ErrorKind::kInternal, error->message);
-                    }
-                    if (std::get<bool>(matches)) {
-                        if (joined.size() >= max_query_rows) {
-                            return internal::make_error(
-                                ErrorKind::kExecute,
-                                "join materialization exceeds the maximum row count (limit " +
-                                    std::to_string(max_query_rows) + ")",
-                                std::string{"raise max_query_rows or narrow the query"});
-                        }
-                        joined.push_back(std::move(row));
                     }
                 }
             }
@@ -1534,32 +1844,40 @@ ExecuteResult Database::Impl::execute_query(
                 return *error;
             }
             std::vector<AggregateGroup> groups;
+            // 键 -> groups 下标：把逐行线性找组换成哈希查找，输出顺序仍由 groups 决定。
+            std::unordered_map<
+                std::vector<Value>, std::size_t, ValueKeyHash, ValueKeyEqual>
+                group_index;
             if (aggregate->group_keys.empty()) {
                 groups.push_back(AggregateGroup{
                     {}, std::vector<AggregateState>(aggregate->aggregates.size())});
             }
             for (const SlotRow& row : std::get<std::vector<SlotRow>>(child_result)) {
                 internal::throw_if_cancelled(context.cancel_token);
-                std::vector<Value> keys;
-                keys.reserve(aggregate->group_keys.size());
-                for (SlotId slot_id : aggregate->group_keys) {
-                    SlotLookupResult value = lookup_slot(row, slot_id);
-                    if (const Error* error = std::get_if<Error>(&value)) return *error;
-                    keys.push_back(**std::get_if<const Value*>(&value));
+                std::size_t group_position = 0;
+                if (!aggregate->group_keys.empty()) {
+                    std::vector<Value> keys;
+                    keys.reserve(aggregate->group_keys.size());
+                    for (SlotId slot_id : aggregate->group_keys) {
+                        SlotLookupResult value = lookup_slot(row, slot_id);
+                        if (const Error* error = std::get_if<Error>(&value)) return *error;
+                        keys.push_back(**std::get_if<const Value*>(&value));
+                    }
+                    const auto found = group_index.find(keys);
+                    if (found == group_index.end()) {
+                        groups.push_back(AggregateGroup{
+                            std::move(keys),
+                            std::vector<AggregateState>(aggregate->aggregates.size())});
+                        group_position = groups.size() - 1U;
+                        group_index.emplace(groups.back().keys, group_position);
+                    } else {
+                        group_position = found->second;
+                    }
                 }
-                auto group = std::find_if(
-                    groups.begin(), groups.end(), [&keys](const AggregateGroup& candidate) {
-                        return grouping_keys_equal(candidate.keys, keys);
-                    });
-                if (group == groups.end()) {
-                    groups.push_back(AggregateGroup{
-                        std::move(keys),
-                        std::vector<AggregateState>(aggregate->aggregates.size())});
-                    group = groups.end() - 1;
-                }
+                AggregateGroup& group = groups[group_position];
                 for (std::size_t index = 0; index < aggregate->aggregates.size(); ++index) {
                     auto accumulated = accumulate_aggregate(
-                        aggregate->aggregates[index], row, group->states[index]);
+                        aggregate->aggregates[index], row, group.states[index]);
                     if (const Error* error = std::get_if<Error>(&accumulated)) return *error;
                 }
             }

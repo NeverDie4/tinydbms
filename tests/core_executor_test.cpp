@@ -114,6 +114,21 @@ TableMeta flags_table() {
         std::vector<ColumnMeta>{{"active", Type::kBoolean}}};
 }
 
+// 可空键列：用于验证 NULL 键既不参与哈希匹配也不影响分组顺序。
+TableMeta nullable_keys_table() {
+    return TableMeta{
+        6,
+        "nullable_keys",
+        std::vector<ColumnMeta>{{"k", Type::kInt, true}}};
+}
+
+TableMeta nullable_measurements_table() {
+    return TableMeta{
+        7,
+        "nullable_measurements",
+        std::vector<ColumnMeta>{{"value", Type::kDouble, true}}};
+}
+
 Value int_value(std::int32_t value) {
     return Value{value};
 }
@@ -1057,6 +1072,222 @@ bool test_inner_join_uses_non_positional_slots() {
     CHECK(internal_script_abort(missing_result));
     CHECK(fake::state().open_table_calls == 0);
     CHECK(close_database(missing_slot));
+    return true;
+}
+
+// 哈希连接与哈希分组必须与嵌套循环/线性分组给出完全相同的结果与顺序。
+bool test_hash_join_and_group_paths_preserve_semantics() {
+    const std::vector<ScanColumn> user_mapping{{1, 3}, {0, 7}, {2, 11}};
+    const std::vector<ScanColumn> membership_mapping{{1, 15}, {0, 20}, {2, 25}};
+
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({users_table(), memberships_table()});
+    fake::set_records_for_table(1, {
+        record(1, {int_value(1), text_value("alice"), int_value(30)}),
+        record(2, {int_value(2), text_value("bob"), int_value(20)}),
+        record(3, {int_value(3), text_value("carol"), int_value(40)})});
+    fake::set_records_for_table(5, {
+        record(10, {int_value(1), text_value("reader"), Value{true}}),
+        record(11, {int_value(1), text_value("admin"), Value{false}}),
+        record(12, {int_value(2), text_value("writer"), Value{true}}),
+        record(13, {Value{std::monostate{}}, text_value("unknown"),
+                    Value{std::monostate{}}}),
+        record(14, {int_value(9), text_value("orphan"), Value{false}})});
+    CHECK(open_database(database));
+
+    // 1) INT = INT 等值连接：走哈希候选路径，顺序与嵌套循环一致（左行序 → 右行序）。
+    auto joined = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(7), column(20)),
+        scan(1, user_mapping),
+        scan(5, membership_mapping)});
+    auto joined_project =
+        std::make_unique<PlanNode>(ProjectNode{{3, 15}, std::move(joined)});
+    const auto joined_result = execute_plan(
+        database,
+        query(
+            std::move(joined_project),
+            {{3, "person_name", Type::kVarchar, false},
+             {15, "label", Type::kVarchar, false}}));
+    const QueryResult* joined_rows = query_of(joined_result.statements.front());
+    CHECK(joined_rows != nullptr && joined_rows->rows.size() == 3);
+    CHECK(std::get<std::string>(joined_rows->rows[0][0].data) == "alice");
+    CHECK(std::get<std::string>(joined_rows->rows[0][1].data) == "reader");
+    CHECK(std::get<std::string>(joined_rows->rows[1][0].data) == "alice");
+    CHECK(std::get<std::string>(joined_rows->rows[1][1].data) == "admin");
+    CHECK(std::get<std::string>(joined_rows->rows[2][0].data) == "bob");
+    CHECK(std::get<std::string>(joined_rows->rows[2][1].data) == "writer");
+
+    // 2) 两侧同为 NULL 的键不匹配：比较结果是 UNKNOWN。
+    Database nullable_keys;
+    CHECK(close_database(database));
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({nullable_keys_table(), memberships_table()});
+    fake::set_records_for_table(6, {
+        record(1, {Value{std::monostate{}}}),
+        record(2, {int_value(1)})});
+    fake::set_records_for_table(5, {
+        record(10, {Value{std::monostate{}}, text_value("null"), Value{true}}),
+        record(11, {int_value(1), text_value("one"), Value{true}})});
+    CHECK(open_database(nullable_keys));
+    const std::vector<ScanColumn> key_mapping{{0, 30}};
+    auto null_join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(30), column(20)),
+        scan(6, key_mapping),
+        scan(5, membership_mapping)});
+    auto null_project = std::make_unique<PlanNode>(ProjectNode{{15}, std::move(null_join)});
+    const auto null_result = execute_plan(
+        nullable_keys,
+        query(std::move(null_project), {{15, "label", Type::kVarchar, false}}));
+    const QueryResult* null_rows = query_of(null_result.statements.front());
+    CHECK(null_rows != nullptr && null_rows->rows.size() == 1);
+    CHECK(std::get<std::string>(null_rows->rows[0][0].data) == "one");
+    CHECK(close_database(nullable_keys));
+
+    // 3) 混合数值类型（INT 与 BIGINT）不建哈希键，退回嵌套循环但保持数值提升语义。
+    Database mixed;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({users_table(), events_table()});
+    fake::set_records_for_table(1, {
+        record(1, {int_value(1), text_value("alice"), int_value(30)}),
+        record(2, {int_value(2), text_value("bob"), int_value(20)}),
+        record(3, {int_value(3), text_value("carol"), int_value(40)})});
+    fake::set_records_for_table(2, {
+        record(1, {Value{std::int64_t{1}}}),
+        record(2, {Value{std::int64_t{2}}}),
+        record(3, {Value{std::int64_t{3}}})});
+    CHECK(open_database(mixed));
+    const std::vector<ScanColumn> event_mapping{{0, 40}};
+    auto mixed_join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(7), column(40)),
+        scan(1, user_mapping),
+        scan(2, event_mapping)});
+    auto mixed_project = std::make_unique<PlanNode>(ProjectNode{{7}, std::move(mixed_join)});
+    const auto mixed_result = execute_plan(
+        mixed,
+        query(std::move(mixed_project), {{7, "id", Type::kInt, false}}));
+    const QueryResult* mixed_rows = query_of(mixed_result.statements.front());
+    CHECK(mixed_rows != nullptr && mixed_rows->rows.size() == 3);
+
+    // 4) 非等值条件同样退回嵌套循环：users.id < events.event_id 有 3 对。
+    auto less_join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kLt, column(7), column(40)),
+        scan(1, user_mapping),
+        scan(2, event_mapping)});
+    auto less_project = std::make_unique<PlanNode>(ProjectNode{{7}, std::move(less_join)});
+    const auto less_result = execute_plan(
+        mixed,
+        query(std::move(less_project), {{7, "id", Type::kInt, false}}));
+    const QueryResult* less_rows = query_of(less_result.statements.front());
+    CHECK(less_rows != nullptr && less_rows->rows.size() == 3);
+    CHECK(close_database(mixed));
+
+    // 5) 分组语义：0.0 与 -0.0 同组、NULL 自成一组、输出保持首次出现顺序。
+    Database grouped;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({nullable_measurements_table()});
+    fake::set_records_for_table(7, {
+        record(1, {Value{1.0}}),
+        record(2, {Value{0.0}}),
+        record(3, {Value{-0.0}}),
+        record(4, {Value{1.0}}),
+        record(5, {Value{std::monostate{}}}),
+        record(6, {Value{std::monostate{}}}),
+        record(7, {Value{2.5}})});
+    CHECK(open_database(grouped));
+    const std::vector<ScanColumn> measurement_mapping{{0, 3}};
+    auto aggregate = std::make_unique<PlanNode>(AggregateNode{
+        {3},
+        {{AggregateKind::kCount, std::nullopt, 20, Type::kBigInt, false}},
+        scan(7, measurement_mapping)});
+    auto aggregate_project =
+        std::make_unique<PlanNode>(ProjectNode{{3, 20}, std::move(aggregate)});
+    const auto grouped_result = execute_plan(
+        grouped,
+        query(
+            std::move(aggregate_project),
+            {{3, "value", Type::kDouble, true},
+             {20, "COUNT(*)", Type::kBigInt, false}}));
+    const QueryResult* group_rows = query_of(grouped_result.statements.front());
+    CHECK(group_rows != nullptr && group_rows->rows.size() == 4);
+    CHECK(std::get<double>(group_rows->rows[0][0].data) == 1.0);
+    CHECK(std::get<std::int64_t>(group_rows->rows[0][1].data) == 2);
+    CHECK(std::get<double>(group_rows->rows[1][0].data) == 0.0);
+    CHECK(std::get<std::int64_t>(group_rows->rows[1][1].data) == 2);
+    CHECK(std::holds_alternative<std::monostate>(group_rows->rows[2][0].data));
+    CHECK(std::get<std::int64_t>(group_rows->rows[2][1].data) == 2);
+    CHECK(std::get<double>(group_rows->rows[3][0].data) == 2.5);
+    CHECK(std::get<std::int64_t>(group_rows->rows[3][1].data) == 1);
+    CHECK(close_database(grouped));
+
+    // 6) 聚合包在连接之上：slot 类型绑定必须覆盖整棵计划，否则连接键在顶层输入行里
+    //    查不到类型，哈希候选会静默退化成嵌套循环（结果相同，代价不同）。
+    Database aggregated;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({users_table(), memberships_table()});
+    fake::set_records_for_table(1, {
+        record(1, {int_value(1), text_value("alice"), int_value(30)}),
+        record(2, {int_value(2), text_value("bob"), int_value(20)}),
+        record(3, {int_value(3), text_value("carol"), int_value(40)})});
+    fake::set_records_for_table(5, {
+        record(10, {int_value(1), text_value("reader"), Value{true}}),
+        record(11, {int_value(1), text_value("admin"), Value{false}}),
+        record(12, {int_value(2), text_value("writer"), Value{true}}),
+        record(14, {int_value(9), text_value("orphan"), Value{false}})});
+    CHECK(open_database(aggregated));
+
+    auto count_join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(7), column(20)),
+        scan(1, user_mapping),
+        scan(5, membership_mapping)});
+    auto count_aggregate = std::make_unique<PlanNode>(AggregateNode{
+        {},
+        {{AggregateKind::kCount, std::nullopt, 60, Type::kBigInt, false}},
+        std::move(count_join)});
+    auto count_project =
+        std::make_unique<PlanNode>(ProjectNode{{60}, std::move(count_aggregate)});
+    const auto count_result = execute_plan(
+        aggregated,
+        query(std::move(count_project), {{60, "COUNT(*)", Type::kBigInt, false}}));
+    const QueryResult* count_rows = query_of(count_result.statements.front());
+    CHECK(count_rows != nullptr && count_rows->rows.size() == 1);
+    CHECK(std::get<std::int64_t>(count_rows->rows[0][0].data) == 3);
+
+    // 分组键取连接左侧的 slot 7，输出按组的首次出现顺序。
+    auto grouped_join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(7), column(20)),
+        scan(1, user_mapping),
+        scan(5, membership_mapping)});
+    auto grouped_aggregate = std::make_unique<PlanNode>(AggregateNode{
+        {7},
+        {{AggregateKind::kCount, std::nullopt, 61, Type::kBigInt, false}},
+        std::move(grouped_join)});
+    auto grouped_project =
+        std::make_unique<PlanNode>(ProjectNode{{7, 61}, std::move(grouped_aggregate)});
+    const auto grouped_join_result = execute_plan(
+        aggregated,
+        query(
+            std::move(grouped_project),
+            {{7, "id", Type::kInt, false}, {61, "COUNT(*)", Type::kBigInt, false}}));
+    const QueryResult* group_rows_over_join =
+        query_of(grouped_join_result.statements.front());
+    CHECK(group_rows_over_join != nullptr && group_rows_over_join->rows.size() == 2);
+    CHECK(std::get<std::int32_t>(group_rows_over_join->rows[0][0].data) == 1);
+    CHECK(std::get<std::int64_t>(group_rows_over_join->rows[0][1].data) == 2);
+    CHECK(std::get<std::int32_t>(group_rows_over_join->rows[1][0].data) == 2);
+    CHECK(std::get<std::int64_t>(group_rows_over_join->rows[1][1].data) == 1);
+    CHECK(close_database(aggregated));
     return true;
 }
 
@@ -2673,6 +2904,7 @@ int main() {
         test_non_positional_slot_plumbing_and_invalid_mappings() &&
         test_query_output_metadata_must_match_project_positions() &&
         test_inner_join_uses_non_positional_slots() &&
+        test_hash_join_and_group_paths_preserve_semantics() &&
         test_sort_uses_slot_bindings_and_rejects_invalid_plans() &&
         test_aggregate_uses_derived_slots_and_validates_plans() &&
         test_delete_collects_ids_and_allows_empty_delete() &&

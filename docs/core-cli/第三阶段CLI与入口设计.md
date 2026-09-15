@@ -100,7 +100,12 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --version：打印版本并退出；
 - --data-dir DIR：指定 UTF-8 数据目录，最多出现一次；
 - --error-policy stop|analyze：脚本错误策略，最多出现一次；默认 stop；
-- --format table|json：结果展示格式，最多出现一次；默认 table（见 [JSON 输出设计](CLI升级设计_JSON输出.md)）；
+- --format table|pretty|json：结果展示格式，最多出现一次；未显式给出时按输出目标选择——
+  stdout 是终端用 pretty，否则用 table；显式给出时以显式值为准（见
+  [JSON 输出设计](CLI升级设计_JSON输出.md) 与
+  [展示格式与性能观测设计](CLI展示格式与性能观测设计.md)）；
+- --time：每次 `execute_script` 调用在 stderr 追加一行墙钟耗时，最多出现一次；默认关闭
+  （见 [展示格式与性能观测设计](CLI展示格式与性能观测设计.md)）；
 - --plan：整个调用进入计划模式，只编译并输出执行计划，最多出现一次（见 [Plan 整理输出设计](Plan整理输出设计.md)）；
 - --max-rows N：单条语句在内存中物化的最大行数，最多出现一次；N 为 `1..SIZE_MAX` 的十进制
   整数，缺省使用 core 的 `kMaxQueryRows`（见 [结果集上限与分页设计](结果集上限与分页设计.md)）；
@@ -119,7 +124,8 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --data-dir 后紧邻另一个 `--` 选项，未提供目录值；
 - --data-dir 重复出现；
 - --error-policy 缺少值、值为空、未知值或重复出现；
-- --format 缺少值、值为空、未知值（非 table/json）或重复出现；
+- --format 缺少值、值为空、未知值（非 table/pretty/json）或重复出现；
+- --time 重复出现；
 - --plan 重复出现；
 - --max-rows 缺少值、值为空、非十进制数字（含前导 `+`/`-`、十六进制）、尾随字符、
   数值为 `0` 或超出 `size_t` 范围，以及重复出现；
@@ -273,6 +279,17 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
   边界生效。
 - 取消的输出与 `SKIPPED`/`INDETERMINATE` 同流向（stderr），不改变 stdout 结果对象。
 
+### 6.5 pretty 模式与 --time
+
+- `--format pretty` 是**展示层**格式，不改 core 调用、不改退出码、不改 stderr 诊断文本：
+  查询结果渲染成等宽边框表格并追加行数行，命令结果渲染成 `OK, N rows affected`；
+  诊断与状态行与 table 模式字节级一致。
+- pretty 输出不承诺机器可解析；需要稳定解析请用 `table` 或 `json`。
+- 默认格式在 `runner` 层按 `CliEnvironment::output_is_terminal` 决定，终端用 pretty、
+  非终端用 table；测试与 GUI 不设置该字段，因此既有 golden 测试全部走 table。
+- `--time` 只写 stderr，stdout 字节流在开关前后完全一致；批处理 scope 为 `script`，
+  REPL scope 为 `line <序号>`。
+
 ## 7. 退出码与错误策略
 
 退出码固定为：
@@ -317,6 +334,12 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
   以及批处理/REPL 的透传值（未提供时为 `kMaxQueryRows`）与两种格式下的超限错误展示；
 - JSON 模式的 golden 文本、字段顺序、转义边界与 rows/row_count 一致性，配合测试内置的
   极简 JSON 解析校验器；kPlanOnly 在 table 与 JSON 两种格式下都按查询结果展示；
+- pretty 模式的 golden 文本：边框对齐（含 CJK 宽字符）、数值列右对齐、NULL、空结果行数、
+  超宽单元格截断、命令结果行；诊断与状态行在 pretty 下与 table 一致；
+- 默认格式选择：`output_is_terminal` 为真且未给 `--format` 时用 pretty，为假时用 table；
+  显式 `--format` 覆盖终端判定；
+- `--time`：打开后 stdout 与关闭时逐字节相同，stderr 多出 `TIME script|line …` 行，
+  批处理与 REPL 各一条、不影响退出码；
 - SKIPPED（policy/aborted）、INDETERMINATE 与 script_error 的插入顺序和 stderr 归属；
 - 语句级 lex/syntax/semantic、执行/存储、analysis 标签与范围格式；脚本级 compile/internal
   标签与空插入点；suggestion、fix-it 与单行转义；

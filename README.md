@@ -64,12 +64,16 @@ SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子�
 storage 也不提供跨进程文件锁：两个进程同时打开同一 `--data-dir` 不在支持范围内，会互相覆盖且
 不报错，跨进程互斥属于后续扩展。
 
-CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|json`
-（JSON 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断）、`--plan`
+CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|pretty|json`
+（`json` 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断；`pretty` 是终端里
+给人看的等宽表格，输出不是终端时默认仍是 `table` 的制表符文本）、`--plan`
 （只编译并打印执行计划，零副作用）、`--max-rows N`（单条语句在内存中物化的最大行数，
-缺省为 `kMaxQueryRows` = 262144，`0` 与非法值按参数错误处理）。`--format`、`--plan`
-与 `--max-rows` 可组合，行为契约见
+缺省为 `kMaxQueryRows` = 262144，`0` 与非法值按参数错误处理）、`--time`
+（每次执行在 stderr 追加一行墙钟耗时，如 `TIME script 12.345 ms`，stdout 不受影响）。
+`--format`、`--plan` 与 `--max-rows` 可组合，行为契约见
 [docs/core-cli/第三阶段CLI与入口设计.md](docs/core-cli/第三阶段CLI与入口设计.md)。
+展示格式与性能观测的完整规则见
+[docs/core-cli/CLI展示格式与性能观测设计.md](docs/core-cli/CLI展示格式与性能观测设计.md)。
 
 运行中取消：CLI 在 `execute_script` 期间按 Ctrl+C 会请求取消（`CancelToken`），当前语句在
 下一个无副作用检查点结束、剩余语句不再执行并记为 `CANCELLED`，本次调用退出码为 1；

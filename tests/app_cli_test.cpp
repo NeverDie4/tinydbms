@@ -120,7 +120,8 @@ int invoke(
     std::string input_text,
     bool interactive,
     std::string& output_text,
-    std::string& error_text) {
+    std::string& error_text,
+    bool output_is_terminal = false) {
     std::vector<char*> argv;
     argv.reserve(arguments.size());
     for (std::string& argument : arguments) {
@@ -130,7 +131,7 @@ int invoke(
     std::istringstream input{std::move(input_text)};
     std::ostringstream output;
     std::ostringstream error;
-    CliEnvironment environment{input, output, error, interactive};
+    CliEnvironment environment{input, output, error, interactive, output_is_terminal};
     const int result = tinydbms::app::run_cli(
         static_cast<int>(argv.size()),
         argv.data(),
@@ -1221,6 +1222,360 @@ bool test_plan_only_statement_rendering() {
     return true;
 }
 
+// pretty 用例共用的查询结果：两列文本 + 一列数值，含 NULL、CJK 与多位数。
+tinydbms::core::QueryResult make_pretty_query() {
+    tinydbms::core::QueryResult query;
+    query.columns = {
+        tinydbms::core::ColumnHeader{"id", Type::kInt},
+        tinydbms::core::ColumnHeader{"name", Type::kVarchar},
+        tinydbms::core::ColumnHeader{"score", Type::kDouble}};
+    query.rows.push_back(
+        {Value{std::int32_t{1}}, Value{std::string{"一甲"}}, Value{98.5}});
+    query.rows.push_back(
+        {Value{std::int32_t{2}}, Value{std::string{"乙"}}, Value{std::monostate{}}});
+    query.rows.push_back(
+        {Value{std::int32_t{12}}, Value{std::string{"abc"}}, Value{7.0}});
+    return query;
+}
+
+// 只含一条查询语句的脚本结果。
+ExecuteScriptResult make_pretty_script() {
+    return make_script({StatementResult::executed(
+        0, range(1, 1, 1, 20), ExecuteResult{make_pretty_query()})});
+}
+
+FakeSession make_pretty_session() {
+    FakeSession session;
+    session.execute_results.push_back(make_pretty_script());
+    return session;
+}
+
+bool test_pretty_query_and_command_rendering() {
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 20), ExecuteResult{make_pretty_query()}),
+        StatementResult::executed(
+            1, range(1, 21, 1, 40), ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "pretty"}, "x", false, output, error) == 0);
+    CHECK(error.empty());
+    CHECK(output ==
+          "┌────┬──────┬───────┐\n"
+          "│ id │ name │ score │\n"
+          "├────┼──────┼───────┤\n"
+          "│  1 │ 一甲 │  98.5 │\n"
+          "│  2 │ 乙   │  NULL │\n"
+          "│ 12 │ abc  │   7.0 │\n"
+          "└────┴──────┴───────┘\n"
+          "3 rows\n"
+          "OK, 1 row affected\n");
+    return true;
+}
+
+bool test_pretty_empty_result_and_truncation() {
+    // 空结果：只打印表头、边框与 0 rows，不打印任何数据行。
+    tinydbms::core::QueryResult empty_query;
+    empty_query.columns = {
+        tinydbms::core::ColumnHeader{"id", Type::kInt},
+        tinydbms::core::ColumnHeader{"name", Type::kVarchar}};
+
+    FakeSession empty_session;
+    empty_session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 20), ExecuteResult{std::move(empty_query)}),
+    }));
+    std::string output;
+    std::string error;
+    CHECK(invoke(
+              empty_session,
+              {"tinydbms", "--format", "pretty"},
+              "x",
+              false,
+              output,
+              error) == 0);
+    CHECK(error.empty());
+    CHECK(output ==
+          "┌────┬──────┐\n"
+          "│ id │ name │\n"
+          "├────┼──────┤\n"
+          "└────┴──────┘\n"
+          "0 rows\n");
+
+    // 超宽单元格按显示宽度截断到 48 列并追加省略号；表头过长时同样截断。
+    const std::string long_text(60, 'x');
+    const std::string truncated = std::string(47, 'x') + "…";
+
+    tinydbms::core::QueryResult wide_query;
+    wide_query.columns = {tinydbms::core::ColumnHeader{"blob", Type::kVarchar}};
+    wide_query.rows.push_back({Value{std::string{long_text}}});
+
+    FakeSession wide_session;
+    wide_session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 20), ExecuteResult{std::move(wide_query)}),
+    }));
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              wide_session,
+              {"tinydbms", "--format", "pretty"},
+              "x",
+              false,
+              output,
+              error) == 0);
+    const std::string dashes = []() {
+        std::string value;
+        for (int index = 0; index < 50; ++index) {
+            value += "─";
+        }
+        return value;
+    }();
+    CHECK(output ==
+          "┌" + dashes + "┐\n" +
+          "│ blob" + std::string(45, ' ') + "│\n" +
+          "├" + dashes + "┤\n" +
+          "│ " + truncated + " │\n" +
+          "└" + dashes + "┘\n" +
+          "1 row\n");
+    CHECK(output.find(long_text) == std::string::npos);
+    return true;
+}
+
+bool test_pretty_diagnostics_match_table_format() {
+    // pretty 只替换成功结果的呈现：错误与状态行与 table 模式逐字节一致。
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::compile_error(
+            0,
+            range(1, 1, 1, 12),
+            make_compile_error(
+                CompileStage::kSemantic,
+                range(1, 8, 1, 12),
+                "table 't' does not exist")),
+        StatementResult::skipped(1, range(1, 13, 1, 20)),
+    }));
+
+    std::string pretty_output;
+    std::string pretty_error;
+    CHECK(invoke(
+              session,
+              {"tinydbms", "--format", "pretty"},
+              "x",
+              false,
+              pretty_output,
+              pretty_error) == 1);
+    CHECK(pretty_output.empty());
+    CHECK(pretty_error ==
+          "ERROR semantic 1:8-1:12 table 't' does not exist\n"
+          "SKIPPED 1:13-1:20 policy\n");
+
+    FakeSession table_session;
+    table_session.execute_results.push_back(make_script({
+        StatementResult::compile_error(
+            0,
+            range(1, 1, 1, 12),
+            make_compile_error(
+                CompileStage::kSemantic,
+                range(1, 8, 1, 12),
+                "table 't' does not exist")),
+        StatementResult::skipped(1, range(1, 13, 1, 20)),
+    }));
+    std::string table_output;
+    std::string table_error;
+    CHECK(invoke(
+              table_session,
+              {"tinydbms", "--format", "table"},
+              "x",
+              false,
+              table_output,
+              table_error) == 1);
+    CHECK(table_output == pretty_output);
+    CHECK(table_error == pretty_error);
+    return true;
+}
+
+bool test_pretty_rejects_malformed_result() {
+    tinydbms::core::QueryResult query;
+    query.columns = {
+        tinydbms::core::ColumnHeader{"id", Type::kInt},
+        tinydbms::core::ColumnHeader{"name", Type::kVarchar}};
+    query.rows.push_back({Value{std::int32_t{1}}});
+
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 20), ExecuteResult{std::move(query)}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "pretty"}, "x", false, output, error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "ERROR internal query result row width does not match column count\n");
+    return true;
+}
+
+bool test_default_format_depends_on_terminal() {
+    // 未显式指定 --format：stdout 是终端用 pretty，否则保持 table（TSV）。
+    FakeSession terminal_session = make_pretty_session();
+    std::string terminal_output;
+    std::string terminal_error;
+    CHECK(invoke(
+              terminal_session, {"tinydbms"}, "x", false, terminal_output, terminal_error, true) == 0);
+    CHECK(terminal_output.find("│ id │ name │ score │") != std::string::npos);
+    CHECK(terminal_output.find("3 rows\n") != std::string::npos);
+
+    FakeSession piped_session = make_pretty_session();
+    std::string piped_output;
+    std::string piped_error;
+    CHECK(invoke(
+              piped_session, {"tinydbms"}, "x", false, piped_output, piped_error, false) == 0);
+    CHECK(piped_output == "id\tname\tscore\n1\t一甲\t98.5\n2\t乙\tNULL\n12\tabc\t7.0\n");
+
+    // 显式 --format 覆盖终端判定：终端下也能拿到 TSV。
+    FakeSession explicit_session = make_pretty_session();
+    std::string explicit_output;
+    std::string explicit_error;
+    CHECK(invoke(
+              explicit_session,
+              {"tinydbms", "--format", "table"},
+              "x",
+              false,
+              explicit_output,
+              explicit_error,
+              true) == 0);
+    CHECK(explicit_output == piped_output);
+    return true;
+}
+
+bool test_pretty_argument_errors() {
+    const std::vector<std::vector<std::string>> invalid_arguments{
+        {"tinydbms", "--format", "prettyx"},
+        {"tinydbms", "--format", "html"},
+        {"tinydbms", "--format", "pretty", "--format", "table"},
+        {"tinydbms", "--time", "--time"},
+        {"tinydbms", "--time"},
+    };
+
+    for (std::size_t index = 0; index < invalid_arguments.size(); ++index) {
+        const auto& arguments = invalid_arguments[index];
+        FakeSession session;
+        std::string output;
+        std::string error;
+        // 最后一组是合法参数，用来确认 --time 单独出现不会被误判。
+        const int expected = index + 1 == invalid_arguments.size() ? 0 : 2;
+        CHECK(invoke(session, arguments, "x", false, output, error) == expected);
+        if (expected == 2) {
+            CHECK(session.calls.empty());
+            CHECK(error.find("argument error:") != std::string::npos);
+        }
+    }
+    return true;
+}
+
+// TIME 行格式：`TIME <scope> <毫秒> ms`，毫秒固定三位小数。REPL 的提示符没有换行，
+// 所以这里在整段文本里定位 TIME 片段，而不是按行切分。
+bool contains_time_line(const std::string& text, const std::string& scope) {
+    const std::string prefix = "TIME " + scope + " ";
+    const std::size_t begin = text.find(prefix);
+    if (begin == std::string::npos) {
+        return false;
+    }
+    const std::size_t end = text.find('\n', begin);
+    if (end == std::string::npos) {
+        return false;
+    }
+    const std::string line = text.substr(begin, end - begin);
+    if (line.size() < prefix.size() + 6U ||
+        line.compare(line.size() - 3, 3, " ms") != 0) {
+        return false;
+    }
+    const std::string value = line.substr(prefix.size(), line.size() - prefix.size() - 3);
+    const std::size_t dot = value.find('.');
+    if (dot == std::string::npos || value.size() - dot != 4U) {
+        return false;
+    }
+    return value.find_first_not_of("0123456789.") == std::string::npos;
+}
+
+bool test_time_flag_writes_stderr_only() {
+    // 批处理：stdout 与不加 --time 时逐字节相同，stderr 只有一行 TIME script。
+    FakeSession plain_session = make_pretty_session();
+    std::string plain_output;
+    std::string plain_error;
+    CHECK(invoke(
+              plain_session, {"tinydbms", "--format", "json"}, "x", false, plain_output, plain_error) == 0);
+    CHECK(plain_error.empty());
+
+    FakeSession timed_session = make_pretty_session();
+    std::string timed_output;
+    std::string timed_error;
+    CHECK(invoke(
+              timed_session,
+              {"tinydbms", "--format", "json", "--time"},
+              "x",
+              false,
+              timed_output,
+              timed_error) == 0);
+    CHECK(timed_output == plain_output);
+    CHECK(timed_error.rfind("TIME script ", 0) == 0);
+    CHECK(contains_time_line(timed_error, "script"));
+    CHECK(count_occurrences(timed_error, "TIME ") == 1);
+
+    // REPL：每读取一行输出一条 TIME line <序号>，序号从 1 开始。
+    FakeSession repl_plain;
+    repl_plain.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+    repl_plain.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{2, std::nullopt}}),
+    }));
+    std::string repl_output;
+    std::string repl_error;
+    CHECK(invoke(
+              repl_plain,
+              {"tinydbms", "--format", "pretty"},
+              "a\nb\n",
+              true,
+              repl_output,
+              repl_error) == 0);
+    CHECK(repl_output == "OK, 1 row affected\nOK, 2 rows affected\n");
+    CHECK(repl_error == "tinydbms> tinydbms> tinydbms> ");
+
+    FakeSession repl_timed;
+    repl_timed.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+    repl_timed.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{2, std::nullopt}}),
+    }));
+    std::string repl_timed_output;
+    std::string repl_timed_error;
+    CHECK(invoke(
+              repl_timed,
+              {"tinydbms", "--format", "pretty", "--time"},
+              "a\nb\n",
+              true,
+              repl_timed_output,
+              repl_timed_error) == 0);
+    CHECK(repl_timed_output == repl_output);
+    CHECK(contains_time_line(repl_timed_error, "line 1"));
+    CHECK(contains_time_line(repl_timed_error, "line 2"));
+    CHECK(count_occurrences(repl_timed_error, "TIME ") == 2);
+    // 提示符数量不变：TIME 行不改变 REPL 的交互文本。
+    CHECK(count_occurrences(repl_timed_error, "tinydbms> ") == 3);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1253,6 +1608,13 @@ int main() {
         test_json_value_mapping_and_escaping() &&
         test_json_lifecycle_errors() &&
         test_json_repl_keeps_prompt_on_stderr() &&
-        test_plan_only_statement_rendering();
+        test_plan_only_statement_rendering() &&
+        test_pretty_query_and_command_rendering() &&
+        test_pretty_empty_result_and_truncation() &&
+        test_pretty_diagnostics_match_table_format() &&
+        test_pretty_rejects_malformed_result() &&
+        test_default_format_depends_on_terminal() &&
+        test_pretty_argument_errors() &&
+        test_time_flag_writes_stderr_only();
     return passed ? 0 : 1;
 }

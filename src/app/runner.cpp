@@ -5,6 +5,7 @@
 #include "output.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <csignal>
 #include <exception>
@@ -70,7 +71,25 @@ struct ExecutionOptions {
     tinydbms::core::ScriptErrorPolicy policy =
         tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
     std::size_t max_query_rows = tinydbms::core::kMaxQueryRows;
+    // --time：把每次 execute_script 的墙钟耗时写到 stderr；不影响 stdout 与退出码。
+    bool show_time = false;
 };
+
+// 计时范围只包含 execute_script 调用本身：open/close、输入读取与渲染都不计入，
+// 这样该数值与 core 的执行耗时口径一致，也方便跨入口比较。
+void report_time_noexcept(
+    const CliEnvironment& environment,
+    std::string scope,
+    std::chrono::steady_clock::duration elapsed) noexcept {
+    try {
+        (void)write_time_line(
+            scope,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed),
+            environment.error);
+    } catch (...) {
+        // 计时输出失败不能改变本次调用的结果判定。
+    }
+}
 
 void report_error_noexcept(
     std::ostream& output,
@@ -239,13 +258,18 @@ bool run_batch(
     request.cancel = tinydbms::core::CancelToken{};
 
     tinydbms::core::ExecuteScriptResult result;
+    const auto started = std::chrono::steady_clock::now();
     {
         const ActiveCancelToken active{request.cancel};
         result = session.execute_script(request);
     }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
 
     const RenderResult rendered = render_script_result(result, options.format, environment);
     failed = failed || rendered.had_error || !rendered.output_ok;
+    if (options.show_time) {
+        report_time_noexcept(environment, "script", elapsed);
+    }
     return rendered.output_ok;
 }
 
@@ -254,6 +278,7 @@ bool run_repl(
     CliEnvironment& environment,
     const ExecutionOptions& options,
     bool& failed) {
+    std::size_t line_number = 0;
     for (;;) {
         environment.error << "tinydbms> " << std::flush;
         if (!environment.error) {
@@ -272,6 +297,7 @@ bool run_repl(
         if (reached_eof) {
             return true;
         }
+        ++line_number;
 
         tinydbms::core::ExecuteScriptRequest request;
         request.text = std::move(line);
@@ -282,13 +308,18 @@ bool run_repl(
         request.cancel = tinydbms::core::CancelToken{};
 
         tinydbms::core::ExecuteScriptResult result;
+        const auto started = std::chrono::steady_clock::now();
         {
             const ActiveCancelToken active{request.cancel};
             result = session.execute_script(request);
         }
+        const auto elapsed = std::chrono::steady_clock::now() - started;
 
         const RenderResult rendered = render_script_result(result, options.format, environment);
         failed = failed || rendered.had_error || !rendered.output_ok;
+        if (options.show_time) {
+            report_time_noexcept(environment, "line " + std::to_string(line_number), elapsed);
+        }
         if (!rendered.output_ok) {
             return false;
         }
@@ -319,7 +350,13 @@ int run_cli(
         }
 
         const ParsedArguments& arguments = std::get<ParsedArguments>(parsed_result);
-        format = arguments.format;
+        // 未显式指定 --format 时：stdout 是终端就给人看的 pretty，被重定向/接管道就保持
+        // 脚本契约的 table（TSV）。显式值永远优先，终端判定不参与。
+        format = arguments.format_explicit
+            ? arguments.format
+            : (environment.output_is_terminal
+                   ? OutputFormat::kPretty
+                   : OutputFormat::kTable);
         if (arguments.action == CliAction::kHelp) {
             return write_help(environment.output) ? 0 : 1;
         }
@@ -347,6 +384,7 @@ int run_cli(
             : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
         options.max_query_rows =
             arguments.max_query_rows.value_or(tinydbms::core::kMaxQueryRows);
+        options.show_time = arguments.show_time;
 
         bool failed = false;
         if (environment.interactive) {
