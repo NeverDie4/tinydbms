@@ -390,6 +390,28 @@ bool test_statement_views_cover_all_states() {
     return true;
 }
 
+// U3：计划模式的结果是单列 VARCHAR 的查询结果，GUI 按查询展示，不能落到执行错误分支。
+bool test_plan_only_statement_view() {
+    QueryResult plan;
+    plan.columns = std::vector<ColumnHeader>{ColumnHeader{"plan", Type::kVarchar}};
+    plan.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::string{"QueryPlan outputs=[id:INT]"}}},
+        tinydbms::core::Row{Value{std::string{"  SeqScan t"}}}};
+
+    ExecuteScriptResult result;
+    result.statements.push_back(
+        StatementResult::plan_only(0, range_of(0, 10), std::move(plan)));
+
+    const std::vector<StatementView> views = tinydbms::gui::build_statement_views(result);
+    CHECK(views.size() == 1);
+    CHECK(views[0].display == StatementDisplay::kQuery);
+    CHECK(views[0].query != nullptr);
+    CHECK(views[0].query->rows.size() == 2);
+    CHECK(views[0].summary.contains(QStringLiteral("查询返回 2 行")));
+    CHECK(views[0].detail.isEmpty());
+    return true;
+}
+
 bool test_session_state_transitions() {
     const ExecuteScriptResult internal = internal_error_result();
     const ExecuteScriptResult compile = compile_script_error_result();
@@ -803,6 +825,7 @@ int main(int argc, char* argv[]) {
     run("default_data_dir_matches_cli", test_default_data_dir_matches_cli);
     run("utf8_offset_mapping", test_utf8_offset_mapping);
     run("statement_views_cover_all_states", test_statement_views_cover_all_states);
+    run("plan_only_statement_view", test_plan_only_statement_view);
     run("result_model_formats_sql_v2_values", test_result_model_formats_sql_v2_values);
     run("session_state_transitions", test_session_state_transitions);
     run("close_policy_filters_not_open", test_close_policy_filters_not_open);

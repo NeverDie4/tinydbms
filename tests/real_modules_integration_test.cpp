@@ -4,9 +4,11 @@
 #include "page_file.h"
 #include "storage_test_access.h"
 
+#include "json_check.hpp"
 #include "tinydbms/common.hpp"
 #include "tinydbms/core.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -78,11 +80,15 @@ struct InvocationResult {
 InvocationResult invoke_cli(
     const std::filesystem::path& data_dir,
     std::string input,
-    bool interactive) {
+    bool interactive,
+    const std::vector<std::string>& extra_arguments = {}) {
     std::vector<std::string> arguments{
         "tinydbms",
         "--data-dir",
         data_dir.string()};
+    for (const std::string& extra : extra_arguments) {
+        arguments.push_back(extra);
+    }
     std::vector<char*> argv;
     argv.reserve(arguments.size());
     for (std::string& argument : arguments) {
@@ -105,6 +111,25 @@ InvocationResult invoke_cli(
         session,
         environment);
     return InvocationResult{exit_code, output_stream.str(), error_stream.str()};
+}
+
+// 数据目录的完整文件清单（含大小）：用于断言入口升级没有引入额外副作用。
+std::vector<std::string> list_data_files(const std::filesystem::path& data_dir) {
+    std::vector<std::string> files;
+    std::error_code error;
+    if (!std::filesystem::exists(data_dir, error)) {
+        return files;
+    }
+    for (const auto& entry : std::filesystem::recursive_directory_iterator{data_dir}) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto relative = std::filesystem::relative(entry.path(), data_dir, error);
+        files.push_back(
+            relative.generic_string() + ":" + std::to_string(entry.file_size()));
+    }
+    std::sort(files.begin(), files.end());
+    return files;
 }
 
 using ExpectedRows = std::map<std::int32_t, std::string>;
@@ -412,6 +437,130 @@ bool test_open_error_has_storage_exit_status() {
     return true;
 }
 
+bool test_json_batch_output_is_parseable() {
+    TemporaryDirectory data_dir{"tinydbms-integration-json"};
+    const InvocationResult result = invoke_cli(
+        data_dir.path(),
+        "create table users (id int, name varchar);\n"
+        "insert into users values (1, 'a'), (2, 'b');\n"
+        "select * from users;\n",
+        false,
+        {"--format", "json"});
+    CHECK(result.exit_code == 0);
+    CHECK(result.error.empty());
+    // JSON 模式下 stdout 只有结果对象，提示符与诊断都不在这里。
+    CHECK(result.output.find("tinydbms> ") == std::string::npos);
+
+    const std::vector<std::string_view> lines = tinydbms::testing::json_lines(result.output);
+    CHECK(lines.size() == 3);
+
+    std::vector<tinydbms::testing::JsonNode> nodes;
+    for (const std::string_view line : lines) {
+        std::size_t offset = 0;
+        const std::optional<tinydbms::testing::JsonNode> parsed =
+            tinydbms::testing::json_parse(line, offset);
+        CHECK(parsed.has_value());
+        nodes.push_back(*parsed);
+    }
+
+    const auto* first_type = tinydbms::testing::json_member(nodes[0], "type");
+    const auto* first_rows = tinydbms::testing::json_member(nodes[0], "affected_rows");
+    CHECK(first_type != nullptr && first_type->text == "command");
+    CHECK(first_rows != nullptr && first_rows->integer == 0);
+
+    const auto* inserted = tinydbms::testing::json_member(nodes[1], "affected_rows");
+    CHECK(inserted != nullptr && inserted->integer == 2);
+
+    const auto* query_type = tinydbms::testing::json_member(nodes[2], "type");
+    const auto* row_count = tinydbms::testing::json_member(nodes[2], "row_count");
+    const auto* columns = tinydbms::testing::json_member(nodes[2], "columns");
+    const auto* rows = tinydbms::testing::json_member(nodes[2], "rows");
+    CHECK(query_type != nullptr && query_type->text == "query");
+    CHECK(row_count != nullptr && row_count->integer == 2);
+    CHECK(columns != nullptr && columns->items.size() == 2);
+    CHECK(rows != nullptr && rows->items.size() == 2);
+    // rows 长度必须与 row_count 一致，且每行宽度等于列数。
+    CHECK(rows->items[0].items.size() == columns->items.size());
+    const auto* name_value =
+        &rows->items[0].items[1];
+    CHECK(name_value->kind == tinydbms::testing::JsonNode::Kind::kString);
+    return true;
+}
+
+bool test_plan_mode_real_chain_has_no_side_effects() {
+    TemporaryDirectory data_dir{"tinydbms-integration-plan"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "create table dept (id int, name varchar);\n"
+        "create table emp (id int, dept int, amount bigint, note varchar);\n"
+        "insert into emp values (1, 1, 10, 'x'), (2, 2, 20, null);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+
+    const std::vector<std::string> before = list_data_files(data_dir.path());
+    CHECK(!before.empty());
+
+    const InvocationResult planned = invoke_cli(
+        data_dir.path(),
+        "create table extra (id int);\n"
+        "select * from emp where id > 10;\n"
+        "select dept, sum(amount) from emp where note is null group by dept;\n"
+        "select dept.name, emp.note from dept join emp on dept.id = emp.dept;\n",
+        false,
+        {"--plan"});
+    CHECK(planned.exit_code == 0);
+    CHECK(planned.error.empty());
+    CHECK(planned.output.find("CreateTable extra(id INT)") != std::string::npos);
+    CHECK(planned.output.find(
+              "QueryPlan outputs=[id:INT, dept:INT, amount:BIGINT, note:VARCHAR]") !=
+          std::string::npos);
+    CHECK(planned.output.find("SeqScan emp") != std::string::npos);
+    CHECK(planned.output.find("Aggregate group=[slot1] calls=[SUM(amount#2) -> slot4 BIGINT]") !=
+          std::string::npos);
+    CHECK(planned.output.find("Join kind=INNER condition=(dept.id#0 = emp.dept#3)") !=
+          std::string::npos);
+    // 计划模式不写任何文件、不改动数据页。
+    CHECK(list_data_files(data_dir.path()) == before);
+
+    // 同一脚本里 CREATE 之后看不到新表：零副作用的必然结果，按编译错误报告。
+    const InvocationResult self_reference = invoke_cli(
+        data_dir.path(),
+        "create table fresh (id int);\nselect * from fresh;\n",
+        false,
+        {"--plan", "--format", "json"});
+    CHECK(self_reference.exit_code == 1);
+    CHECK(self_reference.error.find("\"kind\":\"compile\"") != std::string::npos);
+    CHECK(self_reference.error.find("does not exist") != std::string::npos);
+    CHECK(list_data_files(data_dir.path()) == before);
+
+    // --plan 与 --format json 组合：计划走普通的 query 对象，列名固定为 plan。
+    const std::vector<std::string_view> plan_lines =
+        tinydbms::testing::json_lines(self_reference.output);
+    CHECK(plan_lines.size() == 1);
+    std::size_t plan_offset = 0;
+    const std::optional<tinydbms::testing::JsonNode> plan_object =
+        tinydbms::testing::json_parse(plan_lines.front(), plan_offset);
+    CHECK(plan_object.has_value());
+    const auto* plan_columns = tinydbms::testing::json_member(*plan_object, "columns");
+    CHECK(plan_columns != nullptr && plan_columns->items.size() == 1);
+    CHECK(plan_columns->items.front().members.size() == 2);
+    CHECK(plan_columns->items.front().members.front().second.text == "plan");
+
+    // 数据本身没有被计划模式动过。
+    const InvocationResult verify = invoke_cli(
+        data_dir.path(), "select * from emp;\n", false, {"--format", "json"});
+    CHECK(verify.exit_code == 0);
+    const std::vector<std::string_view> lines = tinydbms::testing::json_lines(verify.output);
+    CHECK(lines.size() == 1);
+    std::size_t offset = 0;
+    const std::optional<tinydbms::testing::JsonNode> parsed =
+        tinydbms::testing::json_parse(lines.front(), offset);
+    CHECK(parsed.has_value());
+    const auto* row_count = tinydbms::testing::json_member(*parsed, "row_count");
+    CHECK(row_count != nullptr && row_count->integer == 2);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -423,7 +572,9 @@ int main() {
                 test_batch_reports_storage_error_and_stops() &&
                 test_repl_stops_after_oversized_input() &&
                 test_open_error_has_storage_exit_status() &&
-                test_sql_multipage_restart_acceptance()
+                test_sql_multipage_restart_acceptance() &&
+                test_json_batch_output_is_parseable() &&
+                test_plan_mode_real_chain_has_no_side_effects()
             ? 0
             : 1;
     } catch (const std::exception& exception) {

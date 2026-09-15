@@ -1,15 +1,18 @@
 #include "runner.hpp"
 
+#include "json_check.hpp"
 #include "tinydbms/core.hpp"
 
 #include <cstdint>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,6 +33,7 @@ using tinydbms::core::ErrorKind;
 using tinydbms::core::ExecuteResult;
 using tinydbms::core::ExecuteScriptRequest;
 using tinydbms::core::ExecuteScriptResult;
+using tinydbms::core::ExecutionMode;
 using tinydbms::core::OpenDatabaseResult;
 using tinydbms::core::QueryResult;
 using tinydbms::core::ScriptErrorPolicy;
@@ -52,6 +56,7 @@ public:
     std::vector<std::string> calls;
     std::vector<std::string> execute_texts;
     std::vector<ScriptErrorPolicy> execute_policies;
+    std::vector<ExecutionMode> execute_modes;
     std::string opened_data_dir;
     bool throw_on_execute = false;
     bool throw_bad_alloc_on_execute = false;
@@ -68,6 +73,7 @@ public:
         calls.emplace_back("execute");
         execute_texts.push_back(request.text);
         execute_policies.push_back(request.error_policy);
+        execute_modes.push_back(request.mode);
         if (throw_bad_alloc_on_execute) {
             throw std::bad_alloc{};
         }
@@ -626,6 +632,372 @@ bool test_query_result_escaping() {
     return true;
 }
 
+// ---- U2(--format json) 与 U3(--plan) 的入口测试 ----
+
+using tinydbms::testing::JsonNode;
+using tinydbms::testing::json_integer;
+using tinydbms::testing::json_lines;
+using tinydbms::testing::json_member;
+using tinydbms::testing::json_parse;
+using tinydbms::testing::json_string;
+
+bool parse_json_lines(const std::string& text, std::vector<JsonNode>& nodes) {
+    for (const std::string_view line : json_lines(text)) {
+        std::size_t offset = 0;
+        std::optional<JsonNode> parsed = json_parse(line, offset);
+        if (!parsed.has_value()) {
+            std::cerr << "JSON parse failed at offset " << offset << ": " << line << '\n';
+            return false;
+        }
+        nodes.push_back(std::move(*parsed));
+    }
+    return true;
+}
+
+std::optional<std::string> member_string(const JsonNode& node, const std::string_view key) {
+    const JsonNode* member = json_member(node, key);
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+    return json_string(*member);
+}
+
+std::optional<std::int64_t> member_integer(const JsonNode& node, const std::string_view key) {
+    const JsonNode* member = json_member(node, key);
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+    return json_integer(*member);
+}
+
+bool test_format_and_plan_argument_errors() {
+    const std::vector<std::vector<std::string>> invalid_arguments{
+        {"tinydbms", "--format"},
+        {"tinydbms", "--format", ""},
+        {"tinydbms", "--format", "--plan"},
+        {"tinydbms", "--format", "yaml"},
+        {"tinydbms", "--format=json"},
+        {"tinydbms", "--format", "json", "--format", "table"},
+        {"tinydbms", "--plan", "--plan"},
+        {"tinydbms", "--plan", "--help"},
+        {"tinydbms", "--plan", "--version"},
+    };
+
+    for (const auto& arguments : invalid_arguments) {
+        FakeSession session;
+        std::string output;
+        std::string error;
+        CHECK(invoke(session, arguments, "", false, output, error) == 2);
+        CHECK(session.calls.empty());
+        CHECK(output.empty());
+        // 参数错误保持纯文本，即使在 --format json 之后也不输出 JSON 对象。
+        CHECK(error.find("argument error:") != std::string::npos);
+        CHECK(error.find('{') == std::string::npos);
+    }
+
+    FakeSession session;
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--help"}, "", false, output, error) == 0);
+    CHECK(output.find("--format") != std::string::npos);
+    CHECK(output.find("--plan") != std::string::npos);
+    return true;
+}
+
+bool test_plan_flag_is_forwarded_as_mode() {
+    FakeSession default_session;
+    std::string output;
+    std::string error;
+    CHECK(invoke(default_session, {"tinydbms"}, "SELECT 1;", false, output, error) == 0);
+    CHECK((default_session.execute_modes == std::vector<ExecutionMode>{ExecutionMode::kExecute}));
+
+    FakeSession plan_session;
+    output.clear();
+    error.clear();
+    CHECK(invoke(
+              plan_session,
+              {"tinydbms", "--plan", "--format", "json"},
+              "SELECT 1;",
+              false,
+              output,
+              error) == 0);
+    CHECK((plan_session.execute_modes == std::vector<ExecutionMode>{ExecutionMode::kPlanOnly}));
+    CHECK((plan_session.execute_policies ==
+           std::vector<ScriptErrorPolicy>{ScriptErrorPolicy::kStopOnFirstError}));
+
+    // REPL 每条语句都按计划模式执行，提示符仍然只出现在 stderr。
+    FakeSession repl_session;
+    output.clear();
+    error.clear();
+    CHECK(invoke(repl_session, {"tinydbms", "--plan"}, "SELECT 1;\nSELECT 2;\n", true, output, error) == 0);
+    CHECK((repl_session.execute_modes ==
+           std::vector<ExecutionMode>{ExecutionMode::kPlanOnly, ExecutionMode::kPlanOnly}));
+    CHECK(error.find("tinydbms> ") != std::string::npos);
+    return true;
+}
+
+bool test_json_query_and_command_objects() {
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0,
+            range(1, 1, 1, 20),
+            ExecuteResult{QueryResult{
+                {tinydbms::core::ColumnHeader{"id", Type::kInt},
+                 tinydbms::core::ColumnHeader{"name", Type::kVarchar}},
+                {{Value{std::int32_t{1}}, Value{std::string{"a"}}},
+                 {Value{std::int32_t{2}}, Value{std::monostate{}}}}}}),
+        StatementResult::executed(
+            1,
+            range(1, 21, 1, 40),
+            ExecuteResult{CommandResult{3, std::nullopt}}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "json"}, "x", false, output, error) == 0);
+    CHECK(error.empty());
+
+    const std::string expected =
+        "{\"type\":\"query\",\"statement_index\":0,\"range\":\"1:1-1:20\",\"columns\":["
+        "{\"name\":\"id\",\"type\":\"INT\"},{\"name\":\"name\",\"type\":\"VARCHAR\"}],"
+        "\"row_count\":2,\"rows\":[[1,\"a\"],[2,null]]}\n"
+        "{\"type\":\"command\",\"statement_index\":1,\"range\":\"1:21-1:40\",\"affected_rows\":3}\n";
+    CHECK(output == expected);
+
+    std::vector<JsonNode> nodes;
+    CHECK(parse_json_lines(output, nodes));
+    CHECK(nodes.size() == 2);
+    CHECK(member_string(nodes[0], "type") == std::optional<std::string>{"query"});
+    CHECK(member_integer(nodes[0], "statement_index") == std::optional<std::int64_t>{0});
+    CHECK(member_string(nodes[0], "range") == std::optional<std::string>{"1:1-1:20"});
+    CHECK(member_integer(nodes[0], "row_count") == std::optional<std::int64_t>{2});
+    const JsonNode* rows = json_member(nodes[0], "rows");
+    CHECK(rows != nullptr && rows->kind == JsonNode::Kind::kArray);
+    // rows 长度必须与 row_count 一致，且每行宽度等于列数。
+    CHECK(rows->items.size() == 2);
+    CHECK(rows->items[0].items.size() == 2);
+    CHECK(rows->items[1].items.size() == 2);
+    CHECK(rows->items[1].items[1].kind == JsonNode::Kind::kNull);
+    CHECK(member_string(nodes[1], "type") == std::optional<std::string>{"command"});
+    CHECK(member_integer(nodes[1], "affected_rows") == std::optional<std::int64_t>{3});
+    return true;
+}
+
+bool test_json_diagnostics_and_ordering() {
+    Error script_error = make_error(ErrorKind::kInternal, "storage raised an exception");
+    script_error.source = std::optional<SourceRange>{range(1, 1, 1, 1)};
+    FakeSession session;
+    session.execute_results.push_back(make_fatal_script(
+        {StatementResult::executed(
+             0,
+             range(1, 1, 1, 20),
+             ExecuteResult{CommandResult{1, std::nullopt}}),
+         StatementResult::execution_indeterminate(1, range(1, 21, 1, 40)),
+         StatementResult::skipped(2, range(1, 41, 1, 60))},
+        script_error));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "json"}, "x", false, output, error) == 1);
+    CHECK(output ==
+          "{\"type\":\"command\",\"statement_index\":0,\"range\":\"1:1-1:20\",\"affected_rows\":1}\n");
+    // script_error 插在首条 kSkippedExecution 之前，被跳过的语句用 status 对象表示。
+    CHECK(error ==
+          "{\"type\":\"status\",\"statement_index\":1,\"status\":\"indeterminate\","
+          "\"range\":\"1:21-1:40\"}\n"
+          "{\"type\":\"error\",\"scope\":\"script\",\"kind\":\"internal\","
+          "\"range\":\"1:1-1:1\",\"message\":\"storage raised an exception\"}\n"
+          "{\"type\":\"status\",\"statement_index\":2,\"status\":\"skipped\","
+          "\"range\":\"1:41-1:60\",\"reason\":\"aborted\"}\n");
+
+    // 没有 script_error 时，跳过原因来自错误策略。
+    FakeSession policy_session;
+    policy_session.execute_results.push_back(make_script({
+        StatementResult::compile_error(
+            0,
+            range(1, 1, 1, 10),
+            make_compile_error(
+                CompileStage::kSyntax,
+                range(1, 8, 1, 9),
+                "unexpected token",
+                std::string{"did you mean 'x'"},
+                FixIt{range(1, 8, 1, 9), "x"})),
+        StatementResult::skipped(1, range(1, 11, 1, 20)),
+    }));
+    output.clear();
+    error.clear();
+    CHECK(invoke(policy_session, {"tinydbms", "--format", "json"}, "x", false, output, error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "{\"type\":\"error\",\"scope\":\"statement\",\"statement_index\":0,"
+          "\"kind\":\"compile\",\"stage\":\"syntax\",\"range\":\"1:8-1:9\","
+          "\"message\":\"unexpected token\",\"suggestion\":\"did you mean 'x'\","
+          "\"fix_it\":{\"range\":\"1:8-1:9\",\"replacement\":\"x\"}}\n"
+          "{\"type\":\"status\",\"statement_index\":1,\"status\":\"skipped\","
+          "\"range\":\"1:11-1:20\",\"reason\":\"policy\"}\n");
+    return true;
+}
+
+bool test_json_analyze_status_and_partial_command() {
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::execution_error(
+            0,
+            range(1, 1, 1, 20),
+            ExecuteResult{CommandResult{2, make_error(ErrorKind::kStorage, "page write failed")}}),
+        StatementResult::analysis_only(1, range(1, 21, 1, 40)),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(
+              session,
+              {"tinydbms", "--format", "json", "--error-policy", "analyze"},
+              "x",
+              false,
+              output,
+              error) == 1);
+    // 部分成功的 CommandResult 先输出已完成行数，再在 stderr 报告错误。
+    CHECK(output ==
+          "{\"type\":\"command\",\"statement_index\":0,\"range\":\"1:1-1:20\",\"affected_rows\":2}\n");
+    CHECK(error ==
+          "{\"type\":\"error\",\"scope\":\"statement\",\"statement_index\":0,\"kind\":\"storage\","
+          "\"range\":\"1:1-1:20\",\"message\":\"page write failed\"}\n"
+          "{\"type\":\"status\",\"statement_index\":1,\"status\":\"analyzed\","
+          "\"range\":\"1:21-1:40\"}\n");
+    return true;
+}
+
+bool test_json_value_mapping_and_escaping() {
+    const std::string invalid_utf8{"\xFF\xFE"};
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0,
+            range(1, 1, 1, 20),
+            ExecuteResult{QueryResult{
+                {tinydbms::core::ColumnHeader{"text", Type::kVarchar},
+                 tinydbms::core::ColumnHeader{"big", Type::kBigInt},
+                 tinydbms::core::ColumnHeader{"num", Type::kDouble},
+                 tinydbms::core::ColumnHeader{"flag", Type::kBoolean},
+                 tinydbms::core::ColumnHeader{"nil", Type::kInt}},
+                {{Value{std::string{"a\"b\\c\nd\te\x01"}},
+                  Value{std::int64_t{9007199254740993LL}},
+                  Value{std::numeric_limits<double>::quiet_NaN()},
+                  Value{true},
+                  Value{std::monostate{}}},
+                 {Value{invalid_utf8},
+                  Value{std::int64_t{-1}},
+                  Value{std::numeric_limits<double>::infinity()},
+                  Value{false},
+                  Value{std::monostate{}}},
+                 {Value{std::string{"中文"}},
+                  Value{std::int64_t{0}},
+                  Value{1.5},
+                  Value{false},
+                  Value{std::monostate{}}}}}}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "json"}, "x", false, output, error) == 0);
+    CHECK(error.empty());
+
+    const std::string expected =
+        "{\"type\":\"query\",\"statement_index\":0,\"range\":\"1:1-1:20\",\"columns\":["
+        "{\"name\":\"text\",\"type\":\"VARCHAR\"},{\"name\":\"big\",\"type\":\"BIGINT\"},"
+        "{\"name\":\"num\",\"type\":\"DOUBLE\"},{\"name\":\"flag\",\"type\":\"BOOLEAN\"},"
+        "{\"name\":\"nil\",\"type\":\"INT\"}],\"row_count\":3,\"rows\":["
+        "[\"a\\\"b\\\\c\\nd\\te\\u0001\",9007199254740993,null,true,null],"
+        "[\"" "\xEF\xBF\xBD\xEF\xBF\xBD" "\",-1,null,false,null],"
+        "[\"中文\",0,1.5,false,null]]}\n";
+    CHECK(output == expected);
+
+    std::vector<JsonNode> nodes;
+    CHECK(parse_json_lines(output, nodes));
+    CHECK(nodes.size() == 1);
+    const JsonNode* rows = json_member(nodes[0], "rows");
+    CHECK(rows != nullptr && rows->items.size() == 3);
+    // 反斜杠转义、控制字符、非法 UTF-8 与 BIGINT 都必须按契约还原。
+    CHECK(json_string(rows->items[0].items[0]) == std::optional<std::string>{"a\"b\\c\nd\te\x01"});
+    CHECK(json_integer(rows->items[0].items[1]) == std::optional<std::int64_t>{9007199254740993LL});
+    CHECK(rows->items[0].items[2].kind == JsonNode::Kind::kNull);
+    CHECK(rows->items[1].items[0].kind == JsonNode::Kind::kString);
+    CHECK(json_string(rows->items[1].items[0]) ==
+          std::optional<std::string>{"\xEF\xBF\xBD\xEF\xBF\xBD"});
+    CHECK(rows->items[2].items[0].kind == JsonNode::Kind::kString);
+    CHECK(json_string(rows->items[2].items[0]) == std::optional<std::string>{"中文"});
+    return true;
+}
+
+bool test_json_lifecycle_errors() {
+    FakeSession open_session;
+    open_session.open_result.error = std::optional<Error>{make_error(ErrorKind::kStorage, "cannot open data dir")};
+    std::string output;
+    std::string error;
+    CHECK(invoke(open_session, {"tinydbms", "--format", "json"}, "", false, output, error) == 1);
+    CHECK(output.empty());
+    CHECK(error ==
+          "{\"type\":\"error\",\"scope\":\"script\",\"kind\":\"storage\","
+          "\"message\":\"cannot open data dir\"}\n");
+    CHECK((open_session.calls == std::vector<std::string>{"open"}));
+
+    FakeSession close_session;
+    close_session.close_result.error = std::optional<Error>{make_error(ErrorKind::kStorage, "cannot flush")};
+    output.clear();
+    error.clear();
+    CHECK(invoke(close_session, {"tinydbms", "--format", "json"}, "x", false, output, error) == 1);
+    CHECK(error.find("{\"type\":\"error\",\"scope\":\"script\",\"kind\":\"storage\"") == 0);
+    return true;
+}
+
+bool test_json_repl_keeps_prompt_on_stderr() {
+    FakeSession session;
+    session.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(session, {"tinydbms", "--format", "json"}, "CREATE TABLE t(id INT);\n", true, output, error) == 0);
+    CHECK(output ==
+          "{\"type\":\"command\",\"statement_index\":0,\"range\":\"1:1-1:10\",\"affected_rows\":1}\n");
+    CHECK(error.find("tinydbms> ") != std::string::npos);
+    CHECK(error.find('{') == std::string::npos);
+    return true;
+}
+
+bool test_plan_only_statement_rendering() {
+    tinydbms::core::QueryResult plan;
+    plan.columns.push_back(tinydbms::core::ColumnHeader{"plan", Type::kVarchar});
+    plan.rows.push_back({Value{std::string{"QueryPlan outputs=[id:INT]"}}});
+    plan.rows.push_back({Value{std::string{"  Project [id#0]"}}});
+
+    FakeSession table_session;
+    table_session.execute_results.push_back(make_script(
+        {StatementResult::plan_only(0, range(1, 1, 1, 10), plan)}));
+    std::string output;
+    std::string error;
+    CHECK(invoke(table_session, {"tinydbms", "--plan"}, "x", false, output, error) == 0);
+    CHECK(output ==
+          "plan\nQueryPlan outputs=[id:INT]\n  Project [id#0]\n");
+    CHECK(error.empty());
+
+    FakeSession json_session;
+    json_session.execute_results.push_back(make_script(
+        {StatementResult::plan_only(0, range(1, 1, 1, 10), plan)}));
+    output.clear();
+    error.clear();
+    CHECK(invoke(json_session, {"tinydbms", "--plan", "--format", "json"}, "x", false, output, error) == 0);
+    CHECK(output ==
+          "{\"type\":\"query\",\"statement_index\":0,\"range\":\"1:1-1:10\",\"columns\":["
+          "{\"name\":\"plan\",\"type\":\"VARCHAR\"}],\"row_count\":2,\"rows\":["
+          "[\"QueryPlan outputs=[id:INT]\"],[\"  Project [id#0]\"]]}\n");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -644,6 +1016,15 @@ int main() {
         test_exceptions_close_once_and_input_failure_closes() &&
         test_output_failure_still_closes() &&
         test_malformed_query_result_is_rejected() &&
-        test_query_result_escaping();
+        test_query_result_escaping() &&
+        test_format_and_plan_argument_errors() &&
+        test_plan_flag_is_forwarded_as_mode() &&
+        test_json_query_and_command_objects() &&
+        test_json_diagnostics_and_ordering() &&
+        test_json_analyze_status_and_partial_command() &&
+        test_json_value_mapping_and_escaping() &&
+        test_json_lifecycle_errors() &&
+        test_json_repl_keeps_prompt_on_stderr() &&
+        test_plan_only_statement_rendering();
     return passed ? 0 : 1;
 }

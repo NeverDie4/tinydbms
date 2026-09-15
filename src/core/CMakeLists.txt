@@ -4,6 +4,7 @@ add_library(tinydbms_core_objects OBJECT
     diagnostics.cpp
     executor.cpp
     expression.cpp
+    plan_text.cpp
     script.cpp
 )
 

@@ -60,6 +60,11 @@ SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子�
 
 当前未实现 FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
 
+CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|json`
+（JSON 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断）、`--plan`
+（只编译并打印执行计划，零副作用）。`--format` 与 `--plan` 可组合，行为契约见
+[docs/core-cli/第三阶段CLI与入口设计.md](docs/core-cli/第三阶段CLI与入口设计.md)。
+
 ## 公共契约
 
 正式公共入口是：
@@ -77,9 +82,12 @@ include/tinydbms/storage.hpp
 
 core/CLI 的阶段设计入口：
 
+- [升级路线图（U1–U6 候选与状态）](docs/升级路线图.md)
 - [core 与 CLI 实现设计](docs/core-cli/实现设计.md)
 - [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
+- [CLI 升级设计：JSON 输出（U2，已实现）](docs/core-cli/CLI升级设计_JSON输出.md)
+- [CLI 升级设计：Plan 整理输出（U3，已实现）](docs/core-cli/Plan整理输出设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
 - [GUI 设计（Qt6 可选前端）](docs/gui/GUI设计.md)
 

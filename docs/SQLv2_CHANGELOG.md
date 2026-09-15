@@ -21,6 +21,9 @@ script recovery.
   offsets; they can carry advisory suggestions and one `FixIt` replacement.
 - `SplitStatement` preserves exact script text and an absolute source range;
   script execution reports an ordered outcome for every analyzed statement.
+- `core.hpp` adds `kMaxQueryRows = 262144`: the row count Core may materialize
+  for one statement. Exceeding it returns a statement-level execution error
+  instead of growing without bound.
 
 ## Compiler
 
@@ -45,6 +48,12 @@ script recovery.
 - Made `QueryPlan.outputs` the authoritative source of result-column names and
   types.
 - Added UPDATE prevalidation before applying a batch of row changes.
+- Bounded in-memory materialization of scans and joins by `kMaxQueryRows`;
+  Sort and Aggregate inputs are already bounded by their child nodes.
+- Added a defensive plan-tree depth limit (`256`, `kMaxPlanDepth`): a violating
+  plan aborts the script with `kInternal` and without calling Storage.
+- A scan record whose width or column types disagree with the catalog now ends
+  the Database session; `close` and a fresh `open` are required before reuse.
 
 ## Storage
 

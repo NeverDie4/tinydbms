@@ -1,6 +1,7 @@
 add_library(tinydbms_cli_logic STATIC
     arguments.cpp
     input.cpp
+    json_output.cpp
     output.cpp
     runner.cpp
     terminal.cpp

@@ -100,6 +100,8 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --version：打印版本并退出；
 - --data-dir DIR：指定 UTF-8 数据目录，最多出现一次；
 - --error-policy stop|analyze：脚本错误策略，最多出现一次；默认 stop；
+- --format table|json：结果展示格式，最多出现一次；默认 table（见 [JSON 输出设计](CLI升级设计_JSON输出.md)）；
+- --plan：整个调用进入计划模式，只编译并输出执行计划，最多出现一次（见 [Plan 整理输出设计](Plan整理输出设计.md)）；
 - 未提供 --data-dir 时，使用 ./tinydbms-data。
 
 --help 或 --version 单独出现时立即成功退出，不创建 Database，也不访问 data_dir。
@@ -115,6 +117,8 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --data-dir 后紧邻另一个 `--` 选项，未提供目录值；
 - --data-dir 重复出现；
 - --error-policy 缺少值、值为空、未知值或重复出现；
+- --format 缺少值、值为空、未知值（非 table/json）或重复出现；
+- --plan 重复出现；
 - --help/--version 与其他参数混用。
 
 不支持位置参数、短选项、`--data-dir=DIR` 或未列出的 `--` 变体；它们均按未知参数处理。
@@ -221,6 +225,8 @@ best-effort close。`runner` 对 open 成功的 Session 保证最多调用一次
 - `kSkippedExecution`：stderr 输出 `SKIPPED <range> policy|aborted\\n`；本次脚本存在
   script_error 时为 `aborted`，仅因策略跳过时为 `policy`；
 - `kExecutionIndeterminate`：stderr 输出 `INDETERMINATE <range>\\n`；
+- `kPlanOnly`：与 `kExecuted` + QueryResult 一样输出查询结果（列名固定为 `plan`），
+  但它表示“计划已生成”而不是“语句已执行”，只在 `--plan` 下出现；
 - 以上诊断文本（message/suggestion/replacement）使用与 VARCHAR 相同的单行转义。
 
 CREATE TABLE 成功时 affected_rows 为 0。携带 error 的 CommandResult 先输出已完成的
@@ -229,6 +235,17 @@ affected_rows，再输出对应错误，并把本次入口状态标记为失败�
 help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和执行错误写入 stderr。
 格式化实现不得修改 QueryResult 或 CommandResult 的所有权和内容；任何 stdout/stderr 写入
 失败都标记为 I/O 错误并返回 1，不能把写入失败误判为 SQL 成功。
+
+### 6.3 JSON 模式与计划模式
+
+- `--format json` 切换到 NDJSON：stdout 只写结果对象（`query`/`command`），stderr 只写诊断对象
+  （`error`/`status`）。行对象 schema、类型映射、转义与测试见
+  [JSON 输出设计](CLI升级设计_JSON输出.md)；该 schema 已随实现转正为稳定契约。
+- 参数错误与 `--help/--version` 输出保持纯文本：`--format` 是否生效取决于解析是否成功，
+  只有解析成功后的 open/close、执行与输入错误才使用请求的格式。
+- `--plan` 只改变 core 的执行模式，不改变展示层：table 模式下按普通 QueryResult 打印
+  （列头 `plan`，每行一行计划文本），JSON 模式下按普通 `query` 对象输出，不新增 schema 字段。
+- `--plan` 与 `--format` 正交，可任意组合；REPL 下 `--plan` 对整个会话生效。
 
 ## 7. 退出码与错误策略
 
@@ -265,8 +282,11 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
 - 解析结果和默认 data_dir；
 - 批处理与 REPL 的模式判定；
 - 不输出 REPL 提示符的批处理路径；
-- QueryResult、CommandResult 与七态 StatementStatus 的 stdout/stderr 分流，包括
+- QueryResult、CommandResult 与八态 StatementStatus 的 stdout/stderr 分流，包括
   制表符/换行/反斜杠转义；kAnalysisOnly 与 kSkippedExecution 不输出 OK 或查询行；
+- `--format` 的缺值、空值、未知值、重复值四类参数错误，以及 `--plan` 的重复与混用参数错误；
+- JSON 模式的 golden 文本、字段顺序、转义边界与 rows/row_count 一致性，配合测试内置的
+  极简 JSON 解析校验器；kPlanOnly 在 table 与 JSON 两种格式下都按查询结果展示；
 - SKIPPED（policy/aborted）、INDETERMINATE 与 script_error 的插入顺序和 stderr 归属；
 - 语句级 lex/syntax/semantic、执行/存储、analysis 标签与范围格式；脚本级 compile/internal
   标签与空插入点；suggestion、fix-it 与单行转义；
@@ -338,4 +358,9 @@ UTF-8 VARCHAR 展示、编译与语义错误位置、storage 运行期错误（�
   core 允许在后续 close 或 Database 析构中做一次清理重试；
 - fake/模拟数据测试与真实模块联调测试明确分层；
 - 真实 compiler + fake storage 的联调目标不链接 fake compiler 或真实 storage；
-- 不修改 include/tinydbms/；若确需修改，登记公共文件变更并通知模块成员。
+- `--format json` 与 `--plan` 的验收：默认行为零变化、JSON 每行可被标准解析器解析、
+  计划模式零副作用（真实链路用临时目录前后文件清单与数据校验断言）；
+- 本轮为 U3（计划模式）修改了 include/tinydbms/core.hpp：新增 `ExecutionMode`、
+  `StatementStatus::kPlanOnly`、`StatementResult::plan_only` 与 `ExecuteScriptRequest.mode`，
+  已登记到 [消息契约详细设计](../消息契约详细设计.md) 并需要通知其他模块成员；
+  除此之外不修改 include/tinydbms/。

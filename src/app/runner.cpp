@@ -16,9 +16,10 @@ namespace {
 
 void report_error_noexcept(
     std::ostream& output,
+    OutputFormat format,
     tinydbms::core::Error error) noexcept {
     try {
-        (void)write_error(error, output);
+        (void)write_error(error, format, output);
     } catch (...) {
         // A failed error stream cannot be repaired by the runner.
     }
@@ -26,6 +27,7 @@ void report_error_noexcept(
 
 void report_exception_noexcept(
     std::ostream& output,
+    OutputFormat format,
     std::string_view prefix,
     const std::exception& exception) noexcept {
     std::string message;
@@ -37,6 +39,7 @@ void report_exception_noexcept(
     }
     report_error_noexcept(
         output,
+        format,
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
@@ -46,9 +49,12 @@ void report_exception_noexcept(
             std::nullopt});
 }
 
-void report_unknown_exception_noexcept(std::ostream& output) noexcept {
+void report_unknown_exception_noexcept(
+    std::ostream& output,
+    OutputFormat format) noexcept {
     report_error_noexcept(
         output,
+        format,
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
@@ -58,7 +64,11 @@ void report_unknown_exception_noexcept(std::ostream& output) noexcept {
             std::nullopt});
 }
 
-bool close_once(Session& session, bool& opened, std::ostream& error_output) noexcept {
+bool close_once(
+    Session& session,
+    bool& opened,
+    OutputFormat format,
+    std::ostream& error_output) noexcept {
     if (!opened) {
         return true;
     }
@@ -70,16 +80,16 @@ bool close_once(Session& session, bool& opened, std::ostream& error_output) noex
             return true;
         }
         try {
-            (void)write_error(*result.error, error_output);
+            (void)write_error(*result.error, format, error_output);
             return false;
         } catch (...) {
             return false;
         }
     } catch (const std::exception& exception) {
-        report_exception_noexcept(error_output, "close exception: ", exception);
+        report_exception_noexcept(error_output, format, "close exception: ", exception);
         return false;
     } catch (...) {
-        report_unknown_exception_noexcept(error_output);
+        report_unknown_exception_noexcept(error_output, format);
         return false;
     }
 }
@@ -94,9 +104,13 @@ bool write_argument_error(
     return write_help(environment.error);
 }
 
-void report_input_error(CliEnvironment& environment, std::string_view message) {
+void report_input_error(
+    CliEnvironment& environment,
+    OutputFormat format,
+    std::string_view message) {
     report_error_noexcept(
         environment.error,
+        format,
         tinydbms::core::Error{
             tinydbms::core::ErrorKind::kInternal,
             std::nullopt,
@@ -108,6 +122,7 @@ void report_input_error(CliEnvironment& environment, std::string_view message) {
 
 RenderResult render_script_result(
     const tinydbms::core::ExecuteScriptResult& result,
+    OutputFormat format,
     CliEnvironment& environment) {
     RenderResult aggregate;
     bool script_error_written = false;
@@ -115,7 +130,7 @@ RenderResult render_script_result(
     for (const auto& statement : result.statements) {
         if (!script_error_written && result.script_error.has_value() &&
             statement.status() == tinydbms::core::StatementStatus::kSkippedExecution) {
-            if (!write_error(*result.script_error, environment.error)) {
+            if (!write_error(*result.script_error, format, environment.error)) {
                 aggregate.output_ok = false;
                 return aggregate;
             }
@@ -125,6 +140,7 @@ RenderResult render_script_result(
         const RenderResult current = render_statement_result(
             statement,
             result.script_error.has_value(),
+            format,
             environment.output,
             environment.error);
         aggregate.output_ok = aggregate.output_ok && current.output_ok;
@@ -135,7 +151,7 @@ RenderResult render_script_result(
     }
 
     if (aggregate.output_ok && !script_error_written && result.script_error.has_value()) {
-        if (!write_error(*result.script_error, environment.error)) {
+        if (!write_error(*result.script_error, format, environment.error)) {
             aggregate.output_ok = false;
         }
     }
@@ -146,21 +162,24 @@ RenderResult render_script_result(
 bool run_batch(
     Session& session,
     CliEnvironment& environment,
+    OutputFormat format,
+    tinydbms::core::ExecutionMode mode,
     tinydbms::core::ScriptErrorPolicy policy,
     bool& failed) {
     std::string text;
     std::string input_error;
     if (!read_batch(environment.input, text, input_error)) {
         failed = true;
-        report_input_error(environment, input_error);
+        report_input_error(environment, format, input_error);
         return false;
     }
 
     tinydbms::core::ExecuteScriptRequest request;
     request.text = std::move(text);
     request.error_policy = policy;
+    request.mode = mode;
     const tinydbms::core::ExecuteScriptResult result = session.execute_script(request);
-    const RenderResult rendered = render_script_result(result, environment);
+    const RenderResult rendered = render_script_result(result, format, environment);
     failed = failed || rendered.had_error || !rendered.output_ok;
     return rendered.output_ok;
 }
@@ -168,6 +187,8 @@ bool run_batch(
 bool run_repl(
     Session& session,
     CliEnvironment& environment,
+    OutputFormat format,
+    tinydbms::core::ExecutionMode mode,
     tinydbms::core::ScriptErrorPolicy policy,
     bool& failed) {
     for (;;) {
@@ -182,7 +203,7 @@ bool run_repl(
         std::string input_error;
         if (!read_line(environment.input, line, reached_eof, input_error)) {
             failed = true;
-            report_input_error(environment, input_error);
+            report_input_error(environment, format, input_error);
             return false;
         }
         if (reached_eof) {
@@ -192,10 +213,11 @@ bool run_repl(
         tinydbms::core::ExecuteScriptRequest request;
         request.text = std::move(line);
         request.error_policy = policy;
+        request.mode = mode;
         const tinydbms::core::ExecuteScriptResult result =
             session.execute_script(request);
 
-        const RenderResult rendered = render_script_result(result, environment);
+        const RenderResult rendered = render_script_result(result, format, environment);
         failed = failed || rendered.had_error || !rendered.output_ok;
         if (!rendered.output_ok) {
             return false;
@@ -217,6 +239,8 @@ int run_cli(
     Session& session,
     CliEnvironment& environment) {
     bool opened = false;
+    // 参数错误保持纯文本（--format 是否生效尚未确定）；解析成功后按请求的格式输出诊断。
+    OutputFormat format = OutputFormat::kTable;
     try {
         const ParseArgumentsResult parsed_result = parse_arguments(argc, argv);
         if (const auto* argument_error = std::get_if<ArgumentError>(&parsed_result);
@@ -225,6 +249,7 @@ int run_cli(
         }
 
         const ParsedArguments& arguments = std::get<ParsedArguments>(parsed_result);
+        format = arguments.format;
         if (arguments.action == CliAction::kHelp) {
             return write_help(environment.output) ? 0 : 1;
         }
@@ -235,11 +260,15 @@ int run_cli(
         const tinydbms::core::OpenDatabaseResult opened_result =
             session.open(tinydbms::core::OpenDatabaseRequest{arguments.data_dir});
         if (opened_result.error.has_value()) {
-            (void)write_error(*opened_result.error, environment.error);
+            (void)write_error(*opened_result.error, format, environment.error);
             return 1;
         }
         opened = true;
 
+        const tinydbms::core::ExecutionMode mode =
+            arguments.plan_only
+            ? tinydbms::core::ExecutionMode::kPlanOnly
+            : tinydbms::core::ExecutionMode::kExecute;
         const tinydbms::core::ScriptErrorPolicy policy =
             arguments.error_policy == ErrorPolicy::kAnalyze
             ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
@@ -247,20 +276,21 @@ int run_cli(
 
         bool failed = false;
         if (environment.interactive) {
-            (void)run_repl(session, environment, policy, failed);
+            (void)run_repl(session, environment, format, mode, policy, failed);
         } else {
-            (void)run_batch(session, environment, policy, failed);
+            (void)run_batch(session, environment, format, mode, policy, failed);
         }
 
-        const bool close_ok = close_once(session, opened, environment.error);
+        const bool close_ok = close_once(session, opened, format, environment.error);
         return (failed || !close_ok) ? 1 : 0;
     } catch (const std::exception& exception) {
-        report_exception_noexcept(environment.error, "application exception: ", exception);
-        (void)close_once(session, opened, environment.error);
+        report_exception_noexcept(
+            environment.error, format, "application exception: ", exception);
+        (void)close_once(session, opened, format, environment.error);
         return 1;
     } catch (...) {
-        report_unknown_exception_noexcept(environment.error);
-        (void)close_once(session, opened, environment.error);
+        report_unknown_exception_noexcept(environment.error, format);
+        (void)close_once(session, opened, format, environment.error);
         return 1;
     }
 }

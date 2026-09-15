@@ -337,6 +337,24 @@ struct JoinNode {
 
 condition 的 ColumnRef 均为 SlotId。多 JOIN 首版按 SQL relation 顺序形成确定性的 left-deep tree；ON 可引用当前累计左侧与当前右侧 relation。Core 使用 Nested Loop Join，condition 为 TRUE 才匹配，FALSE/UNKNOWN 不匹配；Storage 只提供各表扫描，不感知 JOIN。
 
+### 7.3 执行资源上限
+
+Core 在内存中全量物化 Plan 的输出，因此公共契约固定两个上限：
+
+```cpp
+inline constexpr std::size_t kMaxQueryRows = 1 << 18;  // 262144，include/tinydbms/core.hpp
+```
+
+- `kMaxQueryRows` 按物化节点（SeqScan、Join）的累计行数计。超过上限时 Core 返回语句级
+  `ErrorKind::kExecute`（"query/join materialization exceeds the maximum row count"），
+  不使 Database 会话失效、不产生 `script_error`；Sort/Aggregate 的输入已被上游节点限界，
+  不重复计数，DELETE 只收集 RecordId 故不受该上限约束。
+- Plan 树的遍历深度另有 Core 内部防御性上限 `256`（`kMaxPlanDepth`）：校验与执行在进入第 256 层
+  节点前返回 `ErrorKind::kInternal` 致命中止，不递归溢出、不调用 Storage。它是 compiler
+  复杂度预算（表达式 256 层）的兜底，不能作为 compiler 的资源限制替代。
+- 两个上限都只保证“不无界增长或以崩溃失败”，不承诺任意规模结果集可用；
+  未来引入外部排序或分页属于单独的能力扩展。
+
 ## 8. Aggregate 与 GROUP BY
 
 Aggregate 不作为普通逐行 Expr 交给现有 evaluator，而使用独立节点：

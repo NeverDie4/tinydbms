@@ -119,6 +119,18 @@ static_assert(std::is_same_v<
     std::remove_cvref_t<decltype(std::declval<const core::Error&>().compile_stage)>,
     std::optional<CompileStage>>);
 static_assert(core::kMaxStatementsPerScript == 4096);
+static_assert(core::kMaxQueryRows == (std::size_t{1} << 18));
+// U3 计划模式的公共契约：默认仍是执行模式（现有调用方零改动），工厂与字段类型固定。
+static_assert(core::ExecuteScriptRequest{}.mode == core::ExecutionMode::kExecute);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::ExecuteScriptRequest{}.mode)>,
+    core::ExecutionMode>);
+static_assert(std::is_same_v<
+    decltype(core::StatementResult::plan_only(
+        std::declval<std::size_t>(),
+        std::declval<SourceRange>(),
+        std::declval<core::QueryResult>())),
+    core::StatementResult>);
 static_assert(std::is_same_v<
     decltype(core::ExecuteScriptResult::statements),
     std::vector<core::StatementResult>>);

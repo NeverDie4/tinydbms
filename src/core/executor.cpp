@@ -22,6 +22,10 @@ using SlotRow = internal::expression::SlotRow;
 using SlotRowResult = std::variant<SlotRow, Error>;
 using SlotLookupResult = std::variant<const Value*, Error>;
 
+// Plan 树遍历的防御性深度上限。compiler 的表达式复杂度预算 256 已间接限制 Plan 深度，
+// 该检查保证即使 Plan 来自违约实现，core 也以 kInternal 结束而不是递归溢出。
+inline constexpr std::size_t kMaxPlanDepth = 256;
+
 [[nodiscard]] Value validation_value(Type type) {
     switch (type) {
         case Type::kInt: return Value{std::int32_t{0}};
@@ -558,6 +562,8 @@ ExecuteResult Database::Impl::execute_delete(
             SlotRowResult materialized =
                 materialize_slot_row(*table, record.values, plan.input_columns);
             if (const Error* error = std::get_if<Error>(&materialized)) {
+                // 记录与 schema 不符属于 storage 违约：结束会话，由调用方 close 后重新 open。
+                abort_after_storage_exception();
                 return *error;
             }
             const SlotRow& row = std::get<SlotRow>(materialized);
@@ -623,100 +629,148 @@ ExecuteResult Database::Impl::execute_delete(
 }
 
 ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
-    const TableMeta* table=find_table(catalog,plan.table_id);
-    if(table==nullptr)return make_internal_error("update plan references an unknown table");
-    if(const auto table_error=internal::validate_table_metadata(*table);table_error.has_value())
-        return ExecuteResult{*table_error};
-    if(plan.assignments.empty())return make_internal_error("update plan must contain assignments");
-    SlotRowResult validation_row=make_validation_slot_row(*table,plan.input_columns);
-    if(const Error* error=std::get_if<Error>(&validation_row))return ExecuteResult{*error};
-    std::vector<bool> assigned(table->columns.size(),false);
-    for(const compiler::UpdateAssignment& assignment:plan.assignments) {
-        const std::size_t column_index=static_cast<std::size_t>(assignment.column_id);
-        if(column_index>=table->columns.size())
-            return make_internal_error("update assignment column id is out of range");
-        if(assigned[column_index])
-            return make_internal_error("update plan contains a duplicate assignment column");
-        if(!value_matches_column(assignment.value,table->columns[column_index]))
-            return make_internal_error("update assignment value type does not match table schema");
-        assigned[column_index]=true;
+    const TableMeta* table = find_table(catalog, plan.table_id);
+    if (table == nullptr) {
+        return make_internal_error("update plan references an unknown table");
     }
-    if(plan.predicate.has_value()) {
-        if(const auto error=internal::expression::validate_predicate(
-                *plan.predicate,std::get<SlotRow>(validation_row));error.has_value())
+    if (const std::optional<Error> table_error = internal::validate_table_metadata(*table);
+        table_error.has_value()) {
+        return ExecuteResult{*table_error};
+    }
+    if (plan.assignments.empty()) {
+        return make_internal_error("update plan must contain assignments");
+    }
+
+    SlotRowResult validation_row = make_validation_slot_row(*table, plan.input_columns);
+    if (const Error* error = std::get_if<Error>(&validation_row)) {
+        return ExecuteResult{*error};
+    }
+
+    std::vector<bool> assigned(table->columns.size(), false);
+    for (const compiler::UpdateAssignment& assignment : plan.assignments) {
+        const std::size_t column_index = static_cast<std::size_t>(assignment.column_id);
+        if (column_index >= table->columns.size()) {
+            return make_internal_error("update assignment column id is out of range");
+        }
+        if (assigned[column_index]) {
+            return make_internal_error("update plan contains a duplicate assignment column");
+        }
+        if (!value_matches_column(assignment.value, table->columns[column_index])) {
+            return make_internal_error("update assignment value type does not match table schema");
+        }
+        assigned[column_index] = true;
+    }
+    if (plan.predicate.has_value()) {
+        if (const std::optional<ExpressionError> error = internal::expression::validate_predicate(
+                *plan.predicate, std::get<SlotRow>(validation_row));
+            error.has_value()) {
             return make_expression_error(*error);
+        }
     }
 
     storage::OpenTableResult opened;
     try {
         current_plan_storage_called = true;
-        opened=storage::open_table(storage::OpenTableRequest{plan.table_id});
-    } catch(const std::exception& exception) {
-        abort_after_storage_exception();return make_internal_error(exception.what());
-    } catch(...) {
-        abort_after_storage_exception();return make_internal_error("unknown exception while opening table for update");
+        opened = storage::open_table(storage::OpenTableRequest{plan.table_id});
+    } catch (const std::exception& exception) {
+        abort_after_storage_exception();
+        return make_internal_error(exception.what());
+    } catch (...) {
+        abort_after_storage_exception();
+        return make_internal_error("unknown exception while opening table for update");
     }
-    if(opened.error.has_value()) {
-        if(opened.cursor.has_value()) {
+    if (opened.error.has_value()) {
+        if (opened.cursor.has_value()) {
             CursorGuard invalid_result_cursor{*opened.cursor};
             close_ignoring_errors(invalid_result_cursor);
-            if(invalid_result_cursor.close_threw())abort_after_storage_exception();
+            if (invalid_result_cursor.close_threw()) {
+                abort_after_storage_exception();
+            }
             return make_internal_error("open_table returned both error and cursor");
         }
         return ExecuteResult{internal::map_storage_error(*opened.error)};
     }
-    if(!opened.cursor.has_value())return make_internal_error("open_table returned no cursor on success");
+    if (!opened.cursor.has_value()) {
+        return make_internal_error("open_table returned no cursor on success");
+    }
 
     CursorGuard cursor{*opened.cursor};
     std::vector<storage::UpdateRow> updates;
-    const std::optional<Error> scan_error=scan_records(
-        cursor,*opened.cursor,[this]() noexcept { abort_after_storage_exception(); },
-        [&](const storage::Record& record)->std::optional<Error>{
-            SlotRowResult materialized=materialize_slot_row(*table,record.values,plan.input_columns);
-            if(const Error* error=std::get_if<Error>(&materialized))return *error;
-            if(plan.predicate.has_value()) {
-                const auto predicate=internal::expression::evaluate_predicate(
-                    *plan.predicate,std::get<SlotRow>(materialized));
-                if(const ExpressionError* error=std::get_if<ExpressionError>(&predicate))
-                    return internal::make_error(ErrorKind::kInternal,error->message);
-                if(!std::get<bool>(predicate))return std::nullopt;
+    const std::optional<Error> scan_error = scan_records(
+        cursor,
+        *opened.cursor,
+        [this]() noexcept { abort_after_storage_exception(); },
+        [&](const storage::Record& record) -> std::optional<Error> {
+            SlotRowResult materialized =
+                materialize_slot_row(*table, record.values, plan.input_columns);
+            if (const Error* error = std::get_if<Error>(&materialized)) {
+                // 记录与 schema 不符属于 storage 违约：结束会话，由调用方 close 后重新 open。
+                abort_after_storage_exception();
+                return *error;
             }
-            Row replacement=record.values;
-            for(const compiler::UpdateAssignment& assignment:plan.assignments)
-                replacement[static_cast<std::size_t>(assignment.column_id)]=assignment.value;
-            if(const auto row_error=validate_physical_row(*table,replacement);row_error.has_value())
+            const SlotRow& row = std::get<SlotRow>(materialized);
+
+            if (plan.predicate.has_value()) {
+                const std::variant<bool, ExpressionError> predicate =
+                    internal::expression::evaluate_predicate(*plan.predicate, row);
+                if (const ExpressionError* error = std::get_if<ExpressionError>(&predicate)) {
+                    return internal::make_error(ErrorKind::kInternal, error->message);
+                }
+                if (!std::get<bool>(predicate)) {
+                    return std::nullopt;
+                }
+            }
+
+            Row replacement = record.values;
+            for (const compiler::UpdateAssignment& assignment : plan.assignments) {
+                replacement[static_cast<std::size_t>(assignment.column_id)] = assignment.value;
+            }
+            if (const std::optional<Error> row_error = validate_physical_row(*table, replacement);
+                row_error.has_value()) {
                 return *row_error;
-            updates.push_back(storage::UpdateRow{record.rid,std::move(replacement)});
+            }
+            updates.push_back(storage::UpdateRow{record.rid, std::move(replacement)});
             return std::nullopt;
         });
-    if(scan_error.has_value())return ExecuteResult{*scan_error};
-    if(const auto close_error=cursor.close();close_error.has_value()) {
-        if(cursor.close_threw())abort_after_storage_exception();
+    if (scan_error.has_value()) {
+        return ExecuteResult{*scan_error};
+    }
+    if (const std::optional<Error> close_error = cursor.close(); close_error.has_value()) {
+        if (cursor.close_threw()) {
+            abort_after_storage_exception();
+        }
         return ExecuteResult{*close_error};
     }
 
-    const std::uint64_t requested=static_cast<std::uint64_t>(updates.size());
+    const std::uint64_t requested = static_cast<std::uint64_t>(updates.size());
     storage::UpdateResult updated;
     try {
         current_plan_storage_called = true;
-        updated=storage::update_rows(storage::UpdateRequest{plan.table_id,std::move(updates)});
-    } catch(const std::exception& exception) {
-        abort_after_storage_exception();return make_internal_error(exception.what());
-    } catch(...) {
-        abort_after_storage_exception();return make_internal_error("unknown exception while updating rows");
+        updated = storage::update_rows(storage::UpdateRequest{plan.table_id, std::move(updates)});
+    } catch (const std::exception& exception) {
+        abort_after_storage_exception();
+        return make_internal_error(exception.what());
+    } catch (...) {
+        abort_after_storage_exception();
+        return make_internal_error("unknown exception while updating rows");
     }
-    if(updated.updated_count>requested) {
-        abort_after_storage_exception();return make_internal_error("storage returned too many updated rows");
+
+    if (updated.updated_count > requested) {
+        abort_after_storage_exception();
+        return make_internal_error("storage returned too many updated rows");
     }
-    if(updated.error.has_value()) {
-        Error error=internal::map_storage_error(*updated.error);
-        if(updated.updated_count==0)return ExecuteResult{std::move(error)};
-        return ExecuteResult{CommandResult{updated.updated_count,std::move(error)}};
+    if (updated.error.has_value()) {
+        Error error = internal::map_storage_error(*updated.error);
+        if (updated.updated_count == 0) {
+            return ExecuteResult{std::move(error)};
+        }
+        return ExecuteResult{CommandResult{updated.updated_count, std::move(error)}};
     }
-    if(updated.updated_count!=requested) {
-        abort_after_storage_exception();return make_internal_error("storage returned an incomplete successful update result");
+    if (updated.updated_count != requested) {
+        abort_after_storage_exception();
+        return make_internal_error("storage returned an incomplete successful update result");
     }
-    return ExecuteResult{CommandResult{updated.updated_count,std::nullopt}};
+    return ExecuteResult{CommandResult{updated.updated_count, std::nullopt}};
 }
 
 namespace {
@@ -746,7 +800,13 @@ using DataflowValidationResult = std::variant<SlotRow, Error>;
 
 DataflowValidationResult validate_dataflow_node(
     const std::vector<TableMeta>& catalog,
-    const compiler::PlanNode& node) {
+    const compiler::PlanNode& node,
+    std::size_t depth) {
+    if (depth >= kMaxPlanDepth) {
+        return internal::make_error(
+            ErrorKind::kInternal, "query plan depth exceeds core limit");
+    }
+
     if (const auto* scan = std::get_if<compiler::SeqScanNode>(&node.kind)) {
         const TableMeta* table = find_table(catalog, scan->table_id);
         if (table == nullptr) {
@@ -764,7 +824,8 @@ DataflowValidationResult validate_dataflow_node(
         if (!filter->child) {
             return internal::make_error(ErrorKind::kInternal, "filter node has a null child");
         }
-        DataflowValidationResult child = validate_dataflow_node(catalog, *filter->child);
+        DataflowValidationResult child =
+            validate_dataflow_node(catalog, *filter->child, depth + 1U);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -784,7 +845,8 @@ DataflowValidationResult validate_dataflow_node(
         if (!sort->child) {
             return internal::make_error(ErrorKind::kInternal, "sort node has a null child");
         }
-        DataflowValidationResult child = validate_dataflow_node(catalog, *sort->child);
+        DataflowValidationResult child =
+            validate_dataflow_node(catalog, *sort->child, depth + 1U);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -802,11 +864,13 @@ DataflowValidationResult validate_dataflow_node(
         if (!join->left || !join->right) {
             return internal::make_error(ErrorKind::kInternal, "join node has a null child");
         }
-        DataflowValidationResult left = validate_dataflow_node(catalog, *join->left);
+        DataflowValidationResult left =
+            validate_dataflow_node(catalog, *join->left, depth + 1U);
         if (const Error* error = std::get_if<Error>(&left)) {
             return *error;
         }
-        DataflowValidationResult right = validate_dataflow_node(catalog, *join->right);
+        DataflowValidationResult right =
+            validate_dataflow_node(catalog, *join->right, depth + 1U);
         if (const Error* error = std::get_if<Error>(&right)) {
             return *error;
         }
@@ -829,7 +893,8 @@ DataflowValidationResult validate_dataflow_node(
             return internal::make_error(
                 ErrorKind::kInternal, "aggregate node has a null child");
         }
-        DataflowValidationResult child = validate_dataflow_node(catalog, *aggregate->child);
+        DataflowValidationResult child =
+            validate_dataflow_node(catalog, *aggregate->child, depth + 1U);
         if (const Error* error = std::get_if<Error>(&child)) {
             return *error;
         }
@@ -933,7 +998,7 @@ QueryValidationResult validate_query_plan(
         ? plan.root.get()
         : project->child.get();
     DataflowValidationResult validation_row =
-        validate_dataflow_node(catalog, *input);
+        validate_dataflow_node(catalog, *input, 1U);
     if (const Error* error = std::get_if<Error>(&validation_row)) {
         return *error;
     }
@@ -1284,8 +1349,15 @@ ExecuteResult Database::Impl::execute_query(
 
     QueryResult result;
     result.columns = std::move(query.result_columns);
-    const auto execute_node = [this](auto&& self, const compiler::PlanNode& node)
-        -> DataflowRowsResult {
+    const auto execute_node = [this](
+                                  auto&& self,
+                                  const compiler::PlanNode& node,
+                                  std::size_t depth) -> DataflowRowsResult {
+        if (depth >= kMaxPlanDepth) {
+            return internal::make_error(
+                ErrorKind::kInternal, "query plan depth exceeds core limit");
+        }
+
         if (const auto* scan = std::get_if<compiler::SeqScanNode>(&node.kind)) {
             const TableMeta* table = find_table(catalog, scan->table_id);
             if (table == nullptr) {
@@ -1331,7 +1403,15 @@ ExecuteResult Database::Impl::execute_query(
                     SlotRowResult materialized =
                         materialize_slot_row(*table, record.values, scan->columns);
                     if (const Error* error = std::get_if<Error>(&materialized)) {
+                        // 记录与 schema 不符属于 storage 违约：当前会话的数据流不再可信，
+                        // 与数量不变量违约一样结束会话，由调用方 close 后重新 open。
+                        abort_after_storage_exception();
                         return *error;
+                    }
+                    if (rows.size() >= kMaxQueryRows) {
+                        return internal::make_error(
+                            ErrorKind::kExecute,
+                            "query materialization exceeds the maximum row count");
                     }
                     rows.push_back(std::get<SlotRow>(std::move(materialized)));
                     return std::nullopt;
@@ -1349,7 +1429,7 @@ ExecuteResult Database::Impl::execute_query(
         }
 
         if (const auto* filter = std::get_if<compiler::FilterNode>(&node.kind)) {
-            DataflowRowsResult child = self(self, *filter->child);
+            DataflowRowsResult child = self(self, *filter->child, depth + 1U);
             if (const Error* error = std::get_if<Error>(&child)) {
                 return *error;
             }
@@ -1368,7 +1448,7 @@ ExecuteResult Database::Impl::execute_query(
         }
 
         if (const auto* sort = std::get_if<compiler::SortNode>(&node.kind)) {
-            DataflowRowsResult child = self(self, *sort->child);
+            DataflowRowsResult child = self(self, *sort->child, depth + 1U);
             if (const Error* error = std::get_if<Error>(&child)) {
                 return *error;
             }
@@ -1389,11 +1469,11 @@ ExecuteResult Database::Impl::execute_query(
         }
 
         if (const auto* join = std::get_if<compiler::JoinNode>(&node.kind)) {
-            DataflowRowsResult left_result = self(self, *join->left);
+            DataflowRowsResult left_result = self(self, *join->left, depth + 1U);
             if (const Error* error = std::get_if<Error>(&left_result)) {
                 return *error;
             }
-            DataflowRowsResult right_result = self(self, *join->right);
+            DataflowRowsResult right_result = self(self, *join->right, depth + 1U);
             if (const Error* error = std::get_if<Error>(&right_result)) {
                 return *error;
             }
@@ -1415,6 +1495,11 @@ ExecuteResult Database::Impl::execute_query(
                         return internal::make_error(ErrorKind::kInternal, error->message);
                     }
                     if (std::get<bool>(matches)) {
+                        if (joined.size() >= kMaxQueryRows) {
+                            return internal::make_error(
+                                ErrorKind::kExecute,
+                                "join materialization exceeds the maximum row count");
+                        }
                         joined.push_back(std::move(row));
                     }
                 }
@@ -1423,7 +1508,7 @@ ExecuteResult Database::Impl::execute_query(
         }
 
         if (const auto* aggregate = std::get_if<compiler::AggregateNode>(&node.kind)) {
-            DataflowRowsResult child_result = self(self, *aggregate->child);
+            DataflowRowsResult child_result = self(self, *aggregate->child, depth + 1U);
             if (const Error* error = std::get_if<Error>(&child_result)) {
                 return *error;
             }
@@ -1483,7 +1568,7 @@ ExecuteResult Database::Impl::execute_query(
             ErrorKind::kInternal, "query execution encountered an invalid node topology");
     };
 
-    DataflowRowsResult executed = execute_node(execute_node, *query.input);
+    DataflowRowsResult executed = execute_node(execute_node, *query.input, 1U);
     if (const Error* error = std::get_if<Error>(&executed)) {
         return ExecuteResult{*error};
     }

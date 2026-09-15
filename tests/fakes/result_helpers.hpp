@@ -21,6 +21,8 @@ inline std::size_t executed_count(const core::ExecuteScriptResult& result) {
         case core::StatementStatus::kExecutionIndeterminate:
             ++count;
             break;
+        // 计划模式没有进入执行器，不计入“进入过执行”的口径。
+        case core::StatementStatus::kPlanOnly:
         case core::StatementStatus::kCompileError:
         case core::StatementStatus::kAnalysisError:
         case core::StatementStatus::kAnalysisOnly:
@@ -36,6 +38,7 @@ inline std::optional<std::size_t> first_error_index(
     for (const core::StatementResult& statement : result.statements) {
         switch (statement.status()) {
         case core::StatementStatus::kExecuted:
+        case core::StatementStatus::kPlanOnly:
         case core::StatementStatus::kAnalysisOnly:
         case core::StatementStatus::kSkippedExecution:
             break;

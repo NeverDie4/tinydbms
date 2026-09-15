@@ -192,6 +192,17 @@ Plan query(
     return Plan{QueryPlan{std::move(root), std::move(outputs)}};
 }
 
+// 构造 depth 层 Filter 串联的合法拓扑；用于验证 core 的 Plan 深度兜底。
+Plan deeply_nested_filter_plan(std::size_t depth) {
+    std::unique_ptr<PlanNode> root = scan();
+    for (std::size_t index = 0; index < depth; ++index) {
+        root = std::make_unique<PlanNode>(tinydbms::compiler::FilterNode{
+            compare(CmpOp::kEq, column(0), literal(int_value(1))),
+            std::move(root)});
+    }
+    return query(std::move(root));
+}
+
 Plan insert_plan(
     std::vector<ColumnId> columns,
     std::vector<std::vector<Value>> rows,
@@ -250,6 +261,15 @@ ExecuteScriptResult execute_plans(
     }
     fake_compiler::set_compile_results(std::move(results));
     return database.execute_script(ExecuteScriptRequest{std::move(script)});
+}
+
+// storage 返回的行宽与 Catalog 不符：用于验证 core 会结束当前会话而不是继续执行。
+bool start_database_with_mismatched_record(Database& database) {
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({users_table()});
+    fake::set_records_for_table(1, {record(1, {int_value(1)})});
+    return open_database(database);
 }
 
 const Error* error_of(const ExecuteResult& result) {
@@ -1634,6 +1654,150 @@ bool test_invalid_query_plans_have_no_storage_side_effect() {
     return true;
 }
 
+bool test_query_plan_depth_is_bounded() {
+    Database legal;
+    CHECK(start_database(
+        legal,
+        {record(1, {int_value(1), text_value("alice"), int_value(30)})}));
+    const auto legal_result = execute_plan(legal, deeply_nested_filter_plan(64));
+    CHECK(legal_result.statements.size() == 1);
+    const QueryResult* legal_rows = query_of(legal_result.statements.front());
+    CHECK(legal_rows != nullptr && legal_rows->rows.size() == 1);
+
+    // 超过深度上限的 Plan 必须被拒绝：不得递归溢出，也不得产生 storage 副作用。
+    const std::size_t open_calls_before = fake::state().open_table_calls;
+    const auto legal_too_deep = execute_plan(legal, deeply_nested_filter_plan(4096));
+    CHECK(legal_too_deep.statements.size() == 1);
+    CHECK(internal_abort_before_storage(legal_too_deep));
+    CHECK(fake::state().open_table_calls == open_calls_before);
+    CHECK(close_database(legal));
+    return true;
+}
+
+bool test_query_materialization_is_bounded() {
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    const TableMeta events = events_table();
+    fake::set_tables({events});
+
+    std::vector<tinydbms::storage::Record> records;
+    records.reserve(tinydbms::core::kMaxQueryRows + 1U);
+    for (std::size_t index = 0; index < tinydbms::core::kMaxQueryRows + 1U; ++index) {
+        records.push_back(record(
+            static_cast<std::uint64_t>(index) + 1U,
+            {Value{static_cast<std::int64_t>(index)}}));
+    }
+    fake::set_records_for_table(events.table_id, std::move(records));
+    CHECK(open_database(database));
+
+    const std::vector<QueryOutput> outputs{{0, "event_id", Type::kBigInt, false}};
+    const auto limited = execute_plan(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs));
+    CHECK(limited.statements.size() == 1);
+    // 行数上限是语句级执行错误，不是致命中止：不得产生 script_error。
+    CHECK(!limited.script_error.has_value());
+    CHECK(
+        limited.statements.front().status() ==
+        tinydbms::core::StatementStatus::kExecutionError);
+    CHECK(is_error(outcome_of(limited.statements.front()), ErrorKind::kExecute));
+
+    // 会话仍然可用：替换数据后同一 Database 实例可继续执行。
+    fake::set_records_for_table(events.table_id, {record(1, {Value{std::int64_t{7}}})});
+    const auto follow_up = execute_plan(
+        database,
+        query(scan(events.table_id, {{0, 0}}), outputs));
+    CHECK(follow_up.statements.size() == 1);
+    const QueryResult* rows = query_of(follow_up.statements.front());
+    CHECK(rows != nullptr && rows->rows.size() == 1);
+    CHECK(std::get<std::int64_t>(rows->rows[0][0].data) == 7);
+    CHECK(close_database(database));
+    return true;
+}
+
+bool test_join_materialization_is_bounded() {
+    // 单列小表：513 × 512 = 262656 > kMaxQueryRows，用很小的输入触发连接物化上限。
+    const TableMeta left_table = events_table();
+    const TableMeta right_table = measurements_table();
+    CHECK(513U * 512U > tinydbms::core::kMaxQueryRows);
+
+    Database database;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({left_table, right_table});
+
+    std::vector<tinydbms::storage::Record> left_records;
+    left_records.reserve(513U);
+    for (std::size_t index = 0; index < 513U; ++index) {
+        left_records.push_back(record(
+            static_cast<std::uint64_t>(index) + 1U,
+            {Value{static_cast<std::int64_t>(index)}}));
+    }
+    std::vector<tinydbms::storage::Record> right_records;
+    right_records.reserve(512U);
+    for (std::size_t index = 0; index < 512U; ++index) {
+        right_records.push_back(record(
+            static_cast<std::uint64_t>(index) + 1U,
+            {Value{static_cast<double>(index)}}));
+    }
+    fake::set_records_for_table(left_table.table_id, std::move(left_records));
+    fake::set_records_for_table(right_table.table_id, std::move(right_records));
+    CHECK(open_database(database));
+
+    auto join_root = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        literal(Value{true}),
+        scan(left_table.table_id, {{0, 0}}),
+        scan(right_table.table_id, {{0, 5}})});
+    auto projected = std::make_unique<PlanNode>(ProjectNode{{0}, std::move(join_root)});
+    const auto limited = execute_plan(
+        database,
+        query(std::move(projected), {{0, "event_id", Type::kBigInt, false}}));
+    CHECK(limited.statements.size() == 1);
+    CHECK(!limited.script_error.has_value());
+    CHECK(
+        limited.statements.front().status() ==
+        tinydbms::core::StatementStatus::kExecutionError);
+    CHECK(is_error(outcome_of(limited.statements.front()), ErrorKind::kExecute));
+    CHECK(close_database(database));
+    return true;
+}
+
+bool test_scan_row_schema_violation_invalidates_session() {
+    Database database;
+    CHECK(start_database_with_mismatched_record(database));
+    const auto query_result = execute_plan(database, query(scan()));
+    CHECK(query_result.statements.size() == 1);
+    CHECK(internal_abort_after_storage(query_result));
+
+    // 会话进入 forced-close：重新 open 之前必须 close，close 后可以正常再用。
+    const auto reopen = database.open(tinydbms::core::OpenDatabaseRequest{"test-data"});
+    CHECK(reopen.error.has_value());
+    CHECK(reopen.error->kind == ErrorKind::kExecute);
+    CHECK(close_database(database));
+    CHECK(open_database(database));
+    CHECK(close_database(database));
+
+    // DELETE 与 UPDATE 共用同一套行物化校验，违约时同样结束会话。
+    Database deleting;
+    CHECK(start_database_with_mismatched_record(deleting));
+    const auto delete_result = execute_plan(deleting, delete_plan(1));
+    CHECK(delete_result.statements.size() == 1);
+    CHECK(internal_abort_after_storage(delete_result));
+    CHECK(close_database(deleting));
+
+    Database updating;
+    CHECK(start_database_with_mismatched_record(updating));
+    const auto update_result = execute_plan(
+        updating,
+        update_plan({UpdateAssignment{1, text_value("bob")}}));
+    CHECK(update_result.statements.size() == 1);
+    CHECK(internal_abort_after_storage(update_result));
+    CHECK(close_database(updating));
+    return true;
+}
+
 bool test_open_and_scan_result_invariants_close_cursor_once() {
     Database malformed_open;
     CHECK(start_database(malformed_open));
@@ -1950,6 +2114,10 @@ int main() {
         test_truth_value_foundation() &&
         test_expression_depth_is_bounded() &&
         test_invalid_query_plans_have_no_storage_side_effect() &&
+        test_query_plan_depth_is_bounded() &&
+        test_query_materialization_is_bounded() &&
+        test_join_materialization_is_bounded() &&
+        test_scan_row_schema_violation_invalidates_session() &&
         test_open_and_scan_result_invariants_close_cursor_once() &&
         test_scan_row_and_close_failures_discard_query_and_delete() &&
         test_storage_errors_and_exceptions_are_contained() &&

@@ -8,6 +8,8 @@
 #include <variant>
 #include <vector>
 
+#include "output.hpp"
+
 namespace tinydbms::app {
 
 enum class CliAction {
@@ -25,6 +27,8 @@ struct ParsedArguments {
     CliAction action = CliAction::kRun;
     std::string data_dir;
     ErrorPolicy error_policy = ErrorPolicy::kStop;
+    OutputFormat format = OutputFormat::kTable;
+    bool plan_only = false;
 };
 
 struct ArgumentError {

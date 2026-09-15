@@ -1,5 +1,7 @@
 #include "output.hpp"
 
+#include "json_output.hpp"
+
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -8,11 +10,24 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace tinydbms::app {
 namespace {
+
+// CLI 侧发现的结果不变式破坏：core 的工厂理论上不允许出现，这里只做防御性兜底，
+// 保证任何异常组合都会留下 stderr 诊断而不是静默失败。
+tinydbms::core::Error malformed_result_error(std::string message) {
+    return tinydbms::core::Error{
+        tinydbms::core::ErrorKind::kInternal,
+        std::nullopt,
+        std::nullopt,
+        std::move(message),
+        std::nullopt,
+        std::nullopt};
+}
 
 std::string_view compile_stage_name(tinydbms::CompileStage stage) noexcept {
     switch (stage) {
@@ -149,13 +164,8 @@ RenderResult write_query_result(
     }
     for (const auto& row : query.rows) {
         if (row.size() != query.columns.size()) {
-            const tinydbms::core::Error malformed{
-                tinydbms::core::ErrorKind::kInternal,
-                std::nullopt,
-                std::nullopt,
-                "query result row width does not match column count",
-                std::nullopt,
-                std::nullopt};
+            const tinydbms::core::Error malformed =
+                malformed_result_error("query result row width does not match column count");
             // 结果不变式被破坏属于内部错误：写入 stderr 并计入失败，退出码为 1。
             return RenderResult{
                 write_error_line(malformed, "internal", std::nullopt, error_output),
@@ -235,7 +245,9 @@ bool write_error(const tinydbms::core::Error& error, std::ostream& output) {
         output);
 }
 
-RenderResult render_statement_result(
+namespace {
+
+RenderResult render_table_statement_result(
     const tinydbms::core::StatementResult& result,
     bool aborted,
     std::ostream& output,
@@ -251,9 +263,31 @@ RenderResult render_statement_result(
         }
         const auto* command = std::get_if<tinydbms::core::CommandResult>(&outcome.outcome);
         if (command == nullptr) {
-            return RenderResult{false, false};
+            // 工厂保证 kExecuted 只携带无错误结果；走到这里说明结果不变式被破坏，
+            // 必须留下诊断文本，不能只把退出码置为失败。
+            return RenderResult{
+                write_statement_error(
+                    malformed_result_error("kExecuted statement carries an unsupported outcome"),
+                    result.source(),
+                    error_output),
+                true};
         }
         return RenderResult{write_command_result(*command, output), false};
+    }
+    case StatementStatus::kPlanOnly: {
+        const tinydbms::core::ExecuteResult& outcome = *result.outcome();
+        const auto* query = std::get_if<tinydbms::core::QueryResult>(&outcome.outcome);
+        if (query == nullptr) {
+            // 工厂保证 kPlanOnly 只携带 QueryResult；走到这里说明结果不变式被破坏。
+            return RenderResult{
+                write_statement_error(
+                    malformed_result_error(
+                        "kPlanOnly statement carries a non-query outcome"),
+                    result.source(),
+                    error_output),
+                true};
+        }
+        return write_query_result(*query, output, error_output);
     }
     case StatementStatus::kCompileError:
     case StatementStatus::kExecutionError:
@@ -268,7 +302,13 @@ RenderResult render_statement_result(
         // 部分成功的 CommandResult：先报告已完成数量，再在 stderr 报告错误。
         const auto* command = std::get_if<tinydbms::core::CommandResult>(&outcome.outcome);
         if (command == nullptr || !command->error.has_value()) {
-            return RenderResult{false, true};
+            return RenderResult{
+                write_statement_error(
+                    malformed_result_error(
+                        "statement error status carries neither an error nor a partial result"),
+                    result.source(),
+                    error_output),
+                true};
         }
         if (!write_command_result(*command, output)) {
             return RenderResult{false, true};
@@ -288,7 +328,36 @@ RenderResult render_statement_result(
         error_output << "INDETERMINATE " << format_source_range(result.source()) << '\n';
         return RenderResult{static_cast<bool>(error_output), false};
     }
-    return RenderResult{false, true};
+    return RenderResult{
+        write_statement_error(
+            malformed_result_error("statement carries an unknown execution status"),
+            result.source(),
+            error_output),
+        true};
+}
+
+}  // namespace
+
+bool write_error(
+    const tinydbms::core::Error& error,
+    OutputFormat format,
+    std::ostream& output) {
+    if (format == OutputFormat::kJson) {
+        return write_json_script_error(error, output);
+    }
+    return write_error(error, output);
+}
+
+RenderResult render_statement_result(
+    const tinydbms::core::StatementResult& result,
+    bool aborted,
+    OutputFormat format,
+    std::ostream& output,
+    std::ostream& error_output) {
+    if (format == OutputFormat::kJson) {
+        return render_json_statement_result(result, aborted, output, error_output);
+    }
+    return render_table_statement_result(result, aborted, output, error_output);
 }
 
 }  // namespace tinydbms::app

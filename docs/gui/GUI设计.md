@@ -237,7 +237,8 @@ GUI 的展示完全是结构化字段到控件的映射，不做文本推断：
 | `ExecuteScriptResult::script_error` 非空 | 状态栏上方红色横幅：kind、范围、message、suggestion；本次按 `statements` 展示已有结果，用户修改文本后可重新执行 | 分句失败、语句数超限或致命中止；分句失败时 `statements` 为空 |
 | `kExecuted` + `QueryResult` | 结果表格：表头取 `ColumnHeader::name`，单元格按 `ColumnHeader::type` 与 `Value` 变体渲染；空结果仍显示表头 | 不做列名推断，不重新格式化 SQL |
 | `kExecuted` + `CommandResult`（无 error） | 状态行「OK，影响 N 行」 | `CREATE TABLE` 的 `affected_rows` 为 0 |
-| `kExecutionError` + `CommandResult{affected_rows, error}` | 「已成功影响 N 行后失败」+ 错误详情 | INSERT/DELETE 部分成功路径，必须同时显示已完成的 N |
+| `kPlanOnly` | 与 `kExecuted` + QueryResult 一样按结果表格渲染（单列 `plan`） | U3 计划模式的状态；GUI 当前不暴露 `--plan`，但映射必须存在，避免穷举 switch 缺少分支 |
+| `kExecutionError` + `CommandResult{affected_rows, error}` | 「已成功影响 N 行后失败」+ 错误详情 | INSERT/DELETE/UPDATE 部分成功路径，必须同时显示已完成的 N |
 | `kExecutionError` + `Error` | 错误详情（stage 标签、范围、message） | 普通执行/存储错误 |
 | `kCompileError` | 编辑器范围高亮 + 诊断列表一条 + suggestion + 可用的「应用修复」 | 只读 `compile_stage`、`source`、`suggestion`、`fix_it` |
 | `kAnalysisError` | 诊断列表一条，标记为「分析」 | analyze 策略下影子状态明确拒绝 |
@@ -463,7 +464,8 @@ endif()
 
 GUI 测试全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不写真实数据目录。用例覆盖：
 
-- 七态 `StatementStatus` 各自的渲染映射，以及 `script_error` 与 `statements` 并存的情况；
+- 八态 `StatementStatus`（含 U3 的 `kPlanOnly`）各自的渲染映射，以及 `script_error` 与
+  `statements` 并存的情况；
 - `CommandResult` 部分成功：同时显示 affected_rows 与错误；
 - 空结果集仍渲染表头；INT 与 VARCHAR（含 UTF-8）单元格文本；
 - 大结果集只转换可见行（表格模型按需转换，不预生成整表字符串）；
@@ -517,7 +519,7 @@ GUI 测试全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不
 
 1. 本文评审通过；
 2. 根开关 + `src/gui/CMakeLists.txt` + 空窗口骨架 + `Backend`/`FakeBackend`；
-3. `tinydbms_gui_ui_test` 与七态渲染、范围换算、fix-it 测试（此时不依赖 core）；
+3. `tinydbms_gui_ui_test` 与八态渲染、范围换算、fix-it 测试（此时不依赖 core）；
 4. 编辑器、结果表格模型、诊断列表、表浏览器；
 5. compiler 适配完成后补 `CoreBackend` 与真实链路手工验收；
 6. 补 README 与预设说明，执行 `debug`、`gui-debug` 两棵构建树的完整构建与 CTest。

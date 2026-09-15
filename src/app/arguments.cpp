@@ -29,6 +29,8 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
     result.data_dir = std::string{kDefaultDataDir};
     bool data_dir_seen = false;
     bool error_policy_seen = false;
+    bool format_seen = false;
+    bool plan_seen = false;
 
     const auto take_value = [&](int index, std::string_view option, std::string& message) {
         if (index + 1 >= argc || argv[index + 1] == nullptr || argv[index + 1][0] == '\0') {
@@ -83,6 +85,34 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
             }
             continue;
         }
+        if (argument == "--format") {
+            if (format_seen) {
+                return make_error("--format may appear only once");
+            }
+            format_seen = true;
+
+            std::string message;
+            if (!take_value(index, "--format", message)) {
+                return make_error(std::move(message));
+            }
+            const std::string_view value{argv[++index]};
+            if (value == "table") {
+                result.format = OutputFormat::kTable;
+            } else if (value == "json") {
+                result.format = OutputFormat::kJson;
+            } else {
+                return make_error("--format must be table or json");
+            }
+            continue;
+        }
+        if (argument == "--plan") {
+            if (plan_seen) {
+                return make_error("--plan may appear only once");
+            }
+            plan_seen = true;
+            result.plan_only = true;
+            continue;
+        }
         if (argument != "--data-dir") {
             return make_error("unknown command-line argument");
         }
@@ -102,12 +132,19 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
 }
 
 bool write_help(std::ostream& output) {
-    output << "Usage: tinydbms [--help|--version|--data-dir DIR|--error-policy stop|analyze]\n"
+    output << "Usage: tinydbms [OPTIONS]\n"
            << "\n"
            << "Read SQL from an interactive terminal or stdin.\n"
-           << "Default data directory: " << kDefaultDataDir << "\n"
-           << "Default error policy: stop (analyze only inspects later statements;"
-              " it never executes them).\n";
+           << "\n"
+           << "  --help                 print this help and exit\n"
+           << "  --version              print the version and exit\n"
+           << "  --data-dir DIR         database directory (default: " << kDefaultDataDir << ")\n"
+           << "  --error-policy POLICY  stop (default) or analyze; analyze only inspects later\n"
+           << "                         statements and never executes them\n"
+           << "  --format FORMAT        table (default) or json; json prints one JSON object\n"
+           << "                         per line\n"
+           << "  --plan                 compile only and print the execution plan; nothing is\n"
+           << "                         executed and no data is modified\n";
     return static_cast<bool>(output);
 }
 

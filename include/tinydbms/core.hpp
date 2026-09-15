@@ -46,7 +46,7 @@ struct Error {
 
 struct CommandResult {
     std::uint64_t affected_rows;  // CREATE 成功时为 0
-    // 仅 INSERT/DELETE 部分行成功后 storage 出错时携带；
+    // 仅 INSERT/DELETE/UPDATE 部分行成功后 storage 出错时携带；
     // 此时 affected_rows 是错误前已成功执行的行数，core 停止后续语句
     std::optional<Error> error;
 };
@@ -61,8 +61,16 @@ enum class ScriptErrorPolicy {
     kAnalyzeRemaining
 };
 
+// 执行模式：kExecute 编译并执行；kPlanOnly 只编译并把执行计划整理成文本返回，
+// 不调用 Storage、不修改 Catalog，因此不产生任何副作用。
+enum class ExecutionMode {
+    kExecute,
+    kPlanOnly
+};
+
 enum class StatementStatus {
     kExecuted,
+    kPlanOnly,
     kCompileError,
     kExecutionError,
     kExecutionIndeterminate,
@@ -72,6 +80,11 @@ enum class StatementStatus {
 };
 
 inline constexpr std::size_t kMaxStatementsPerScript = 4096;
+
+// 单条语句在内存中物化的最大行数。SQL v2 的 JOIN/Sort/Aggregate 由 core 全量物化，
+// 该上限保证超越内存的结果规模以执行错误结束，而不是让进程无界增长或中止会话。
+// 计数按物化节点（扫描、连接）的行数计算，不包含 Storage 内部页与结果编码。
+inline constexpr std::size_t kMaxQueryRows = std::size_t{1} << 18;  // 262144
 
 namespace detail {
 
@@ -126,6 +139,11 @@ inline void validate_statement_result(
             invalid_statement_result("kCompileError requires a kCompile error");
         }
         return;
+    case StatementStatus::kPlanOnly:
+        if (value == nullptr || !std::holds_alternative<QueryResult>(value->outcome)) {
+            invalid_statement_result("kPlanOnly requires a query result");
+        }
+        return;
     case StatementStatus::kExecutionError:
         if (value == nullptr || !carries_execution_error(*value)) {
             invalid_statement_result("kExecutionError requires a kExecute or kStorage error");
@@ -170,6 +188,17 @@ public:
         detail::validate_statement_result(StatementStatus::kCompileError, wrapped);
         return StatementResult{
             statement_index, source, StatementStatus::kCompileError, std::move(wrapped)};
+    }
+
+    // 计划模式：语句已编译并渲染成单列 VARCHAR 的计划文本，但没有进入执行器。
+    static StatementResult plan_only(
+        std::size_t statement_index,
+        SourceRange source,
+        QueryResult plan) {
+        std::optional<ExecuteResult> wrapped{ExecuteResult{std::move(plan)}};
+        detail::validate_statement_result(StatementStatus::kPlanOnly, wrapped);
+        return StatementResult{
+            statement_index, source, StatementStatus::kPlanOnly, std::move(wrapped)};
     }
 
     static StatementResult execution_error(
@@ -261,6 +290,7 @@ struct CloseDatabaseResult {
 struct ExecuteScriptRequest {
     std::string text;  // REPL 一行，或 stdin 批处理的整段文本
     ScriptErrorPolicy error_policy{ScriptErrorPolicy::kStopOnFirstError};
+    ExecutionMode mode{ExecutionMode::kExecute};
 };
 
 struct ExecuteScriptResult {

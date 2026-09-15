@@ -34,6 +34,7 @@ compile_commands.json
 .cursor/
 .windsurf/
 .trae/
+.codex/
 
 # OS
 .DS_Store

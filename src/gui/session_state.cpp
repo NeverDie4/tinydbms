@@ -55,6 +55,14 @@ StatementDisplay display_of(const StatementResult& statement) {
         }
         return StatementDisplay::kCommand;
     }
+    // 计划模式的结果也是查询结果形状（单列 VARCHAR），按查询展示。
+    case StatementStatus::kPlanOnly: {
+        const auto& outcome = statement.outcome();
+        if (outcome.has_value() && std::holds_alternative<QueryResult>(outcome->outcome)) {
+            return StatementDisplay::kQuery;
+        }
+        return StatementDisplay::kExecutionError;
+    }
     case StatementStatus::kCompileError:
         return StatementDisplay::kCompileError;
     case StatementStatus::kExecutionError: {

@@ -300,6 +300,23 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms_core_script_policy_test>
 )
 
+add_executable(tinydbms_core_plan_text_test
+    core_plan_text_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_core_plan_text_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+    NAME tinydbms.core_plan_text
+    COMMAND $<TARGET_FILE:tinydbms_core_plan_text_test>
+)
+
 add_executable(tinydbms_app_cli_test app_cli_test.cpp)
 
 target_include_directories(tinydbms_app_cli_test PRIVATE

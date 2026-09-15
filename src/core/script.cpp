@@ -2,6 +2,7 @@
 
 #include "analysis_catalog.hpp"
 #include "diagnostics.hpp"
+#include "plan_text.hpp"
 
 #include "tinydbms/compiler.hpp"
 
@@ -42,6 +43,7 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
     }
 
     const bool analyze = request.error_policy == ScriptErrorPolicy::kAnalyzeRemaining;
+    const bool plan_only = request.mode == ExecutionMode::kPlanOnly;
     ExecuteScriptResult result;
     std::vector<compiler::SplitStatement> statements;
     // 当前正在处理的语句下标；等于 statements.size() 表示尚未进入语句循环。
@@ -239,6 +241,23 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             }
 
             compiler::Plan plan = std::move(std::get<compiler::Plan>(compiled->outcome));
+
+            if (plan_only) {
+                // 计划模式：只渲染编译产物，不进入执行器，也不更新影子 Catalog。
+                // 因此不可能产生任何副作用；代价是同一脚本里 CREATE TABLE 之后的语句
+                // 仍然编译不到新表，会按编译错误处理（已写进契约，不做特殊处理）。
+                std::variant<QueryResult, Error> rendered =
+                    internal::render_plan_result(plan, catalog_view);
+                if (const Error* render_error = std::get_if<Error>(&rendered);
+                    render_error != nullptr) {
+                    return abort_script(index, *render_error);
+                }
+                result.statements.push_back(StatementResult::plan_only(
+                    index,
+                    statement.source,
+                    std::get<QueryResult>(std::move(rendered))));
+                continue;
+            }
 
             if (!execution_allowed) {
                 internal::ShadowApplyOutcome shadow;
