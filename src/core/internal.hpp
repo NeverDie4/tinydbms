@@ -6,6 +6,7 @@
 #include "tinydbms/storage.hpp"
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -19,27 +20,44 @@ namespace tinydbms::core {
 struct PlanExecutionResult {
     ExecuteResult outcome;
     bool cancelled = false;
+    // 本次 Plan 是否已经调用过 Storage。执行上下文随调用栈回收，标记必须回传给
+    // 调用方（script.cpp 用它把执行器的 kInternal 区分成
+    // kExecutionIndeterminate 或 kSkippedExecution）。
+    bool storage_called = false;
+};
+
+// 一次 Plan 执行的临时状态：只属于当前执行流，不放进共享的 Impl。
+// U6 之前它们是 Impl 的成员，并发调用会互相覆盖。
+struct ExecutionContext {
+    // 本次语句的取消令牌；nullptr 表示本次调用不可取消。
+    const CancelToken* cancel_token = nullptr;
+    // 本次语句是否已经调用过 Storage（见 PlanExecutionResult::storage_called）。
+    bool storage_called = false;
 };
 
 struct Database::Impl {
+    // 会话状态的唯一互斥量，只由 Database 的公开方法持有；Impl 内部的 helper 不再加锁，
+    // 也不得在持锁期间回调公开方法（不存在这样的路径）。
+    std::mutex mutex;
+
     std::vector<TableMeta> catalog;
     std::uint64_t next_table_id = 0;
     bool open = false;
     bool forced_close_pending = false;
     bool cleanup_retry_needed = false;
-    // 当前 Plan 是否已经调用过 Storage；只用于把执行器 kInternal 区分为
-    // kExecutionIndeterminate 或 kSkippedExecution，不进入公共头文件。
-    bool current_plan_storage_called = false;
-    // 当前语句的取消令牌；nullptr 表示本次调用不可取消。只在 execute_plan_impl 期间有效。
-    const CancelToken* cancel_token = nullptr;
 
     void clear() noexcept;
     void abort_after_storage_exception() noexcept;
-    ExecuteResult execute_create_table(const compiler::CreateTablePlan& plan);
-    ExecuteResult execute_insert(const compiler::InsertPlan& plan);
-    ExecuteResult execute_delete(const compiler::DeletePlan& plan);
-    ExecuteResult execute_update(const compiler::UpdatePlan& plan);
-    ExecuteResult execute_query(const compiler::QueryPlan& plan, std::size_t max_query_rows);
+    ExecuteResult execute_create_table(
+        const compiler::CreateTablePlan& plan,
+        ExecutionContext& context);
+    ExecuteResult execute_insert(const compiler::InsertPlan& plan, ExecutionContext& context);
+    ExecuteResult execute_delete(const compiler::DeletePlan& plan, ExecutionContext& context);
+    ExecuteResult execute_update(const compiler::UpdatePlan& plan, ExecutionContext& context);
+    ExecuteResult execute_query(
+        const compiler::QueryPlan& plan,
+        std::size_t max_query_rows,
+        ExecutionContext& context);
     PlanExecutionResult execute_plan_impl(
         compiler::Plan plan,
         std::size_t max_query_rows,

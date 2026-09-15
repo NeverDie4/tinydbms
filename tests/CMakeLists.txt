@@ -343,6 +343,26 @@ add_test(
     COMMAND $<TARGET_FILE:tinydbms_core_plan_text_test>
 )
 
+# U6：多执行流共享同一个 Database 时的串行化取证（storage 调用序列不交错）。
+add_executable(tinydbms_core_concurrency_test
+    core_concurrency_test.cpp
+    fakes/compiler_fake.cpp
+    fakes/storage_fake.cpp
+    $<TARGET_OBJECTS:tinydbms_core_objects>
+)
+
+target_include_directories(tinydbms_core_concurrency_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests
+)
+
+add_test(
+    NAME tinydbms.core_concurrency
+    COMMAND $<TARGET_FILE:tinydbms_core_concurrency_test>
+)
+
+set_tests_properties(tinydbms.core_concurrency PROPERTIES TIMEOUT 60)
+
 add_executable(tinydbms_app_cli_test app_cli_test.cpp)
 
 target_include_directories(tinydbms_app_cli_test PRIVATE

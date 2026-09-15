@@ -341,7 +341,13 @@ struct ExecuteScriptResult {
     std::vector<StatementResult> statements;
 };
 
-// core 对入口与测试暴露的有状态对象；每个实例持有自己的 Catalog 与生命周期状态
+// core 对入口与测试暴露的有状态对象；每个实例持有自己的 Catalog 与生命周期状态。
+//
+// 线程语义：同一个实例的 open/close/execute_script 可以被多个执行流并发调用，
+// core 内部按"调用级互斥"串行执行——一次调用从进入到返回全程持锁，后到者阻塞等待。
+// 这不承诺并行度：同一时刻只有一个执行流在执行，不同实例之间仍受"同一进程同一时间
+// 只有一个数据库打开"的进程级限制。对象移动与析构属于调用方责任，必须与并发调用互斥；
+// 存储层（storage 公共 API）依然要求串行调用，这条前提由本类的串行化保证。
 class Database {
 public:
     Database();

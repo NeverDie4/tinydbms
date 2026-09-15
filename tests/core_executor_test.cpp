@@ -1728,8 +1728,16 @@ bool test_query_plan_depth_is_bounded() {
     CHECK(legal_rows != nullptr && legal_rows->rows.size() == 1);
 
     // 超过深度上限的 Plan 必须被拒绝：不得递归溢出，也不得产生 storage 副作用。
+    // 病理深度在普通构建取 4096，ThreadSanitizer 构建取 1024：PlanNode 的析构本身是
+    // 递归的，单独析构 4096 层 Filter 串联在 TSan 下就会栈溢出（已用最小探针确认，
+    // 与 core 无关），1024 仍有 4 倍于 kMaxPlanDepth 的余量。
+#if defined(__SANITIZE_THREAD__)
+    constexpr std::size_t pathological_depth = 1024U;
+#else
+    constexpr std::size_t pathological_depth = 4096U;
+#endif
     const std::size_t open_calls_before = fake::state().open_table_calls;
-    const auto legal_too_deep = execute_plan(legal, deeply_nested_filter_plan(4096));
+    const auto legal_too_deep = execute_plan(legal, deeply_nested_filter_plan(pathological_depth));
     CHECK(legal_too_deep.statements.size() == 1);
     CHECK(internal_abort_before_storage(legal_too_deep));
     CHECK(fake::state().open_table_calls == open_calls_before);

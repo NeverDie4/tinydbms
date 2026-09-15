@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <exception>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -36,6 +37,10 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
             ErrorKind::kExecute,
             "database object is moved-from"));
     }
+    // 调用级互斥：整段脚本从进入公开方法到返回都持锁，包括分句、编译、执行与错误
+    // 策略处理。锁不下沉到语句级，否则两条脚本的语句会交替执行，破坏 stop/analyze
+    // 语义与结果顺序。读取 impl_ 本身仍在锁外，属于"移动/析构与调用并发"的调用方责任。
+    std::lock_guard<std::mutex> lock{impl_->mutex};
     if (!impl_->open) {
         return make_script_error_result(internal::make_error(
             ErrorKind::kExecute,
@@ -54,9 +59,12 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
     std::vector<compiler::SplitStatement> statements;
     // 当前正在处理的语句下标；等于 statements.size() 表示尚未进入语句循环。
     std::size_t active_index = 0;
+    // 当前语句是否已经调用过 Storage。它由执行器通过 PlanExecutionResult 回传，
+    // 不再是 Impl 的成员：并发调用下共享该标记会互相覆盖。
+    bool current_plan_storage_called = false;
 
-    auto side_effects_possible = [this]() noexcept {
-        return impl_->current_plan_storage_called ||
+    auto side_effects_possible = [this, &current_plan_storage_called]() noexcept {
+        return current_plan_storage_called ||
             impl_->cleanup_retry_needed ||
             impl_->forced_close_pending;
     };
@@ -178,7 +186,7 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
         for (std::size_t index = 0; index < statements.size(); ++index) {
             const compiler::SplitStatement& statement = statements[index];
             active_index = index;
-            impl_->current_plan_storage_called = false;
+            current_plan_storage_called = false;
 
             // 语句边界检查点：取消后不再编译剩余语句，也不产生 skipped/analysis 状态。
             if (request.cancel.cancel_requested()) {
@@ -315,6 +323,7 @@ ExecuteScriptResult Database::execute_script(const ExecuteScriptRequest& request
                 std::holds_alternative<compiler::CreateTablePlan>(plan.kind);
             PlanExecutionResult plan_execution = impl_->execute_plan_impl(
                 std::move(plan), request.max_query_rows, &request.cancel);
+            current_plan_storage_called = plan_execution.storage_called;
 
             if (plan_execution.cancelled) {
                 // 取消只发生在无副作用检查点：不产生 script_error，也不使会话失效。

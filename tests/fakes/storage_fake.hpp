@@ -78,6 +78,9 @@ struct State {
     std::function<void()> on_scan_next;
     // 每次 insert 记录完之后调用（INSERT 首版不设取消检查点，用于验证该边界）。
     std::function<void()> on_insert;
+    // 每次公共 fake 入口调用；参数是该入口的名字（open_table、scan_next 等）。
+    // 用于制造"调用方仍在 storage 内部"的交错窗口。
+    std::function<void(const char* call)> on_storage_call;
 };
 
 void reset();
@@ -116,6 +119,11 @@ void set_throw_on_delete(bool enabled);
 void set_throw_after_delete(bool enabled);
 void set_on_scan_next(std::function<void()> hook);
 void set_on_insert(std::function<void()> hook);
+void set_on_storage_call(std::function<void(const char* call)> hook);
+// 并发取证：同时处于公共 fake 入口内部的调用方数量峰值。
+// core 串行化正确时恒为 1；大于 1 说明有执行流没有被 core 挡住。
+std::size_t max_concurrent_calls();
+bool overlap_detected();
 void clear_close_error();
 void clear_create_table_error();
 

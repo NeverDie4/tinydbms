@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,7 @@ using tinydbms::app::CoreSession;
 using tinydbms::core::CommandResult;
 using tinydbms::core::Database;
 using tinydbms::core::ExecuteScriptRequest;
+using tinydbms::core::ExecuteScriptResult;
 using tinydbms::core::QueryResult;
 
 #define CHECK(condition)                                                                     \
@@ -605,6 +607,132 @@ bool test_real_chain_cancellation_leaves_data_unchanged() {
     return true;
 }
 
+// U6：真实 compiler + storage 上并发执行读语句与写语句。core 串行化后，
+// 两个脚本各自完整返回、结果互不污染，数据文件重新打开后仍然一致。
+bool test_real_chain_concurrent_scripts_are_serialized() {
+    TemporaryDirectory data_dir{"tinydbms-integration-concurrency"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "CREATE TABLE emp (id INT, amount BIGINT);\n"
+        "INSERT INTO emp VALUES (1, 10), (2, 20), (3, 30);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+    CHECK(setup.output == "OK 0\nOK 3\n");
+
+    {
+        Database database;
+        CHECK(!database.open({data_dir.path().string()}).error.has_value());
+
+        ExecuteScriptResult read_result;
+        ExecuteScriptResult second_read_result;
+        ExecuteScriptResult write_result;
+        std::thread reader{[&database, &read_result] {
+            read_result = database.execute_script(
+                ExecuteScriptRequest{"SELECT * FROM emp;"});
+        }};
+        std::thread second_reader{[&database, &second_read_result] {
+            second_read_result = database.execute_script(
+                ExecuteScriptRequest{"SELECT * FROM emp;"});
+        }};
+        std::thread writer{[&database, &write_result] {
+            write_result = database.execute_script(
+                ExecuteScriptRequest{"INSERT INTO emp VALUES (4, 40);"});
+        }};
+        reader.join();
+        second_reader.join();
+        writer.join();
+
+        for (const ExecuteScriptResult* read : {&read_result, &second_read_result}) {
+            CHECK(!read->script_error.has_value());
+            CHECK(read->statements.size() == 1);
+            const auto* query =
+                std::get_if<QueryResult>(&read->statements.front().outcome()->outcome);
+            CHECK(query != nullptr);
+            // 每条读语句可能排在写语句之前或之后，但只可能是这两种完整结果。
+            CHECK(query->rows.size() == 3 || query->rows.size() == 4);
+        }
+
+        CHECK(!write_result.script_error.has_value());
+        CHECK(write_result.statements.size() == 1);
+        const auto* command =
+            std::get_if<CommandResult>(&write_result.statements.front().outcome()->outcome);
+        CHECK(command != nullptr);
+        CHECK(!command->error.has_value());
+        CHECK(command->affected_rows == 1);
+
+        CHECK(!database.close().error.has_value());
+    }
+
+    // 重新打开数据目录：写入确实落盘，没有因为并发调用而丢行或损坏。
+    const InvocationResult verify =
+        invoke_cli(data_dir.path(), "SELECT * FROM emp;\n", false);
+    CHECK(verify.exit_code == 0);
+    CHECK(verify.error.empty());
+    CHECK(verify.output == "id\tamount\n1\t10\n2\t20\n3\t30\n4\t40\n");
+    return true;
+}
+
+// U6：真实链路上并发 close 与执行。close 与执行互斥，执行要么完整返回，
+// 要么在 close 之后返回与顺序执行一致的"database is not open"；不允许出现半截结果、
+// 存储错误或清理失败，数据文件也必须保持可重新打开。
+bool test_real_chain_concurrent_close_is_clean() {
+    TemporaryDirectory data_dir{"tinydbms-integration-close-race"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "CREATE TABLE emp (id INT, amount BIGINT);\n"
+        "INSERT INTO emp VALUES (1, 10), (2, 20), (3, 30);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+    CHECK(setup.output == "OK 0\nOK 3\n");
+
+    constexpr std::size_t kRounds = 8;
+    std::size_t executed_rounds = 0;
+    std::size_t closed_rounds = 0;
+    for (std::size_t round = 0; round < kRounds; ++round) {
+        Database database;
+        CHECK(!database.open({data_dir.path().string()}).error.has_value());
+
+        ExecuteScriptResult execution;
+        bool close_failed = false;
+        std::thread executing_thread{[&database, &execution] {
+            execution = database.execute_script(
+                ExecuteScriptRequest{"SELECT * FROM emp;"});
+        }};
+        std::thread closing_thread{[&database, &close_failed] {
+            close_failed = database.close().error.has_value();
+        }};
+        executing_thread.join();
+        closing_thread.join();
+
+        // close 在两个顺序下都必须成功，且不能留下需要重试的清理状态。
+        CHECK(!close_failed);
+        if (execution.script_error.has_value()) {
+            CHECK(execution.script_error->kind == tinydbms::core::ErrorKind::kExecute);
+            CHECK(execution.statements.empty());
+            ++closed_rounds;
+        } else {
+            CHECK(execution.statements.size() == 1);
+            const auto* query =
+                std::get_if<QueryResult>(&execution.statements.front().outcome()->outcome);
+            CHECK(query != nullptr);
+            CHECK(query->rows.size() == 3);
+            ++executed_rounds;
+        }
+    }
+    // 每轮都必须落到两种合法结果之一。这里不断言"执行至少赢一轮"：谁先取得锁取决于
+    // 调度，断言它会让用例偶发失败；"close 确实等在途执行结束"的顺序取证由 fake 侧
+    // 用例确定性地完成（test_concurrent_close_waits_for_in_flight_execution 用 Gate
+    // 把执行流停在 storage 内部后再发起 close）。
+    CHECK(executed_rounds + closed_rounds == kRounds);
+
+    const InvocationResult verify =
+        invoke_cli(data_dir.path(), "SELECT * FROM emp;\n", false);
+    CHECK(verify.exit_code == 0);
+    CHECK(verify.error.empty());
+    CHECK(verify.output == "id\tamount\n1\t10\n2\t20\n3\t30\n");
+    return true;
+}
+
 bool test_real_chain_row_limit_is_reported_and_recoverable() {
     TemporaryDirectory data_dir{"tinydbms-integration-row-limit"};
     const InvocationResult setup = invoke_cli(
@@ -675,6 +803,8 @@ int main() {
                 test_json_batch_output_is_parseable() &&
                 test_plan_mode_real_chain_has_no_side_effects() &&
                 test_real_chain_cancellation_leaves_data_unchanged() &&
+                test_real_chain_concurrent_scripts_are_serialized() &&
+                test_real_chain_concurrent_close_is_clean() &&
                 test_real_chain_row_limit_is_reported_and_recoverable()
             ? 0
             : 1;

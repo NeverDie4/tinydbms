@@ -357,7 +357,8 @@ std::optional<Error> scan_records(
 }  // namespace
 
 ExecuteResult Database::Impl::execute_create_table(
-    const compiler::CreateTablePlan& plan) {
+    const compiler::CreateTablePlan& plan,
+    ExecutionContext& context) {
     if (next_table_id > std::numeric_limits<TableId>::max()) {
         return internal::make_execute_error(ErrorKind::kExecute, "table id exhausted");
     }
@@ -392,7 +393,7 @@ ExecuteResult Database::Impl::execute_create_table(
 
     storage::CreateTableResult created;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         created = storage::create_table(storage::CreateTableRequest{
             candidate_id,
             plan.table_name,
@@ -417,7 +418,8 @@ ExecuteResult Database::Impl::execute_create_table(
 }
 
 ExecuteResult Database::Impl::execute_insert(
-    const compiler::InsertPlan& plan) {
+    const compiler::InsertPlan& plan,
+    ExecutionContext& context) {
     const TableMeta* table = find_table(catalog, plan.table_id);
     if (table == nullptr) {
         return make_internal_error("insert plan references an unknown table");
@@ -471,7 +473,7 @@ ExecuteResult Database::Impl::execute_insert(
 
     storage::InsertResult inserted;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         inserted = storage::insert(storage::InsertRequest{
             plan.table_id,
             std::move(physical_rows)});
@@ -506,7 +508,8 @@ ExecuteResult Database::Impl::execute_insert(
 }
 
 ExecuteResult Database::Impl::execute_delete(
-    const compiler::DeletePlan& plan) {
+    const compiler::DeletePlan& plan,
+    ExecutionContext& context) {
     const TableMeta* table = find_table(catalog, plan.table_id);
     if (table == nullptr) {
         return make_internal_error("delete plan references an unknown table");
@@ -531,7 +534,7 @@ ExecuteResult Database::Impl::execute_delete(
 
     storage::OpenTableResult opened;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         opened = storage::open_table(storage::OpenTableRequest{plan.table_id});
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
@@ -562,7 +565,7 @@ ExecuteResult Database::Impl::execute_delete(
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
-        cancel_token,
+        context.cancel_token,
         [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             SlotRowResult materialized =
@@ -601,7 +604,7 @@ ExecuteResult Database::Impl::execute_delete(
 
     storage::DeleteResult deleted;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         deleted = storage::delete_records(storage::DeleteRequest{
             plan.table_id,
             record_ids});
@@ -634,7 +637,9 @@ ExecuteResult Database::Impl::execute_delete(
     return ExecuteResult{CommandResult{deleted.deleted_count, std::nullopt}};
 }
 
-ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
+ExecuteResult Database::Impl::execute_update(
+    const compiler::UpdatePlan& plan,
+    ExecutionContext& context) {
     const TableMeta* table = find_table(catalog, plan.table_id);
     if (table == nullptr) {
         return make_internal_error("update plan references an unknown table");
@@ -676,7 +681,7 @@ ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
 
     storage::OpenTableResult opened;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         opened = storage::open_table(storage::OpenTableRequest{plan.table_id});
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
@@ -705,7 +710,7 @@ ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
     const std::optional<Error> scan_error = scan_records(
         cursor,
         *opened.cursor,
-        cancel_token,
+        context.cancel_token,
         [this]() noexcept { abort_after_storage_exception(); },
         [&](const storage::Record& record) -> std::optional<Error> {
             SlotRowResult materialized =
@@ -752,7 +757,7 @@ ExecuteResult Database::Impl::execute_update(const compiler::UpdatePlan& plan) {
     const std::uint64_t requested = static_cast<std::uint64_t>(updates.size());
     storage::UpdateResult updated;
     try {
-        current_plan_storage_called = true;
+        context.storage_called = true;
         updated = storage::update_rows(storage::UpdateRequest{plan.table_id, std::move(updates)});
     } catch (const std::exception& exception) {
         abort_after_storage_exception();
@@ -1348,7 +1353,8 @@ void sort_rows(
 
 ExecuteResult Database::Impl::execute_query(
     const compiler::QueryPlan& plan,
-    const std::size_t max_query_rows) {
+    const std::size_t max_query_rows,
+    ExecutionContext& context) {
     QueryValidationResult validation = validate_query_plan(catalog, plan);
     if (const Error* error = std::get_if<Error>(&validation)) {
         return ExecuteResult{*error};
@@ -1357,7 +1363,7 @@ ExecuteResult Database::Impl::execute_query(
 
     QueryResult result;
     result.columns = std::move(query.result_columns);
-    const auto execute_node = [this, max_query_rows](
+    const auto execute_node = [this, max_query_rows, &context](
                                   auto&& self,
                                   const compiler::PlanNode& node,
                                   std::size_t depth) -> DataflowRowsResult {
@@ -1374,7 +1380,7 @@ ExecuteResult Database::Impl::execute_query(
             }
             storage::OpenTableResult opened;
             try {
-                current_plan_storage_called = true;
+                context.storage_called = true;
                 opened = storage::open_table(storage::OpenTableRequest{table->table_id});
             } catch (const std::exception& exception) {
                 abort_after_storage_exception();
@@ -1406,7 +1412,7 @@ ExecuteResult Database::Impl::execute_query(
             const std::optional<Error> scan_error = scan_records(
                 cursor,
                 *opened.cursor,
-                cancel_token,
+                context.cancel_token,
                 [this]() noexcept { abort_after_storage_exception(); },
                 [&](const storage::Record& record) -> std::optional<Error> {
                     SlotRowResult materialized =
@@ -1474,7 +1480,7 @@ ExecuteResult Database::Impl::execute_query(
             std::vector<SlotRow> rows;
             rows.reserve(sortable.size());
             for (SortableRow& row : sortable) {
-                internal::throw_if_cancelled(cancel_token);
+                internal::throw_if_cancelled(context.cancel_token);
                 rows.push_back(std::move(row.row));
             }
             return rows;
@@ -1496,7 +1502,7 @@ ExecuteResult Database::Impl::execute_query(
             std::vector<SlotRow> joined;
             for (const SlotRow& left : left_rows) {
                 for (const SlotRow& right : right_rows) {
-                    internal::throw_if_cancelled(cancel_token);
+                    internal::throw_if_cancelled(context.cancel_token);
                     SlotRowResult merged = merge_slot_rows(left, right);
                     if (const Error* error = std::get_if<Error>(&merged)) {
                         return *error;
@@ -1533,7 +1539,7 @@ ExecuteResult Database::Impl::execute_query(
                     {}, std::vector<AggregateState>(aggregate->aggregates.size())});
             }
             for (const SlotRow& row : std::get<std::vector<SlotRow>>(child_result)) {
-                internal::throw_if_cancelled(cancel_token);
+                internal::throw_if_cancelled(context.cancel_token);
                 std::vector<Value> keys;
                 keys.reserve(aggregate->group_keys.size());
                 for (SlotId slot_id : aggregate->group_keys) {
@@ -1620,28 +1626,29 @@ PlanExecutionResult Database::Impl::execute_plan_impl(
             false};
     }
 
-    // 每条语句执行前复位：异常中断后 script.cpp 依赖该标记判断是否可能有副作用。
-    current_plan_storage_called = false;
-    cancel_token = cancel;
+    // 临时状态只属于本次调用：取消令牌与"是否调用过 Storage"都放在栈上上下文里，
+    // 不再写进共享的 Impl，避免并发调用互相覆盖。
+    ExecutionContext context;
+    context.cancel_token = cancel;
 
     ExecuteResult result = internal::make_execute_error(
         ErrorKind::kInternal, "statement execution did not complete");
     bool cancelled = false;
     try {
         result = std::visit(
-            [this, max_query_rows](auto&& typed_plan) -> ExecuteResult {
+            [this, max_query_rows, &context](auto&& typed_plan) -> ExecuteResult {
                 using PlanType = std::decay_t<decltype(typed_plan)>;
 
                 if constexpr (std::is_same_v<PlanType, compiler::CreateTablePlan>) {
-                    return execute_create_table(typed_plan);
+                    return execute_create_table(typed_plan, context);
                 } else if constexpr (std::is_same_v<PlanType, compiler::InsertPlan>) {
-                    return execute_insert(typed_plan);
+                    return execute_insert(typed_plan, context);
                 } else if constexpr (std::is_same_v<PlanType, compiler::DeletePlan>) {
-                    return execute_delete(typed_plan);
+                    return execute_delete(typed_plan, context);
                 } else if constexpr (std::is_same_v<PlanType, compiler::UpdatePlan>) {
-                    return execute_update(typed_plan);
+                    return execute_update(typed_plan, context);
                 } else {
-                    return execute_query(typed_plan, max_query_rows);
+                    return execute_query(typed_plan, max_query_rows, context);
                 }
             },
             std::move(plan.kind));
@@ -1656,8 +1663,7 @@ PlanExecutionResult Database::Impl::execute_plan_impl(
         result = make_internal_error("unknown exception while executing plan");
     }
 
-    cancel_token = nullptr;
-    return PlanExecutionResult{std::move(result), cancelled};
+    return PlanExecutionResult{std::move(result), cancelled, context.storage_called};
 }
 
 }  // namespace tinydbms::core

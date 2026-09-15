@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <mutex>
 #include <utility>
 
 namespace tinydbms::core {
@@ -134,6 +135,9 @@ OpenDatabaseResult Database::open(const OpenDatabaseRequest& request) {
     if (impl_ == nullptr) {
         return make_open_error(ErrorKind::kExecute, "database object is moved-from");
     }
+    // 调用级互斥：整个 open 期间持锁，等待在途的 execute_script/close 结束。
+    // 读取 impl_ 本身仍在锁外，这属于"移动/析构与调用并发"的调用方责任边界。
+    std::lock_guard<std::mutex> lock{impl_->mutex};
     if (impl_->open) {
         return make_open_error(ErrorKind::kExecute, "database is already open");
     }
@@ -229,6 +233,8 @@ CloseDatabaseResult Database::close() {
     if (impl_ == nullptr) {
         return make_close_error(ErrorKind::kExecute, "database object is moved-from");
     }
+    // 与 open 同一把锁：close 会等待在途执行结束，不与执行交错。
+    std::lock_guard<std::mutex> lock{impl_->mutex};
     if (!impl_->open) {
         if (impl_->forced_close_pending) {
             if (impl_->cleanup_retry_needed) {

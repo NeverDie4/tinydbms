@@ -1,8 +1,19 @@
 #include "storage_fake.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 #include <utility>
+
+namespace {
+
+// 并发取证的计数器，由每次公共 fake 入口的 CallScope 维护；放在文件作用域是因为
+// 访问器（fake_storage 命名空间）与入口包装（storage 命名空间）都要用。
+std::atomic<int> g_active_calls{0};
+std::atomic<int> g_max_active_calls{0};
+std::atomic<bool> g_overlap_detected{false};
+
+}  // namespace
 
 namespace tinydbms::testing::fake_storage {
 namespace {
@@ -24,6 +35,11 @@ State& state() {
 
 void reset() {
     fake_state = State{};
+    // 并发取证计数器一并清零，保证每个用例观测到的峰值相互独立。
+    // 调用方必须保证 reset 时没有在途的 fake 调用（测试都在会话开始/结束后调用）。
+    g_active_calls.store(0, std::memory_order_relaxed);
+    g_max_active_calls.store(0, std::memory_order_relaxed);
+    g_overlap_detected.store(false, std::memory_order_relaxed);
 }
 
 void set_tables(std::vector<TableMeta> tables) {
@@ -175,6 +191,18 @@ void set_on_insert(std::function<void()> hook) {
     fake_state.on_insert = std::move(hook);
 }
 
+void set_on_storage_call(std::function<void(const char* call)> hook) {
+    fake_state.on_storage_call = std::move(hook);
+}
+
+std::size_t max_concurrent_calls() {
+    return static_cast<std::size_t>(g_max_active_calls.load(std::memory_order_relaxed));
+}
+
+bool overlap_detected() {
+    return g_overlap_detected.load(std::memory_order_relaxed);
+}
+
 void clear_close_error() {
     fake_state.close_error.reset();
 }
@@ -196,9 +224,38 @@ StorageError table_not_found(const char* message) {
     return StorageError{StorageErrorKind::kTableNotFound, message};
 }
 
-void record_call(const char* name) {
-    testing::fake_storage::state().call_order.emplace_back(name);
-}
+// 每次公共 fake 入口记一次"进入/离开"。峰值并发数用原子维护：core 串行化正确时
+// 同时只有一个调用方在 storage 内部，峰值恒为 1；否则说明调用方没有串行化，
+// 测试据此失败（真实 storage 在同一场景下是数据竞争）。
+class CallScope {
+public:
+    explicit CallScope(const char* name) {
+        const int active = g_active_calls.fetch_add(1, std::memory_order_acq_rel) + 1;
+        int observed = g_max_active_calls.load(std::memory_order_relaxed);
+        while (active > observed &&
+               !g_max_active_calls.compare_exchange_weak(
+                   observed, active, std::memory_order_relaxed)) {
+        }
+        if (active > 1) {
+            g_overlap_detected.store(true, std::memory_order_relaxed);
+        }
+
+        testing::fake_storage::State& fake = testing::fake_storage::state();
+        fake.call_order.emplace_back(name);
+        if (fake.on_storage_call) {
+            fake.on_storage_call(name);
+        }
+    }
+
+    ~CallScope() {
+        g_active_calls.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    CallScope(const CallScope&) = delete;
+    CallScope& operator=(const CallScope&) = delete;
+
+private:
+};
 
 void sync_records_view() {
     testing::fake_storage::State& fake = testing::fake_storage::state();
@@ -219,7 +276,7 @@ bool has_table(TableId table_id) {
 }  // namespace
 
 OpenStorageResult open_storage(const OpenStorageRequest&) {
-    record_call("open_storage");
+    const CallScope scope{"open_storage"};
     ++testing::fake_storage::state().open_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
 
@@ -241,7 +298,7 @@ OpenStorageResult open_storage(const OpenStorageRequest&) {
 }
 
 CloseStorageResult close_storage(const CloseStorageRequest&) {
-    record_call("close_storage");
+    const CallScope scope{"close_storage"};
     ++testing::fake_storage::state().close_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
 
@@ -266,7 +323,7 @@ CloseStorageResult close_storage(const CloseStorageRequest&) {
 }
 
 ListTablesResult list_tables(const ListTablesRequest&) {
-    record_call("list_tables");
+    const CallScope scope{"list_tables"};
     ++testing::fake_storage::state().list_tables_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
 
@@ -283,7 +340,7 @@ ListTablesResult list_tables(const ListTablesRequest&) {
 }
 
 CreateTableResult create_table(const CreateTableRequest& request) {
-    record_call("create_table");
+    const CallScope scope{"create_table"};
     ++testing::fake_storage::state().create_table_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_create_request = request;
@@ -307,7 +364,7 @@ CreateTableResult create_table(const CreateTableRequest& request) {
 }
 
 OpenTableResult open_table(const OpenTableRequest& request) {
-    record_call("open_table");
+    const CallScope scope{"open_table"};
     ++testing::fake_storage::state().open_table_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_open_table_request = request;
@@ -352,7 +409,7 @@ OpenTableResult open_table(const OpenTableRequest& request) {
 }
 
 ScanNextResult scan_next(const ScanNextRequest& request) {
-    record_call("scan_next");
+    const CallScope scope{"scan_next"};
     ++testing::fake_storage::state().scan_next_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
 
@@ -397,7 +454,7 @@ ScanNextResult scan_next(const ScanNextRequest& request) {
 }
 
 CloseCursorResult close_cursor(const CloseCursorRequest& request) {
-    record_call("close_cursor");
+    const CallScope scope{"close_cursor"};
     ++testing::fake_storage::state().close_cursor_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_close_cursor_request = request;
@@ -424,7 +481,7 @@ CloseCursorResult close_cursor(const CloseCursorRequest& request) {
 }
 
 InsertResult insert(const InsertRequest& request) {
-    record_call("insert");
+    const CallScope scope{"insert"};
     ++testing::fake_storage::state().insert_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_insert_request = request;
@@ -474,7 +531,7 @@ InsertResult insert(const InsertRequest& request) {
 }
 
 DeleteResult delete_records(const DeleteRequest& request) {
-    record_call("delete_records");
+    const CallScope scope{"delete_records"};
     ++testing::fake_storage::state().delete_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_delete_request = request;
@@ -517,7 +574,7 @@ DeleteResult delete_records(const DeleteRequest& request) {
 }
 
 UpdateResult update_rows(const UpdateRequest& request) {
-    record_call("update_rows");
+    const CallScope scope{"update_rows"};
     ++testing::fake_storage::state().update_calls;
     testing::fake_storage::State& fake = testing::fake_storage::state();
     fake.last_update_request = request;
