@@ -1,0 +1,125 @@
+Test project D:/tinydbms/tinydbms/build-real
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.07 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.07 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.07 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+    Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 12: tinydbms.buffer_pool_loading
+1/3 Test #12: tinydbms.buffer_pool_loading ........   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.09 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.07 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.07 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.10 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+    Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 13: tinydbms.buffer_pool_clean_victim
+2/3 Test #13: tinydbms.buffer_pool_clean_victim ...   Passed    0.06 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.04 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+    Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+    Start 14: tinydbms.buffer_pool_dirty_victim
+3/3 Test #14: tinydbms.buffer_pool_dirty_victim ...   Passed    0.02 sec
+
+100% tests passed out of 3
+
+Total Test time (real) =   3.03 sec

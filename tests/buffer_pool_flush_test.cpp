@@ -10,7 +10,7 @@ namespace tinydbms::storage::internal {
 struct BufferPoolTestAccess {
     static const auto& frames(const BufferPool& pool) { return pool.frames_; }
     static const auto& table(const BufferPool& pool) { return pool.page_table_; }
-    static bool open(const BufferPool& pool) { return pool.open_; }
+    static bool open(const BufferPool& pool) { return pool.lifecycle_ == LifecycleState::kOpen; }
 };
 }
 namespace {
@@ -172,9 +172,36 @@ void errors_and_persistence() {
     auto restored=RecordPage::get_record(*raw.value,1,meta,*record.value);
     check(restored.value && std::get<std::int32_t>(restored.value->values[0].data)==123);
 }
+
+void experiment_dirty_snapshot_and_ordered_flush() {
+    Fixture f;
+    const std::vector<PageKey> insertion_order{{0,3},{0,1},{0,2}};
+    for (auto key : insertion_order) f.dirty(key);
+
+    auto current = f.pool->snapshot_dirty_frames_for_experiment();
+    check(current.value.has_value() && current.value->size()==insertion_order.size());
+    for (std::size_t index=0; index<insertion_order.size(); ++index)
+        check(current.value->at(index).key==insertion_order[index]);
+
+    auto pinned=f.fetch({0,2});
+    auto blocked=f.pool->snapshot_dirty_frames_for_experiment();
+    check(blocked.error && blocked.error->kind==BufferPoolErrorKind::kInvalidArgument);
+    pinned.release();
+
+    auto ascending=f.pool->snapshot_dirty_frames_for_experiment();
+    check(ascending.value.has_value());
+    std::sort(ascending.value->begin(), ascending.value->end(), [](const auto& left,const auto& right) {
+        return left.key.page_id<right.key.page_id;
+    });
+    auto flushed=f.pool->flush_dirty_frames_for_experiment(*ascending.value);
+    check(flushed.value.has_value() && !flushed.error);
+    check(f.writes==std::vector<PageKey>({{0,1},{0,2},{0,3}}));
+    check(f.pool->stats().dirty_flush_count==3);
+    check(!f.pool->close());
+}
 }
 int main() {
-    try { page_and_guard(); batches(); errors_and_persistence(); }
+    try { page_and_guard(); batches(); errors_and_persistence(); experiment_dirty_snapshot_and_ordered_flush(); }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
     return 0;
 }

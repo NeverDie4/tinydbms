@@ -1,0 +1,108 @@
+[1/58] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/cursor_state.cpp.obj
+[2/58] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/heap_table.cpp.obj
+[3/58] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/buffer_pool.cpp.obj
+[4/58] Building CXX object src/storage/CMakeFiles/tinydbms_prefetch_benchmark.dir/prefetch_benchmark.cpp.obj
+[5/58] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/storage.cpp.obj
+[6/58] Linking CXX static library src\storage\libtinydbms_storage.a
+[7/58] Building CXX object src/storage/CMakeFiles/tinydbms_io_benchmark.dir/io_benchmark.cpp.obj
+[8/58] Building CXX object tests/CMakeFiles/tinydbms.storage_v1_stress_test.dir/storage_v1_stress_test.cpp.obj
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp: In function 'void {anonymous}::run(std::size_t, tinydbms::storage::internal::ReplacementPolicy, int)':
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp:64:9: warning: this 'for' clause does not guard... [-Wmisleading-indentation]
+   64 |         for(auto id:removed)expected[index].erase(id.value);verify(t,expected[index]);
+      |         ^~~
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp:64:61: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the 'for'
+   64 |         for(auto id:removed)expected[index].erase(id.value);verify(t,expected[index]);
+      |                                                             ^~~~~~
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp: In function 'void {anonymous}::policy_demo(tinydbms::storage::internal::ReplacementPolicy)':
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp:95:29: warning: conversion to 'tinydbms::storage::internal::PageId' {aka 'unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+   95 |     for(PageId id:{1,2,1,3,1}){auto guard=(*pool.value)->fetch_page({0,id});check(guard.value.has_value());}
+      |                             ^
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp: In function 'int main()':
+D:/tinydbms/tinydbms/tests/storage_v1_stress_test.cpp:105:36: warning: conversion to 'std::size_t' {aka 'long long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  105 |     for(std::size_t capacity:{1,2,3})run(capacity,policy,capacity==1 && policy==ReplacementPolicy::kFifo?5000:600);
+      |                                    ^
+[9/58] Building CXX object tests/CMakeFiles/tinydbms.storage_crud_test.dir/storage_crud_test.cpp.obj
+D:/tinydbms/tinydbms/tests/storage_crud_test.cpp: In function 'std::vector<tinydbms::storage::Record> {anonymous}::scan(tinydbms::TableId)':
+D:/tinydbms/tinydbms/tests/storage_crud_test.cpp:41:9: warning: this 'if' clause does not guard... [-Wmisleading-indentation]
+   41 |         if(!r.record)break;rows.push_back(std::move(*r.record));}
+      |         ^~
+D:/tinydbms/tinydbms/tests/storage_crud_test.cpp:41:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the 'if'
+   41 |         if(!r.record)break;rows.push_back(std::move(*r.record));}
+      |                            ^~~~
+[10/58] Building CXX object tests/CMakeFiles/tinydbms.heap_delete_test.dir/heap_delete_test.cpp.obj
+[11/58] Building CXX object tests/CMakeFiles/tinydbms.heap_scan_test.dir/heap_scan_test.cpp.obj
+D:/tinydbms/tinydbms/tests/heap_scan_test.cpp: In function 'void {anonymous}::scan_roundtrip()':
+D:/tinydbms/tinydbms/tests/heap_scan_test.cpp:56:39: warning: conversion to 'std::vector<tinydbms::storage::RecordId>::size_type' {aka 'long long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+   56 |         check(r.value->rid.value==ids[i].value);
+      |                                       ^
+[12/58] Building CXX object tests/CMakeFiles/tinydbms.heap_table_test.dir/heap_table_test.cpp.obj
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp: In function 'void {anonymous}::first_fit_and_persistence()':
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:81:46: warning: conversion to 'std::vector<tinydbms::storage::RecordId>::size_type' {aka 'long long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+   81 |     for(int i=3;i<6;++i) f.prepare_space(ids[i]);
+      |                                              ^
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:83:46: warning: conversion to 'std::vector<tinydbms::storage::RecordId>::size_type' {aka 'long long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+   83 |     for(auto i : {0,2,6,7,8,9}) f.expect(ids[i],row(1024));
+      |                                              ^
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:86:46: warning: conversion to 'std::vector<tinydbms::storage::RecordId>::size_type' {aka 'long long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+   86 |     for(auto i : {0,2,6,7,8,9}) f.expect(ids[i],row(1024));
+      |                                              ^
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp: In lambda function:
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:147:11: warning: this 'if' clause does not guard... [-Wmisleading-indentation]
+  147 |           if(fail) return {std::nullopt,io_error()}; return f.file(key.table_id).read_page(key.page_id); });
+      |           ^~
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:147:54: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the 'if'
+  147 |           if(fail) return {std::nullopt,io_error()}; return f.file(key.table_id).read_page(key.page_id); });
+      |                                                      ^~~~~~
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp: In lambda function:
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:209:9: warning: this 'if' clause does not guard... [-Wmisleading-indentation]
+  209 |         if(fail_write) return io_error(); return f.file(key.table_id).write_page(key.page_id,page); });
+      |         ^~
+D:/tinydbms/tinydbms/tests/heap_table_test.cpp:209:43: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the 'if'
+  209 |         if(fail_write) return io_error(); return f.file(key.table_id).write_page(key.page_id,page); });
+      |                                           ^~~~~~
+[13/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_test.dir/buffer_pool_test.cpp.obj
+[14/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_flush_test.dir/buffer_pool_flush_test.cpp.obj
+[15/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_concurrency_test.dir/buffer_pool_concurrency_test.cpp.obj
+[16/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_dirty_victim_test.dir/buffer_pool_dirty_victim_test.cpp.obj
+[17/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_prefetch_test.dir/buffer_pool_prefetch_test.cpp.obj
+[18/58] Building CXX object tests/CMakeFiles/tinydbms.buffer_pool_fifo_test.dir/buffer_pool_fifo_test.cpp.obj
+[19/58] Building CXX object tests/CMakeFiles/tinydbms.storage_buffer_pool_test.dir/storage_buffer_pool_test.cpp.obj
+[20/58] Building CXX object tests/CMakeFiles/tinydbms.core_execution_test.dir/core_execution_test.cpp.obj
+[21/58] Building CXX object tests/CMakeFiles/tinydbms.file_manager_concurrency_test.dir/file_manager_concurrency_test.cpp.obj
+[22/58] Linking CXX executable src\storage\tinydbms_io_benchmark.exe
+[23/58] Building CXX object tests/CMakeFiles/tinydbms.system_catalog_test.dir/system_catalog_test.cpp.obj
+[24/58] Linking CXX executable src\storage\tinydbms_prefetch_benchmark.exe
+[25/58] Linking CXX executable tests\tinydbms.lifecycle_test.exe
+[26/58] Linking CXX executable src\app\tinydbms.exe
+[27/58] Linking CXX executable tests\tinydbms.storage_v1_stress_test.exe
+[28/58] Linking CXX executable tests\tinydbms.storage_v1_metadata_test.exe
+[29/58] Linking CXX executable tests\tinydbms.storage_crud_test.exe
+[30/58] Linking CXX executable tests\tinydbms.heap_delete_test.exe
+[31/58] Linking CXX executable tests\tinydbms.scan_page_test.exe
+[32/58] Linking CXX executable tests\tinydbms.heap_scan_test.exe
+[33/58] Linking CXX executable tests\tinydbms.page_allocation_state_test.exe
+[34/58] Linking CXX executable tests\tinydbms.heap_table_test.exe
+[35/58] Linking CXX executable tests\tinydbms.buffer_pool_test.exe
+[36/58] Building CXX object tests/CMakeFiles/tinydbms.system_catalog_failure_test.dir/system_catalog_failure_test.cpp.obj
+[37/58] Linking CXX executable tests\tinydbms.buffer_pool_flush_test.exe
+[38/58] Building CXX object tests/CMakeFiles/tinydbms_real_modules_integration_test.dir/real_modules_integration_test.cpp.obj
+[39/58] Linking CXX executable tests\tinydbms.buffer_pool_concurrency_test.exe
+[40/58] Linking CXX executable tests\tinydbms.buffer_pool_dirty_victim_test.exe
+[41/58] Linking CXX executable tests\tinydbms.buffer_pool_fifo_test.exe
+[42/58] Linking CXX executable tests\tinydbms.buffer_pool_prefetch_test.exe
+[43/58] Linking CXX executable tests\tinydbms.storage_buffer_pool_test.exe
+[44/58] Linking CXX executable tests\tinydbms.page_file_test.exe
+[45/58] Linking CXX executable tests\tinydbms.storage_contract_test.exe
+[46/58] Linking CXX executable tests\tinydbms.page_file_concurrency_test.exe
+[47/58] Linking CXX executable tests\tinydbms.file_manager_test.exe
+[48/58] Linking CXX executable tests\tinydbms.core_execution_test.exe
+[49/58] Linking CXX executable tests\tinydbms.file_manager_concurrency_test.exe
+[50/58] Linking CXX executable tests\tinydbms.system_catalog_test.exe
+[51/58] Linking CXX executable tests\tinydbms.storage_page_file_integration_test.exe
+[52/58] Linking CXX executable tests\tinydbms.system_catalog_failure_test.exe
+[53/58] Linking CXX executable tests\tinydbms.slotted_page_test.exe
+[54/58] Linking CXX executable tests\tinydbms.record_codec_test.exe
+[55/58] Linking CXX executable tests\tinydbms.record_page_test.exe
+[56/58] Linking CXX executable tests\tinydbms.record_page_file_integration_test.exe
+[57/58] Linking CXX executable tests\tinydbms.system_catalog_protection_test.exe
+[58/58] Linking CXX executable tests\tinydbms_real_modules_integration_test.exe

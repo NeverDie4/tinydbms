@@ -1,0 +1,127 @@
+Test project D:/tinydbms/tinydbms/build-real
+      Start  1: tinydbms.storage_v1_stress
+ 1/61 Test  #1: tinydbms.storage_v1_stress ...............   Passed    6.44 sec
+      Start  2: tinydbms.storage_v1_metadata
+ 2/61 Test  #2: tinydbms.storage_v1_metadata .............   Passed    0.05 sec
+      Start  3: tinydbms.storage_crud
+ 3/61 Test  #3: tinydbms.storage_crud ....................   Passed    0.07 sec
+      Start  4: tinydbms.heap_delete
+ 4/61 Test  #4: tinydbms.heap_delete .....................   Passed    0.04 sec
+      Start  5: tinydbms.heap_scan
+ 5/61 Test  #5: tinydbms.heap_scan .......................   Passed    0.05 sec
+      Start  6: tinydbms.scan_page
+ 6/61 Test  #6: tinydbms.scan_page .......................   Passed    0.02 sec
+      Start  7: tinydbms.heap_table
+ 7/61 Test  #7: tinydbms.heap_table ......................   Passed    0.07 sec
+      Start  8: tinydbms.page_allocation_state
+ 8/61 Test  #8: tinydbms.page_allocation_state ...........   Passed    0.02 sec
+      Start  9: tinydbms.buffer_pool
+ 9/61 Test  #9: tinydbms.buffer_pool .....................   Passed    0.04 sec
+      Start 10: tinydbms.buffer_pool_flush
+10/61 Test #10: tinydbms.buffer_pool_flush ...............   Passed    0.04 sec
+      Start 11: tinydbms.buffer_pool_concurrency
+11/61 Test #11: tinydbms.buffer_pool_concurrency .........   Passed    0.09 sec
+      Start 12: tinydbms.buffer_pool_loading
+12/61 Test #12: tinydbms.buffer_pool_loading .............   Passed    0.06 sec
+      Start 13: tinydbms.buffer_pool_clean_victim
+13/61 Test #13: tinydbms.buffer_pool_clean_victim ........   Passed    0.06 sec
+      Start 14: tinydbms.buffer_pool_dirty_victim
+14/61 Test #14: tinydbms.buffer_pool_dirty_victim ........   Passed    0.05 sec
+      Start 15: tinydbms.buffer_pool_prefetch
+15/61 Test #15: tinydbms.buffer_pool_prefetch ............   Passed    0.04 sec
+      Start 16: tinydbms.buffer_pool_fifo
+16/61 Test #16: tinydbms.buffer_pool_fifo ................   Passed    0.05 sec
+      Start 17: tinydbms.storage_buffer_pool
+17/61 Test #17: tinydbms.storage_buffer_pool .............   Passed    0.06 sec
+      Start 18: tinydbms.lifecycle
+18/61 Test #18: tinydbms.lifecycle .......................   Passed    0.04 sec
+      Start 19: tinydbms.core_execution
+19/61 Test #19: tinydbms.core_execution ..................   Passed    0.07 sec
+      Start 20: tinydbms.storage_contract
+20/61 Test #20: tinydbms.storage_contract ................   Passed    0.04 sec
+      Start 21: tinydbms.page_file
+21/61 Test #21: tinydbms.page_file .......................   Passed    0.03 sec
+      Start 22: tinydbms.page_file_concurrency
+22/61 Test #22: tinydbms.page_file_concurrency ...........   Passed    0.05 sec
+      Start 23: tinydbms.file_manager
+23/61 Test #23: tinydbms.file_manager ....................   Passed    0.03 sec
+      Start 24: tinydbms.file_manager_concurrency
+24/61 Test #24: tinydbms.file_manager_concurrency ........   Passed    0.05 sec
+      Start 25: tinydbms.storage_page_file_integration
+25/61 Test #25: tinydbms.storage_page_file_integration ...   Passed    0.06 sec
+      Start 26: tinydbms.system_catalog
+26/61 Test #26: tinydbms.system_catalog ..................   Passed    0.05 sec
+      Start 27: tinydbms.system_catalog_failure
+27/61 Test #27: tinydbms.system_catalog_failure ..........   Passed    0.13 sec
+      Start 28: tinydbms.system_catalog_protection
+28/61 Test #28: tinydbms.system_catalog_protection .......   Passed    0.07 sec
+      Start 29: tinydbms.record_codec
+29/61 Test #29: tinydbms.record_codec ....................   Passed    0.02 sec
+      Start 30: tinydbms.slotted_page
+30/61 Test #30: tinydbms.slotted_page ....................   Passed    0.01 sec
+      Start 31: tinydbms.record_page
+31/61 Test #31: tinydbms.record_page .....................   Passed    0.02 sec
+      Start 32: tinydbms.record_page_file_integration
+32/61 Test #32: tinydbms.record_page_file_integration ....   Passed    0.03 sec
+      Start 33: tinydbms.version
+33/61 Test #33: tinydbms.version .........................   Passed    0.07 sec
+      Start 34: tinydbms.contracts_compile
+34/61 Test #34: tinydbms.contracts_compile ...............   Passed    0.02 sec
+      Start 35: tinydbms.core_lifecycle
+35/61 Test #35: tinydbms.core_lifecycle ..................   Passed    0.03 sec
+      Start 36: tinydbms.core_executor
+36/61 Test #36: tinydbms.core_executor ...................   Passed    0.04 sec
+      Start 37: tinydbms.app_cli
+37/61 Test #37: tinydbms.app_cli .........................   Passed    0.02 sec
+      Start 38: tinydbms.compiler_core_cli_integration
+38/61 Test #38: tinydbms.compiler_core_cli_integration ...   Passed    0.05 sec
+      Start 39: tinydbms.real_modules_integration
+39/61 Test #39: tinydbms.real_modules_integration ........   Passed    0.11 sec
+      Start 40: tinydbms.compiler_splitter
+40/61 Test #40: tinydbms.compiler_splitter ...............   Passed    0.03 sec
+      Start 41: tinydbms.compiler_lexer
+41/61 Test #41: tinydbms.compiler_lexer ..................   Passed    0.01 sec
+      Start 42: tinydbms.compiler_parser_create
+42/61 Test #42: tinydbms.compiler_parser_create ..........   Passed    0.02 sec
+      Start 43: tinydbms.compiler_parser_insert
+43/61 Test #43: tinydbms.compiler_parser_insert ..........   Passed    0.02 sec
+      Start 44: tinydbms.compiler_parser_expression
+44/61 Test #44: tinydbms.compiler_parser_expression ......   Passed    0.02 sec
+      Start 45: tinydbms.compiler_parser_select
+45/61 Test #45: tinydbms.compiler_parser_select ..........   Passed    0.02 sec
+      Start 46: tinydbms.compiler_parser_delete
+46/61 Test #46: tinydbms.compiler_parser_delete ..........   Passed    0.02 sec
+      Start 47: tinydbms.compiler_semantic_create
+47/61 Test #47: tinydbms.compiler_semantic_create ........   Passed    0.03 sec
+      Start 48: tinydbms.compiler_semantic_insert
+48/61 Test #48: tinydbms.compiler_semantic_insert ........   Passed    0.03 sec
+      Start 49: tinydbms.compiler_semantic_expression
+49/61 Test #49: tinydbms.compiler_semantic_expression ....   Passed    0.03 sec
+      Start 50: tinydbms.compiler_semantic_select
+50/61 Test #50: tinydbms.compiler_semantic_select ........   Passed    0.03 sec
+      Start 51: tinydbms.compiler_semantic_delete
+51/61 Test #51: tinydbms.compiler_semantic_delete ........   Passed    0.03 sec
+      Start 52: tinydbms.compiler_planner_create
+52/61 Test #52: tinydbms.compiler_planner_create .........   Passed    0.04 sec
+      Start 53: tinydbms.compiler_planner_insert
+53/61 Test #53: tinydbms.compiler_planner_insert .........   Passed    0.03 sec
+      Start 54: tinydbms.compiler_planner_select
+54/61 Test #54: tinydbms.compiler_planner_select .........   Passed    0.03 sec
+      Start 55: tinydbms.compiler_planner_delete
+55/61 Test #55: tinydbms.compiler_planner_delete .........   Passed    0.03 sec
+      Start 56: tinydbms.compiler_compile
+56/61 Test #56: tinydbms.compiler_compile ................   Passed    0.03 sec
+      Start 57: tinydbms.compiler_hardening
+57/61 Test #57: tinydbms.compiler_hardening ..............   Passed    0.06 sec
+      Start 58: tinydbms.compiler_optimizer
+58/61 Test #58: tinydbms.compiler_optimizer ..............   Passed    0.03 sec
+      Start 59: tinydbms.compiler_plan_formatter
+59/61 Test #59: tinydbms.compiler_plan_formatter .........   Passed    0.03 sec
+      Start 60: tinydbms.compiler_fuzz_valid
+60/61 Test #60: tinydbms.compiler_fuzz_valid .............   Passed    0.09 sec
+      Start 61: tinydbms.compiler_fuzz_invalid
+61/61 Test #61: tinydbms.compiler_fuzz_invalid ...........   Passed    0.08 sec
+
+100% tests passed out of 61
+
+Total Test time (real) =   9.08 sec

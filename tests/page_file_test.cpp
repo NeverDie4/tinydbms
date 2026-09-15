@@ -389,13 +389,109 @@ bool test_filesystem_errors_and_repeated_close() {
     return passed;
 }
 
+bool test_physical_io_metrics() {
+    TemporaryDirectory directory{"metrics"};
+    const auto path = directory.path() / "metrics.dat";
+    auto created = PageFile::create(path);
+    if (!expect(created.value.has_value(), "metrics PageFile creation must succeed")) {
+        return false;
+    }
+    auto& file = **created.value;
+    bool passed = true;
+
+    const auto create_stats = file.stats();
+    passed = expect(create_stats.physical_write_attempts == 1 &&
+                        create_stats.physical_write_successes == 1 &&
+                        create_stats.bytes_written == kPageSize &&
+                        create_stats.flush_count == 1,
+                    "PageFile::create header write and flush must be included in PageFileStats") &&
+             passed;
+
+    for (PageId id = 1; id <= 5; ++id) {
+        passed = expect(file.allocate_page().value == std::optional<PageId>{id},
+                        "metrics setup allocation must succeed") &&
+                 passed;
+    }
+
+    const auto before = file.stats();
+    for (PageId id : {PageId{1}, PageId{2}, PageId{5}}) {
+        passed = expect(file.read_page(id).value.has_value(), "metrics read must succeed") && passed;
+    }
+    for (PageId id : {PageId{1}, PageId{2}, PageId{5}}) {
+        passed = expect(!file.write_page(id, patterned_page(static_cast<std::uint8_t>(id))).has_value(),
+                        "metrics write must succeed") &&
+                 passed;
+    }
+    const auto after = file.stats();
+    passed = expect(after.physical_read_attempts - before.physical_read_attempts == 3 &&
+                        after.physical_read_successes - before.physical_read_successes == 3 &&
+                        after.physical_read_failures == before.physical_read_failures &&
+                        after.bytes_read - before.bytes_read == 3 * kPageSize,
+                    "three raw reads must have three successful 4096-byte metrics") &&
+             passed;
+    passed = expect(after.physical_write_attempts - before.physical_write_attempts == 3 &&
+                        after.physical_write_successes - before.physical_write_successes == 3 &&
+                        after.physical_write_failures == before.physical_write_failures &&
+                        after.bytes_written - before.bytes_written == 3 * kPageSize &&
+                        after.flush_count - before.flush_count == 3,
+                    "three raw writes must have three successful 4096-byte write and flush metrics") &&
+             passed;
+    passed = expect(after.read_logical_page_distance - before.read_logical_page_distance == 4 &&
+                        after.sequential_read_count - before.sequential_read_count == 1 &&
+                        after.write_logical_page_distance - before.write_logical_page_distance == 4 &&
+                        after.sequential_write_count - before.sequential_write_count == 1,
+                    "same-file 1,2,5 access locality must record distance 4 and one sequential access") &&
+             passed;
+
+    const auto before_close = file.stats();
+    passed = expect(!file.close().has_value(), "metrics PageFile close must succeed") && passed;
+    const auto after_close = file.stats();
+    passed = expect(after_close.flush_count == before_close.flush_count + 1,
+                    "PageFile::close flush must be included in PageFileStats") &&
+             passed;
+
+    const auto free_list_path = directory.path() / "free-list-metrics.dat";
+    auto free_list_file = PageFile::create(free_list_path);
+    if (!expect(free_list_file.value.has_value(), "free-list metrics PageFile creation must succeed")) {
+        return false;
+    }
+    auto& free_list = **free_list_file.value;
+    passed = expect(free_list.allocate_page().value == std::optional<PageId>{1} &&
+                        free_list.allocate_page().value == std::optional<PageId>{2} &&
+                        !free_list.free_page(1).has_value(),
+                    "free-list metrics setup must succeed") &&
+             passed;
+    const auto free_before = free_list.stats();
+    passed = expect(free_list.read_page(2).value.has_value(), "allocated page behind free-list head must read") &&
+             passed;
+    const auto free_after = free_list.stats();
+    passed = expect(free_after.physical_read_successes - free_before.physical_read_successes == 2,
+                    "one logical read must include free-list metadata and data-page raw reads") &&
+             passed;
+    passed = expect(!free_list.close().has_value(), "free-list metrics PageFile close must succeed") && passed;
+
+    const auto second_path = directory.path() / "independent-metrics.dat";
+    auto second = PageFile::create(second_path);
+    if (!expect(second.value.has_value(), "independent metrics PageFile creation must succeed")) {
+        return false;
+    }
+    auto& other = **second.value;
+    passed = expect(other.allocate_page().value == std::optional<PageId>{1} &&
+                        other.read_page(1).value.has_value() &&
+                        other.stats().read_logical_page_distance == 0,
+                    "first read in an independent PageFile must not inherit locality") &&
+             passed;
+    passed = expect(!other.close().has_value(), "independent metrics PageFile close must succeed") && passed;
+    return passed;
+}
+
 }  // namespace
 
 int main() {
     const bool passed = test_create_and_header_layout() &&
                         test_allocate_write_read_and_reopen() &&
-                        test_free_list_and_invalid_operations() && test_corrupt_files() &&
-                        test_aligned_tail_and_independent_files() &&
-                        test_filesystem_errors_and_repeated_close();
+                         test_free_list_and_invalid_operations() && test_corrupt_files() &&
+                         test_aligned_tail_and_independent_files() &&
+                         test_filesystem_errors_and_repeated_close() && test_physical_io_metrics();
     return passed ? 0 : 1;
 }

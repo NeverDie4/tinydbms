@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"D:/tinydbms/tinydbms/build-pref1-release/cmake_install.cmake",
+		"D:/tinydbms/tinydbms/build-pref1-release/src/compiler/cmake_install.cmake",
+		"D:/tinydbms/tinydbms/build-pref1-release/src/storage/cmake_install.cmake",
+		"D:/tinydbms/tinydbms/build-pref1-release/src/core/cmake_install.cmake",
+		"D:/tinydbms/tinydbms/build-pref1-release/src/app/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

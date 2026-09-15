@@ -51,7 +51,7 @@ public:
 private:
     friend struct HeapTableTestAccess; // Exercise the post-prevalidation failure boundary.
     HeapTableResult<RecordId> create_record_page(PageFile& file, const std::vector<Value>& values);
-    std::optional<HeapTableError> check_file() const;
+    HeapTableResult<PageFileLease> acquire_file() const;
     TableMeta meta_;
     FileManager& files_;
     BufferPool& pool_;

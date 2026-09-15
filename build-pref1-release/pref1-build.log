@@ -1,0 +1,7 @@
+[1/7] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/cursor_state.cpp.obj
+[2/7] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/heap_table.cpp.obj
+[3/7] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/buffer_pool.cpp.obj
+[4/7] Building CXX object src/storage/CMakeFiles/tinydbms_prefetch_benchmark.dir/prefetch_benchmark.cpp.obj
+[5/7] Building CXX object src/storage/CMakeFiles/tinydbms_storage.dir/storage.cpp.obj
+[6/7] Linking CXX static library src\storage\libtinydbms_storage.a
+[7/7] Linking CXX executable src\storage\tinydbms_prefetch_benchmark.exe
