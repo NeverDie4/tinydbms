@@ -39,3 +39,6 @@ compile_commands.json
 # OS
 .DS_Store
 Thumbs.db
+
+# 本地运行数据（CLI/GUI 默认 --data-dir）
+/tinydbms-data/

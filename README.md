@@ -46,7 +46,9 @@ Core Database / Executor
 - 正常 close/reopen 后的 schema 和记录持久化
 
 public type 为 `INT`（`int32_t`）、`BIGINT`（`int64_t`）、`DOUBLE`、`BOOLEAN` 和 `VARCHAR`，
-SQL NULL 由 `Value` 的 `std::monostate` 表示；列元数据带 `nullable`，默认 NOT NULL。
+SQL NULL 由 `Value` 的 `std::monostate` 表示；列元数据带 `nullable`，SQL 建表省略约束时默认允许
+NULL，`NOT NULL` 必须显式写出（`ColumnMeta` 的 C++ 默认值 `false` 只用于兼容 SQL v1 的非空语义，
+与 SQL 省略约束的默认值不是同一件事，见 [SQL v2 扩展契约](docs/SQLv2扩展契约.md) §4.1）。
 `VARCHAR` 必须是合法 UTF-8 且不超过 1024 字节，单行逻辑载荷不超过 4096 字节。
 逻辑类型与物理编码的对应关系以
 [docs/SQLv2扩展契约.md](docs/SQLv2扩展契约.md) §10 与 `include/tinydbms/common.hpp` 为准。
@@ -59,6 +61,8 @@ SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子�
 `SELECT` 读取，但普通 `CREATE`、`INSERT` 与 `DELETE` 不能修改。普通用户表从 TableId 2 开始。
 
 当前未实现 FSM、Index、WAL、Transaction、MVCC、复杂 SQL，以及多个数据库并发打开。一个进程中可以创建多个 `Database` 对象，但 Storage 是 singleton，同一时刻最多一个对象处于 open 或 cleanup-pending 状态。
+storage 也不提供跨进程文件锁：两个进程同时打开同一 `--data-dir` 不在支持范围内，会互相覆盖且
+不报错，跨进程互斥属于后续扩展。
 
 CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|json`
 （JSON 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断）、`--plan`

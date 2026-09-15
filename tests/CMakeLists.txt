@@ -425,6 +425,34 @@ if(TINYDBMS_ENABLE_REAL_MODULES)
         NAME tinydbms.real_modules_integration
         COMMAND $<TARGET_FILE:tinydbms_real_modules_integration_test>
     )
+
+    # GUI 真实后端（CoreBackend）的数据路径覆盖：不依赖 Qt，也不使用 fake backend，
+    # 与 tinydbms-gui 编译的是同一个 core_backend.cpp，避免真实后端只被二进制走过。
+    add_executable(tinydbms_gui_core_backend_test
+        gui_core_backend_test.cpp
+        ${PROJECT_SOURCE_DIR}/src/gui/core_backend.cpp
+    )
+
+    target_include_directories(tinydbms_gui_core_backend_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/gui
+    )
+
+    target_link_libraries(tinydbms_gui_core_backend_test PRIVATE
+        tinydbms_core
+        tinydbms_compiler
+        tinydbms_storage
+    )
+
+    add_test(
+        NAME tinydbms.gui_core_backend
+        COMMAND $<TARGET_FILE:tinydbms_gui_core_backend_test>
+    )
+
+    set_tests_properties(tinydbms.gui_core_backend PROPERTIES
+        TIMEOUT 60
+        LABELS gui
+    )
 endif()
 
 add_executable(tinydbms_compiler_splitter_test compiler_splitter_test.cpp)

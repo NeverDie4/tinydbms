@@ -428,8 +428,16 @@ endif()
   开关下的 CLI 一致；`TINYDBMS_ENABLE_REAL_MODULES=ON` + `TINYDBMS_BUILD_GUI=ON` 的构建目录
   已完成全量构建并通过 CTest；
 - `tinydbms_gui_ui_test` 不链接 core，可独立构建和运行，覆盖界面与结果模型行为；
-- 真实数据目录下的人工交互验收（打开库、执行脚本、修复建议展示）仍需在本机 Qt 环境手动执行，
-  不能以离屏 UI 测试代替。
+- `tinydbms.gui_core_backend`（`TINYDBMS_ENABLE_REAL_MODULES=ON` 时构建，不依赖 Qt）与
+  `tinydbms-gui` 编译同一个 `core_backend.cpp`，自动覆盖真实后端的数据路径：未 open 时执行、
+  打开库、建表/写入/查询、语义错误的结构化字段（`kind`/`compile_stage`/`source`）、
+  suggestion 与 fix-it、`open` 失败后的 cleanup 判定、close 与重开；
+  该用例只受真实模块开关约束、不受 `TINYDBMS_BUILD_GUI` 约束：`core_backend.cpp` 本身不依赖
+  Qt，把它放进默认的真实模块构建可以在没有 Qt 的机器上也守住这条数据路径，因此真实模块构建的
+  用例数是 GUI=OFF 65 项、GUI=ON 66 项（后者多出的是离屏界面用例 `tinydbms.gui_ui`）；
+- 真实数据目录下的**人工交互验收**（点击打开库、在编辑器里执行脚本、界面上展示修复建议）
+  仍需在本机 Qt 环境手动执行，不能以离屏 UI 测试代替；上面的后端用例只保证这条数据路径本身
+  已被自动化覆盖。
 
 ### 9.6 预设
 
@@ -467,7 +475,9 @@ endif()
 
 ## 10. 测试策略
 
-GUI 测试全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不写真实数据目录。用例覆盖：
+界面测试（`tinydbms.gui_ui`）全部使用 `FakeBackend`，不依赖真实 compiler/storage，也不写真实
+数据目录；真实后端的数据路径由另一支用例 `tinydbms.gui_core_backend`
+（`TINYDBMS_ENABLE_REAL_MODULES=ON` 时构建，见 §9.5）在临时目录中覆盖。界面测试用例覆盖：
 
 - 九态 `StatementStatus`（含 U3 的 `kPlanOnly` 与 U5 的 `kCancelled`）各自的渲染映射，
   以及 `script_error` 与 `statements` 并存的情况；
