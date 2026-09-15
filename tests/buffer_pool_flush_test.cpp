@@ -44,6 +44,7 @@ struct Fixture {
     std::unique_ptr<FileManager> files;
     std::unique_ptr<BufferPool> pool;
     std::vector<PageKey> writes;
+    std::string logs;
     std::optional<std::size_t> fail_at;
     PageFileErrorKind failure=PageFileErrorKind::kIo;
     explicit Fixture(bool adapter=true) {
@@ -59,7 +60,8 @@ struct Fixture {
             if (fail_at && writes.size()==*fail_at) return PageFileError{failure,"injected write failure"};
             return files->find_table_file(key.table_id)->write_page(key.page_id,page);
         };
-        auto made=BufferPool::create(*files,3,{},std::move(write));
+        auto made=BufferPool::create(*files,3,{},std::move(write),ReplacementPolicy::kFifo,
+            [this](std::string_view event) { logs.append(event); logs.push_back('\n'); });
         check(made.value.has_value()); pool=std::move(*made.value);
     }
     ~Fixture() {
@@ -199,9 +201,26 @@ void experiment_dirty_snapshot_and_ordered_flush() {
     check(f.pool->stats().dirty_flush_count==3);
     check(!f.pool->close());
 }
+
+void flush_reasons_are_reported() {
+    Fixture f;
+    f.dirty({0,1});
+    check(!f.pool->flush_page({0,1}));
+    f.dirty({0,2});
+    check(!f.pool->flush_all());
+    f.dirty({1,1});
+    check(!f.pool->release_table(1));
+    f.dirty({0,3});
+    check(!f.pool->close());
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=1 frame=0 reason=explicit")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=2 frame=1 reason=flush_all")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=1 page=1 frame=2 reason=release_table")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=3 frame=2 reason=shutdown")!=std::string::npos);
+}
 }
 int main() {
-    try { page_and_guard(); batches(); errors_and_persistence(); experiment_dirty_snapshot_and_ordered_flush(); }
+    try { page_and_guard(); batches(); errors_and_persistence(); experiment_dirty_snapshot_and_ordered_flush();
+          flush_reasons_are_reported(); }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
     return 0;
 }

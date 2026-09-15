@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <charconv>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <new>
@@ -52,6 +54,11 @@ struct BufferConfig {
     internal::BufferPool::WritePage write;
     internal::BufferPool::ReadPage read;
 } buffer_config;
+
+bool buffer_event_log_enabled() noexcept {
+    const char* value = std::getenv("TINYDBMS_BUFFER_EVENT_LOG");
+    return value != nullptr && std::string_view(value) == "1";
+}
 
 void reset_state() {
     state.cursors.reset(); // Does not reset the process-lifetime CursorId allocator.
@@ -869,8 +876,12 @@ OpenStorageResult open_storage(const OpenStorageRequest& request) {
                 }
             }
         }
+        internal::BufferPool::LogSink log;
+        if (buffer_event_log_enabled()) {
+            log = [](std::string_view event) { std::clog << event << '\n'; };
+        }
         auto pool = internal::BufferPool::create(**file_manager.value, buffer_config.capacity,
-            buffer_config.read, buffer_config.write, buffer_config.policy);
+            buffer_config.read, buffer_config.write, buffer_config.policy, std::move(log));
         if (!pool.value) {
             const auto mapped = buffer_error(*pool.error);
             if (initializing_system_catalog) rollback_initialization();

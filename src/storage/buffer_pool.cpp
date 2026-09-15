@@ -20,6 +20,27 @@ BufferPoolError map_error(const PageFileError& error) {
     }
     return invalid("unknown PageFile error");
 }
+std::string_view event_name(BufferEvent event) noexcept {
+    switch (event) {
+        case BufferEvent::kHit: return "HIT";
+        case BufferEvent::kMiss: return "MISS";
+        case BufferEvent::kLoad: return "LOAD";
+        case BufferEvent::kEvict: return "EVICT";
+        case BufferEvent::kFlush: return "FLUSH";
+    }
+    std::terminate();
+}
+std::string_view flush_reason_name(FlushReason reason) noexcept {
+    switch (reason) {
+        case FlushReason::kEviction: return "eviction";
+        case FlushReason::kExplicit: return "explicit";
+        case FlushReason::kFlushAll: return "flush_all";
+        case FlushReason::kReleaseTable: return "release_table";
+        case FlushReason::kShutdown: return "shutdown";
+        case FlushReason::kExperiment: return "experiment";
+    }
+    std::terminate();
+}
 }
 
 FifoReplacer::FifoReplacer(std::size_t capacity) { order_.reserve(capacity); }
@@ -97,15 +118,20 @@ BufferPoolResult<std::unique_ptr<BufferPool>> BufferPool::create(
         return {std::nullopt, invalid("unknown replacement policy")};
     return {std::unique_ptr<BufferPool>(new BufferPool(files, capacity, std::move(read), std::move(write), policy, std::move(log), prefetch_enabled)), std::nullopt};
 }
-void BufferPool::log_event(std::string_view event, PageKey key, std::optional<FrameId> frame,
-                           std::string_view result) const noexcept {
+void BufferPool::log_event(BufferEvent event, PageKey key, std::optional<FrameId> frame,
+                           std::optional<bool> dirty, std::optional<FlushReason> reason,
+                           std::string_view status) const noexcept {
     if (!log_) return;
     try {
-        std::string message = std::string(event) + " table=" + std::to_string(key.table_id) +
+        std::string message = "[BUFFER][" + std::string(event_name(event)) + "]";
+        if (event == BufferEvent::kEvict)
+            message += policy_ == ReplacementPolicy::kFifo ? " policy=FIFO" : " policy=LRU";
+        message += " table=" + std::to_string(key.table_id) +
             " page=" + std::to_string(key.page_id);
         if (frame) message += " frame=" + std::to_string(*frame);
-        message += policy_ == ReplacementPolicy::kFifo ? " policy=FIFO" : " policy=LRU";
-        if (!result.empty()) message += " result=" + std::string(result);
+        if (dirty) message += *dirty ? " dirty=true" : " dirty=false";
+        if (reason) message += " reason=" + std::string(flush_reason_name(*reason));
+        if (!status.empty()) message += " status=" + std::string(status);
         log_(message);
     } catch (...) { /* Diagnostics must never alter storage success/failure semantics. */ }
 }
@@ -220,24 +246,25 @@ void BufferPool::reset_to_free(Frame& frame) noexcept {
     frame.completion.reset();
     frame.replacement_reserved = false;
 }
-std::optional<BufferPoolError> BufferPool::flush_frame_locked(Frame& frame) {
+std::optional<BufferPoolError> BufferPool::flush_frame_locked(FrameId frame_id, FlushReason reason) {
+    Frame& frame = frames_[frame_id];
     if (frame.state != FrameState::kReady || !frame.key || !frame.dirty) return std::nullopt;
     if (stats_.dirty_flush_count == std::numeric_limits<std::uint64_t>::max())
         return invalid("BufferPool dirty flush counter exhausted");
     auto lease = files_.acquire_file(frame.key->table_id);
     if (!lease.value || !(**lease.value).is_open()) {
-        log_event("Flush dirty", *frame.key, {}, "failure");
+        if (log_) log_event(BufferEvent::kFlush, *frame.key, frame_id, {}, reason, "failure");
         return invalid("table PageFile is not open");
     }
     const auto error = write_ ? write_(*frame.key, frame.page)
                               : (**lease.value).write_page(frame.key->page_id, frame.page);
     if (error) {
-        log_event("Flush dirty", *frame.key, {}, "failure");
+        if (log_) log_event(BufferEvent::kFlush, *frame.key, frame_id, {}, reason, "failure");
         return map_error(*error);
     }
     frame.dirty = false;
     ++stats_.dirty_flush_count;
-    log_event("Flush dirty", *frame.key, {}, "success");
+    if (log_) log_event(BufferEvent::kFlush, *frame.key, frame_id, {}, reason, "success");
     return std::nullopt;
 }
 std::optional<BufferPoolError> BufferPool::flush_page(PageKey key) {
@@ -245,18 +272,18 @@ std::optional<BufferPoolError> BufferPool::flush_page(PageKey key) {
     if (!is_open_locked()) return invalid("BufferPool is closed");
     const auto found = page_table_.find(key);
     if (found == page_table_.end()) return std::nullopt;
-    return flush_frame_locked(frames_[found->second]);
+    return flush_frame_locked(found->second, FlushReason::kExplicit);
 }
-std::optional<BufferPoolError> BufferPool::flush_all_locked() {
-    for (auto& frame : frames_) {
-        if (auto error = flush_frame_locked(frame)) return error;
+std::optional<BufferPoolError> BufferPool::flush_all_locked(FlushReason reason) {
+    for (FrameId frame_id = 0; frame_id < frames_.size(); ++frame_id) {
+        if (auto error = flush_frame_locked(frame_id, reason)) return error;
     }
     return std::nullopt;
 }
 std::optional<BufferPoolError> BufferPool::flush_all() {
     std::lock_guard lock(metadata_mutex_);
     if (!is_open_locked()) return invalid("BufferPool is closed");
-    return flush_all_locked();
+    return flush_all_locked(FlushReason::kFlushAll);
 }
 BufferPoolResult<std::vector<DirtyFrameSnapshotEntry>>
 BufferPool::snapshot_dirty_frames_for_experiment() const {
@@ -290,7 +317,7 @@ BufferPoolResult<DirtyFrameFlushResult> BufferPool::flush_dirty_frames_for_exper
     DirtyFrameFlushResult result;
     for (const auto& entry : snapshot) {
         const auto started = std::chrono::steady_clock::now();
-        if (auto error = flush_frame_locked(frames_[entry.frame_id])) return {std::nullopt, std::move(error)};
+        if (auto error = flush_frame_locked(entry.frame_id, FlushReason::kExperiment)) return {std::nullopt, std::move(error)};
         result.flush_io_time += std::chrono::steady_clock::now() - started;
     }
     return {result, std::nullopt};
@@ -317,9 +344,9 @@ std::optional<BufferPoolError> BufferPool::release_table(TableId table_id) {
         if (belongs(frame) && frame.pin_count != 0)
             return invalid("cannot release table with active PageGuards");
     }
-    for (auto& frame : frames_) {
-        if (belongs(frame)) {
-            if (auto error = flush_frame_locked(frame)) return error;
+    for (FrameId frame_id = 0; frame_id < frames_.size(); ++frame_id) {
+        if (belongs(frames_[frame_id])) {
+            if (auto error = flush_frame_locked(frame_id, FlushReason::kReleaseTable)) return error;
         }
     }
     // Commit only after every target write succeeded; unrelated frames stay resident.
@@ -410,7 +437,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             if (!frame.try_pin()) return {std::nullopt, invalid("Frame pin count overflow")};
             consume_prefetch_locked(frame, !classified);
             if (policy_ == ReplacementPolicy::kLru) fifo_.record_load(found->second);
-            log_event("Buffer HIT", key, found->second);
+            if (!prefetch && log_) log_event(BufferEvent::kHit, key, found->second);
             return {PageGuard(*this, found->second), std::nullopt};
         }
         if (!prefetch && !classified) { ++stats_.miss_count; classified = true; }
@@ -456,7 +483,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             if (policy_ == ReplacementPolicy::kLru) fifo_.record_load(ready->second);
             return {PageGuard(*this, ready->second), std::nullopt};
         }
-        log_event("Buffer MISS", key);
+        if (!prefetch && log_) log_event(BufferEvent::kMiss, key);
         const auto empty = std::find_if(frames_.begin(), frames_.end(),
                                        [](const Frame& frame) { return frame.state == FrameState::kFree; });
         if (empty != frames_.end()) {
@@ -533,6 +560,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             reserved.prefetch_had_foreground = completion->foreground_arrived;
             if (prefetch) ++stats_.prefetch_ready;
             fifo_.record_load(frame_id);
+            if (!prefetch && log_) log_event(BufferEvent::kLoad, key, frame_id);
             completion->done = true;
             lock.unlock();
             completion->cv.notify_all();
@@ -650,7 +678,10 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             fifo_.record_load(*candidate);
             ++stats_.eviction_count;
             ++stats_.clean_replacement_commit_count;
-            log_event("Evict", *old_key, *candidate);
+            if (!prefetch && log_) {
+                log_event(BufferEvent::kEvict, *old_key, *candidate, false);
+                log_event(BufferEvent::kLoad, key, *candidate);
+            }
             completion->done = true;
             lock.unlock();
             completion->cv.notify_all();
@@ -749,17 +780,20 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
                 auto lease = files_.acquire_file(old_key->table_id);
                 if (!lease.value || !(**lease.value).is_open()) {
                     write_error = invalid("table PageFile is not open");
-                    log_event("Flush dirty", *old_key, {}, "failure");
+                    if (!prefetch && log_)
+                        log_event(BufferEvent::kFlush, *old_key, *candidate, {}, FlushReason::kEviction, "failure");
                 } else {
                     write_attempted = true;
                     const auto error = write_ ? write_(*old_key, dirty_snapshot)
                                               : (**lease.value).write_page(old_key->page_id, dirty_snapshot);
                     if (error) {
                         write_error = map_error(*error);
-                        log_event("Flush dirty", *old_key, {}, "failure");
+                        if (!prefetch && log_)
+                            log_event(BufferEvent::kFlush, *old_key, *candidate, {}, FlushReason::kEviction, "failure");
                     } else {
                         write_succeeded = true;
-                        log_event("Flush dirty", *old_key, {}, "success");
+                        if (!prefetch && log_)
+                            log_event(BufferEvent::kFlush, *old_key, *candidate, {}, FlushReason::kEviction, "success");
                     }
                 }
             }
@@ -806,7 +840,10 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             ++stats_.dirty_flush_count;
             ++stats_.eviction_count;
             ++stats_.dirty_replacement_commit_count;
-            log_event("Evict", *old_key, *candidate);
+            if (!prefetch && log_) {
+                log_event(BufferEvent::kEvict, *old_key, *candidate, true);
+                log_event(BufferEvent::kLoad, key, *candidate);
+            }
             completion->done = true;
             lock.unlock();
             completion->cv.notify_all();
@@ -826,7 +863,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
         staging.emplace(key, *candidate);
         auto node = staging.extract(key);
         if (old_key) {
-            if (auto error = flush_frame_locked(target)) return {std::nullopt, std::move(error)};
+            if (auto error = flush_frame_locked(*candidate, FlushReason::kEviction)) return {std::nullopt, std::move(error)};
         }
         // All I/O succeeded. Same allocator + reserved buckets + noexcept hash/equality
         // mean node insertion does not allocate or rehash during commit.
@@ -844,7 +881,12 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
         fifo_.record_load(*candidate);
         if (old_key) {
             ++stats_.eviction_count;
-            log_event("Evict", *old_key, *candidate);
+            if (!prefetch && log_) {
+                log_event(BufferEvent::kEvict, *old_key, *candidate, target.dirty);
+                log_event(BufferEvent::kLoad, key, *candidate);
+            }
+        } else if (!prefetch && log_) {
+            log_event(BufferEvent::kLoad, key, *candidate);
         }
         return {PageGuard(*this, *candidate), std::nullopt};
     } // demand retry loop
@@ -867,7 +909,7 @@ std::optional<BufferPoolError> BufferPool::close() {
         retry = true;
         return invalid("cannot close BufferPool with active PageGuards");
     }
-    if (auto error = flush_all_locked()) {
+    if (auto error = flush_all_locked(FlushReason::kShutdown)) {
         lifecycle_ = LifecycleState::kOpen;
         retry = true;
         return error;
