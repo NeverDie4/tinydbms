@@ -4,16 +4,18 @@
 
 ## 当前状态
 
-- `app` 提供 `--help`、`--version`、`--data-dir`、REPL 和 stdin 批处理入口。
+- `app` 提供命令行入口：`--help`/`--version`/`--data-dir` 等选项解析、REPL 与 stdin 批处理
+  （完整选项见下方「CLI 入口」）。
 - `compiler` 提供分句、词法、语法、语义、优化和 Plan 生成。
-- `core` 提供 `Database` 生命周期、Catalog 恢复、TableId 分配和脚本顺序执行，源码按 lifecycle、script、executor、expression 拆分。
+- `core` 提供 `Database` 生命周期、Catalog 恢复、TableId 分配和脚本顺序执行；源码按 database（生命周期）、script、executor、expression、plan_text（计划渲染）与 diagnostics/analysis_catalog（诊断与 analyze 策略）拆分。
 - `storage` 提供 typed heap storage、buffer pool、record/page 编解码、cursor，以及以 System Catalog 为 schema 权威的持久化元数据。
+- `gui`（可选，`TINYDBMS_BUILD_GUI=ON`）是 Qt6 前端：结果表格与图表视图、结构化诊断列表、运行中取消；与 CLI 一样只调用 core 公共 API。
 - 默认构建仍通过不可用 Session 适配器验证 CLI 边界；完整 SQL 链路需要启用 `TINYDBMS_ENABLE_REAL_MODULES=ON`。
 
 ## 当前架构
 
 ```text
-App
+App (CLI)  /  GUI (Qt6, 可选)
   |
 Core Database / Executor
   |- Compiler
@@ -53,8 +55,11 @@ NULL，`NOT NULL` 必须显式写出（`ColumnMeta` 的 C++ 默认值 `false` �
 逻辑类型与物理编码的对应关系以
 [docs/SQLv2扩展契约.md](docs/SQLv2扩展契约.md) §10 与 `include/tinydbms/common.hpp` 为准。
 
-SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子查询、`UNION`、`LIMIT`/`OFFSET`、
-窗口函数、算术表达式、事务、WAL 与崩溃原子性。
+SQL v2 明确不包含：算术与负数字面量（`-1` 在词法阶段即报 `invalid character`，因此无法直接
+表达负数）、表/列别名（`AS`）、`HAVING`、`DISTINCT`、子查询、`UNION`、`LIMIT`/`OFFSET`、
+`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`、`PRIMARY KEY`/`FOREIGN KEY`/`UNIQUE`/`DEFAULT`/`CHECK`、
+`DATE`/`TIME`/`DECIMAL`/`CHAR`/`TEXT`/`BLOB`、事务与回滚、WAL 与崩溃原子性、基于代价的优化器。
+完整清单见 [SQL v2 扩展契约](docs/SQLv2扩展契约.md) §17。
 
 `storage.meta` 是 V2 bootstrap，不保存用户 schema。`tdb_sys_tables`（TableId 0）与
 `tdb_sys_columns`（TableId 1）是 Storage 管理的特殊 HeapTable，保存用户 schema；它们可由
@@ -64,6 +69,8 @@ SQL v2 明确不包含：`HAVING`、`DISTINCT`、`AS` 别名、外连接、子�
 storage 也不提供跨进程文件锁：两个进程同时打开同一 `--data-dir` 不在支持范围内，会互相覆盖且
 不报错，跨进程互斥属于后续扩展。
 
+## CLI 入口
+
 CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format table|pretty|json`
 （`json` 为每行一个对象的 NDJSON，stdout 只放结果、stderr 只放诊断；`pretty` 是终端里
 给人看的等宽表格，输出不是终端时默认仍是 `table` 的制表符文本）、`--plan`
@@ -72,13 +79,14 @@ CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format 
 （每次执行在 stderr 追加一行墙钟耗时，如 `TIME script 12.345 ms`，stdout 不受影响）。
 `--format`、`--plan` 与 `--max-rows` 可组合，行为契约见
 [docs/core-cli/第三阶段CLI与入口设计.md](docs/core-cli/第三阶段CLI与入口设计.md)。
-展示格式与性能观测的完整规则见
+展示格式与性能观测的完整规则（边框、CJK 显示宽度、数值列右对齐、超宽单元格截断到
+48 列，以及 `--plan` 不截断计划文本、不打印行数行的例外）见
 [docs/core-cli/CLI展示格式与性能观测设计.md](docs/core-cli/CLI展示格式与性能观测设计.md)。
 
 运行中取消：CLI 在 `execute_script` 期间按 Ctrl+C 会请求取消（`CancelToken`），当前语句在
 下一个无副作用检查点结束、剩余语句不再执行并记为 `CANCELLED`，本次调用退出码为 1；
 空闲期或第二次 Ctrl+C 按默认处置终止进程。GUI 工具栏提供「取消」按钮：请求只置位令牌，
-当前语句在下一个检查点结束后按 `kCancelled` 渲染（收尾阶段实现，见
+当前语句在下一个检查点结束后按 `kCancelled` 渲染（已实现，见
 [docs/gui/GUI设计.md](docs/gui/GUI设计.md) §17）。规格见
 [docs/core-cli/运行中取消设计.md](docs/core-cli/运行中取消设计.md)。
 
@@ -88,31 +96,41 @@ CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format 
 
 ```text
 include/tinydbms/common.hpp
+include/tinydbms/diagnostic.hpp
 include/tinydbms/compiler.hpp
 include/tinydbms/core.hpp
 include/tinydbms/storage.hpp
 ```
 
-`src/include/tinydbms/*.h` 只是兼容转发头文件，不是并行 API。
+`diagnostic.hpp` 存放所有模块共享的诊断类型（`SourceRange`、`FixIt`、`CompileStage`）。
+`src/include/tinydbms/{compiler,core,storage,types}.h` 只是兼容转发头文件，不是并行 API，仓库内
+没有代码再包含它们。
 
 字段级契约见 [docs/消息契约详细设计.md](docs/消息契约详细设计.md)，模块边界见 [docs/模块交互契约.md](docs/模块交互契约.md)，当前冻结决策见 [docs/技术决策.md](docs/技术决策.md)。
 
-core/CLI 的阶段设计入口：
+设计与契约文档入口：
 
-- [升级路线图（U1–U6 候选与状态）](docs/升级路线图.md)
+- [升级路线图（U/P 系列候选与状态）](docs/升级路线图.md)
 - [core 与 CLI 实现设计](docs/core-cli/实现设计.md)
 - [第二阶段执行器设计](docs/core-cli/第二阶段执行器设计.md)
 - [第三阶段 CLI 与入口设计](docs/core-cli/第三阶段CLI与入口设计.md)
 - [CLI 升级设计：JSON 输出（U2，已实现）](docs/core-cli/CLI升级设计_JSON输出.md)
 - [CLI 升级设计：Plan 整理输出（U3，已实现）](docs/core-cli/Plan整理输出设计.md)
-- [CLI 升级设计：结果集上限与分页（U4，设计中）](docs/core-cli/结果集上限与分页设计.md)
-- [CLI 升级设计：运行中取消（U5，设计中）](docs/core-cli/运行中取消设计.md)
+- [CLI 升级设计：结果集上限与分页（U4，已实现第一阶段）](docs/core-cli/结果集上限与分页设计.md)
+- [CLI 升级设计：运行中取消（U5，已实现第一阶段）](docs/core-cli/运行中取消设计.md)
+- [进程内并发设计（U6，已实现第一阶段）](docs/core-cli/进程内并发设计.md)
+- [高级诊断与脚本恢复升级设计（已落地）](docs/core-cli/高级诊断与脚本恢复升级设计.md)
+- [展示格式与性能观测设计（P1/P2 已实现，P3 待 storage 提供统计接口）](docs/core-cli/CLI展示格式与性能观测设计.md)
+- [查询执行优化设计（P4，第一阶段已实现）](docs/core-cli/查询执行优化设计.md)
 - [联调准备与验收清单](docs/联调准备与验收清单.md)
 - [GUI 设计（Qt6 可选前端）](docs/gui/GUI设计.md)
+- [Storage 契约](docs/storage/storage-contract.md)
+- [SQL v2 Release Notes](docs/SQLv2_RELEASE_NOTES.md)
 
 ## 构建与验证
 
-本项目必须使用 g++。默认构建：
+本项目必须使用 g++。默认构建（`TINYDBMS_ENABLE_REAL_MODULES=OFF`，走不可用 Session 适配器，
+验证参数、I/O 边界与全部单测）：
 
 ```bash
 cmake --preset debug
@@ -136,6 +154,16 @@ ctest --test-dir build/real-debug --output-on-failure
 REPL 恢复、超大 SQL 边界、UTF-8 数据目录、编译与语义错误位置、storage 运行期错误和 open
 失败路径。
 
+该构建可以直接跑一段脚本（stdin 不是终端时按批处理执行）：
+
+```bash
+./build/real-debug/src/app/tinydbms --data-dir /tmp/tinydbms-demo <<'SQL'
+CREATE TABLE students (id INT NOT NULL, name VARCHAR);
+INSERT INTO students VALUES (1, 'ada');
+SELECT * FROM students;
+SQL
+```
+
 可选的 Qt6 GUI（默认不参与构建，只有本机装了 Qt6 时才有意义）：
 
 ```bash
@@ -149,5 +177,22 @@ GUI 与 CLI 一样只调用 core 的公开 API，`TINYDBMS_BUILD_GUI` 默认为 
 Qt、也不会新增目标或测试。未启用 `TINYDBMS_ENABLE_REAL_MODULES` 时 GUI 使用不可用后端：窗口
 可以打开与调试，但不会伪造数据。接口与线程模型见
 [docs/gui/GUI设计.md](docs/gui/GUI设计.md)。
+
+并发的 ThreadSanitizer 回归（预设与 `debug` 相同，只是追加 `-fsanitize=thread`）：
+
+```bash
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan --output-on-failure
+```
+
+Storage 的实验 benchmark 默认不构建（`TINYDBMS_BUILD_STORAGE_BENCHMARKS=OFF`），需要时显式打开：
+
+```bash
+cmake -S . -B build/bench -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DTINYDBMS_BUILD_STORAGE_BENCHMARKS=ON
+cmake --build build/bench --target tinydbms_io_benchmark tinydbms_prefetch_benchmark
+```
 
 开发时参考 [docs/开发守则.md](docs/开发守则.md) 和 [docs/miniob-study/](docs/miniob-study/) 的分层与调用链，不复制其事务、日志或多引擎范围。
