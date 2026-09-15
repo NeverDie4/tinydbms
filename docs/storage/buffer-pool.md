@@ -34,7 +34,7 @@
 - HIT：计 hit，检查 pin 溢出，增加 pin，返回 guard，不调用 read。
 - MISS：计 miss，优先寻找 empty Frame；没有 empty 才按所选策略选择最老的 unpinned Frame，全部 pinned 则 kNoVictim 且不执行 I/O。
 - 有 empty：PageFile read 到临时 RawPage，成功后提交映射、Frame 与 FIFO，pin=1，不计 eviction。
-- metadata mutex 保护 Frame、PageTable、loading table 与统计的提交；同一 PageKey 的 LOADING 由 `LoadCompletion` 去重，等待者复用同一结果。读写与 lease 均在锁外执行，完成后在锁内验证 ticket/映射再发布，取消 speculative replacement 时保留原 frame。
+- metadata mutex 保护 Frame、PageTable、loading table 与统计的提交；同一 PageKey 的 LOADING 由 `LoadCompletion` 去重，等待者复用同一结果。load 和 speculative replacement 路径的 I/O 与 lease 在锁外执行，完成后在锁内验证 ticket/映射再发布，取消 speculative replacement 时保留原 frame。显式 flush、`release_table` 与 close 的 writeback 则在 metadata mutex 内完成，以保持 Frame payload 与 dirty 状态一致。
 - 适配器不得重入池；标准内存分配异常可传播，但不留下半提交 Frame。启用预取时另有一个内部 worker；默认关闭，提交永不等待队列或 I/O。
 
 ## 错误与统计

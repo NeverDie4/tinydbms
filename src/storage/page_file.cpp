@@ -275,6 +275,11 @@ std::optional<PageFileError> PageFile::require_open_locked() const {
     return std::nullopt;
 }
 
+void PageFile::mark_poisoned() noexcept {
+    std::lock_guard lock(mutex_);
+    poisoned_ = true;
+}
+
 PageFileResult<RawPage> PageFile::read_raw_page_locked(PageId page_id) {
     if (before_raw_read_for_testing_) before_raw_read_for_testing_();
     const auto offset = page_offset(page_id);

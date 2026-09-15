@@ -145,9 +145,13 @@ std::optional<PageFileError> FileManager::close_table_file(TableId table_id) {
     PageFile* file=nullptr;
     { std::unique_lock lock(mutex_);
       if (close_all_in_progress_ || closing_tables_.contains(table_id)) return make_error(PageFileErrorKind::kInvalidArgument,"table PageFile is closing");
-      const auto found=open_files_.find(table_id); if(found==open_files_.end()) return std::nullopt;
+      if(open_files_.find(table_id)==open_files_.end()) return std::nullopt;
       closing_tables_.insert(table_id); state_changed_.notify_all();
       state_changed_.wait(lock,[&]{ return !in_flight_.contains(table_id); });
+      // wait() releases mutex_: another table may create/open and rehash
+      // open_files_, so no iterator obtained before wait may be used here.
+      const auto found=open_files_.find(table_id);
+      if(found==open_files_.end()) std::terminate();
       file=found->second.get(); }
     const auto result=file->close();
     { std::lock_guard lock(mutex_); if(!result) open_files_.erase(table_id); closing_tables_.erase(table_id); state_changed_.notify_all(); }

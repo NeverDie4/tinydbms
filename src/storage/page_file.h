@@ -93,7 +93,7 @@ public:
     [[nodiscard]] PageFileStats stats() const noexcept;
 
 private:
-    friend class HeapTable; // Reuse existing volatile poison latch on failed bootstrap compensation.
+    friend class HeapTable;
     friend class FileManager;
     friend struct StorageTestAccess;
     friend struct PageFileTestAccess;
@@ -112,6 +112,7 @@ private:
     PageFileResult<PageId> read_free_next_locked(PageId page_id);
     std::optional<PageFileError> require_open() const;
     std::optional<PageFileError> require_open_locked() const;
+    void mark_poisoned() noexcept;
     void record_read_locality(PageId page_id) noexcept;
     void record_write_locality(PageId page_id) noexcept;
     void record_flush(std::chrono::steady_clock::duration elapsed) noexcept;

@@ -133,7 +133,7 @@ HeapTableResult<RecordId> HeapTable::create_record_page(PageFile& file, const st
         if (error) {
             // All lightweight HeapTable instances see the same file health latch.
             // No on-disk recovery format, and no attempt to hide a damaged allocation.
-            file.poisoned_ = true;
+            file.mark_poisoned();
             return {std::nullopt,HeapTableError{HeapTableErrorKind::kIo,
                 "bootstrap failed: " + original.message + "; compensation failed: " + error->message}};
         }

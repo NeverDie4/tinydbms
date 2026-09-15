@@ -30,6 +30,10 @@ struct FileManagerTestAccess {
         const auto found = manager.in_flight_.find(table_id);
         return found == manager.in_flight_.end() ? 0 : found->second;
     }
+    static void force_open_file_rehash(FileManager& manager) {
+        std::lock_guard lock(manager.mutex_);
+        manager.open_files_.rehash(manager.open_files_.bucket_count() * 2U + 1U);
+    }
 };
 } // namespace tinydbms::storage::internal
 
@@ -74,6 +78,21 @@ void table_close_waits_and_rejects_new_leases() {
     closer.join();
     check(close_ok.load() && close_done.load());
     check(f.manager().find_table_file(0) == nullptr);
+}
+
+void table_close_survives_other_table_rehash_while_waiting() {
+    Fixture f;
+    auto held = f.manager().acquire_file(0); check(held.value.has_value());
+    std::atomic<bool> close_ok = false;
+    std::thread closer([&] { close_ok = !f.manager().close_table_file(0); });
+    FileManagerTestAccess::wait_table_closing(f.manager(), 0);
+    // Equivalent to concurrent create/open growth, but deterministic and compact.
+    FileManagerTestAccess::force_open_file_rehash(f.manager());
+    held.value->release();
+    closer.join();
+    check(close_ok.load());
+    check(f.manager().find_table_file(0) == nullptr);
+    check(f.manager().find_table_file(1) != nullptr);
 }
 
 void close_all_drains_and_preserves_independent_table_leases() {
@@ -147,6 +166,7 @@ void concurrent_acquire_release_and_close_all() {
 int main() {
     try {
         table_close_waits_and_rejects_new_leases();
+        table_close_survives_other_table_rehash_while_waiting();
         close_all_drains_and_preserves_independent_table_leases();
         close_failure_reopens_leases_and_move_releases_once();
         concurrent_acquire_release_and_close_all();
