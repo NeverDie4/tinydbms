@@ -215,7 +215,8 @@ void write_row(
 RenderResult write_pretty_query_result(
     const QueryResult& query,
     std::ostream& output,
-    std::ostream& error_output) {
+    std::ostream& error_output,
+    PrettyQueryOptions options) {
     for (const auto& row : query.rows) {
         if (row.size() != query.columns.size()) {
             // 与 table 模式同一兜底：写 stderr 诊断并计入失败，退出码为 1。
@@ -239,8 +240,11 @@ RenderResult write_pretty_query_result(
     std::vector<std::size_t> widths(column_count, 0);
     std::vector<bool> right_aligned(column_count, false);
     for (std::size_t index = 0; index < column_count; ++index) {
+        const std::string header_text = escape_text(query.columns[index].name);
         headers.push_back(
-            truncate_to_width(escape_text(query.columns[index].name), kMaxCellWidth));
+            options.truncate_cells
+                ? truncate_to_width(header_text, kMaxCellWidth)
+                : header_text);
         widths[index] = display_width(headers.back());
     }
 
@@ -252,8 +256,11 @@ RenderResult write_pretty_query_result(
         std::vector<std::string> rendered;
         rendered.reserve(column_count);
         for (std::size_t index = 0; index < column_count; ++index) {
-            rendered.push_back(truncate_to_width(
-                escape_text(value_text(row[index])), kMaxCellWidth));
+            const std::string cell_text = escape_text(value_text(row[index]));
+            rendered.push_back(
+                options.truncate_cells
+                    ? truncate_to_width(cell_text, kMaxCellWidth)
+                    : cell_text);
             widths[index] = std::max(widths[index], display_width(rendered.back()));
             if (std::holds_alternative<std::monostate>(row[index].data)) {
                 continue;
@@ -279,8 +286,10 @@ RenderResult write_pretty_query_result(
     }
     write_border(widths, kBottomLeft, kBottomMiddle, kBottomRight, output);
 
-    const std::size_t row_count = query.rows.size();
-    output << row_count << (row_count == 1U ? " row\n" : " rows\n");
+    if (options.show_row_count) {
+        const std::size_t row_count = query.rows.size();
+        output << row_count << (row_count == 1U ? " row\n" : " rows\n");
+    }
     return RenderResult{static_cast<bool>(output), false};
 }
 

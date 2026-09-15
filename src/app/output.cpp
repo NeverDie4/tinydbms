@@ -280,7 +280,12 @@ RenderResult render_text_statement_result(
                 true};
         }
         return pretty
-            ? write_pretty_query_result(*query, output, error_output)
+            // 计划文本是缩进文本：不截断列映射，也不打印"计划文本有几行"。
+            ? write_pretty_query_result(
+                  *query,
+                  output,
+                  error_output,
+                  PrettyQueryOptions{false, false})
             : write_query_result(*query, output, error_output);
     }
     case StatementStatus::kCompileError:

@@ -289,6 +289,8 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
   非终端用 table；测试与 GUI 不设置该字段，因此既有 golden 测试全部走 table。
 - `--time` 只写 stderr，stdout 字节流在开关前后完全一致；批处理 scope 为 `script`，
   REPL scope 为 `line <序号>`。
+- `--plan` 的语句结果在 pretty 下关闭单元格截断与行数行：计划是缩进文本，
+  `columns=[…]` 行按 48 列截断会丢列映射；table 与 json 的计划输出不变。
 
 ## 7. 退出码与错误策略
 

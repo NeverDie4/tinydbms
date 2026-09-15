@@ -8,6 +8,16 @@
 
 namespace tinydbms::app {
 
+// 查询结果的 pretty 渲染选项。
+//
+// 计划文本（kPlanOnly）是缩进文本而不是表格数据：列映射那一行经常超过 48 列，
+// 截断会直接丢掉信息，行数行也只反映"计划文本有几行"而非结果集大小，
+// 因此计划模式关闭这两项；普通查询结果保持截断与行数行。
+struct PrettyQueryOptions {
+    bool truncate_cells = true;
+    bool show_row_count = true;
+};
+
 // 人读格式的结果渲染：等宽边框表格 + 行数行。诊断与状态不在这里处理，
 // 由 output.cpp 的既有实现统一写 stderr，保证两种文本格式的诊断字节一致。
 //
@@ -16,7 +26,8 @@ namespace tinydbms::app {
 RenderResult write_pretty_query_result(
     const tinydbms::core::QueryResult& query,
     std::ostream& output,
-    std::ostream& error_output);
+    std::ostream& error_output,
+    PrettyQueryOptions options = PrettyQueryOptions{});
 
 // 命令结果：OK, N rows affected。
 bool write_pretty_command_result(

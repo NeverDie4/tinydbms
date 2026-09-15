@@ -84,6 +84,9 @@
    pretty，`table`/`json` 永远输出完整值；需要完整数据时用那两种格式；
 7. 表尾固定一行行数：`0 rows` / `1 row` / `N rows`；
 8. 空结果仍然打印表头与边框，只省略数据行。
+9. **计划模式例外**：`--plan` 的语句结果（`StatementStatus::kPlanOnly`）是缩进文本而不是
+   表格数据——`columns=[…]` 这类行经常超过 48 列，截断会直接丢列映射；`N rows` 也只反映
+   “计划文本有几行”而非结果集大小。因此计划模式关闭单元格截断与行数行，普通查询结果不变。
 
 命令结果：单行 `OK, N rows affected`（N 为 1 时为 `1 row affected`）。
 
@@ -95,7 +98,8 @@
 
 - pretty 输出是**展示文本，不是解析契约**：不承诺机器可解析，字段顺序、边框字符属于实现细节，
   可以随版本调整；需要稳定解析请用 `table` 或 `json`；
-- pretty 与 `--plan` 正交：`--plan` 在 pretty 下渲染成单列（列名 `plan`）的同一套表格；
+- pretty 与 `--plan` 正交：`--plan` 在 pretty 下渲染成单列（列名 `plan`）的同一套表格，
+  按 §3.2 第 9 条关闭单元格截断与行数行；
 - pretty 与 `--max-rows`、`--error-policy`、取消、批处理/REPL 的关系与 `table` 完全一致。
 
 ## 4. P2：`--time`

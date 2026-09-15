@@ -1345,6 +1345,49 @@ bool test_pretty_empty_result_and_truncation() {
     return true;
 }
 
+// 计划文本是缩进文本而不是表格数据：超过 48 列的列映射行必须完整保留，
+// 行数行（"N rows"）也只描述计划文本行数，因此计划模式下不打印。
+bool test_pretty_plan_output_is_not_truncated() {
+    const std::string long_line =
+        "        columns=[id -> slot0, name -> slot1, score -> slot2, cls -> slot3]";
+    const std::string short_line{"QueryPlan outputs=[id:INT, name:VARCHAR]"};
+
+    tinydbms::core::QueryResult plan;
+    plan.columns.push_back(tinydbms::core::ColumnHeader{"plan", Type::kVarchar});
+    plan.rows.push_back({Value{std::string{short_line}}});
+    plan.rows.push_back({Value{std::string{long_line}}});
+
+    FakeSession session;
+    session.execute_results.push_back(make_script(
+        {StatementResult::plan_only(0, range(1, 1, 1, 10), plan)}));
+
+    std::string output;
+    std::string error;
+    CHECK(invoke(
+              session,
+              {"tinydbms", "--plan", "--format", "pretty"},
+              "x",
+              false,
+              output,
+              error) == 0);
+    CHECK(error.empty());
+    // 超宽行原样出现在一行里，说明既没有截断也没有错位补空格。
+    CHECK(output.find("│ " + long_line + " │\n") != std::string::npos);
+    CHECK(output.find("…") == std::string::npos);
+    CHECK(output.find(" rows\n") == std::string::npos);
+    CHECK(output.find(" row\n") == std::string::npos);
+    // 边框宽度跟随最长计划行（内容宽度 + 左右各一格内边距），输出以底边框结束。
+    std::string dashes;
+    for (std::size_t index = 0; index < long_line.size() + 2U; ++index) {
+        dashes += "─";
+    }
+    CHECK(output.rfind("┌" + dashes + "┐\n", 0) == 0);
+    const std::string tail = "└" + dashes + "┘\n";
+    CHECK(output.size() >= tail.size());
+    CHECK(output.compare(output.size() - tail.size(), tail.size(), tail) == 0);
+    return true;
+}
+
 bool test_pretty_diagnostics_match_table_format() {
     // pretty 只替换成功结果的呈现：错误与状态行与 table 模式逐字节一致。
     FakeSession session;
@@ -1611,6 +1654,7 @@ int main() {
         test_plan_only_statement_rendering() &&
         test_pretty_query_and_command_rendering() &&
         test_pretty_empty_result_and_truncation() &&
+        test_pretty_plan_output_is_not_truncated() &&
         test_pretty_diagnostics_match_table_format() &&
         test_pretty_rejects_malformed_result() &&
         test_default_format_depends_on_terminal() &&

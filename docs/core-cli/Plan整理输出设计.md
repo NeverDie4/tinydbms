@@ -173,6 +173,9 @@ QueryPlan outputs=[name:VARCHAR, note:VARCHAR]
 - CLI 新增 `--plan`：整个调用进入计划模式；缺值、重复、与 `--help/--version` 混用等按现有参数
   规则处理（退出码 2）。`--plan` 不带参数，因此不存在"值未知"的错误类型。
 - 展示：table 格式下按普通 `QueryResult` 打印（列头 `plan`，每行一行文本）；
+  pretty 下用同一套边框表格，但关闭单元格截断与行数行——`columns=[…]` 这类计划行经常超过
+  48 列，按普通单元格截断会丢列映射（见
+  [展示格式与性能观测设计](CLI展示格式与性能观测设计.md) §3.2 第 9 条）；
   `--format json` 下按 U2 的 `query` 对象输出，不新增 schema 字段。
 - 退出码、`--error-policy`、批处理/REPL 的继续与停止规则完全不变。
 - REPL 下 `--plan` 对整个会话生效（每行都只输出计划）。
