@@ -56,6 +56,8 @@ void Worker::open_database(const QString& data_dir) {
 void Worker::execute_script(
     const QString& text,
     bool analyze_mode,
+    bool plan_only,
+    quint64 max_rows,
     quint64 snapshot_id,
     tinydbms::core::CancelToken cancel) {
     ExecutionPayload payload;
@@ -67,6 +69,12 @@ void Worker::execute_script(
         request.error_policy = analyze_mode
             ? tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining
             : tinydbms::core::ScriptErrorPolicy::kStopOnFirstError;
+        request.mode = plan_only
+            ? tinydbms::core::ExecutionMode::kPlanOnly
+            : tinydbms::core::ExecutionMode::kExecute;
+        // 入口只提供合法档位；0 属于非法值，防御性地退回默认上限。
+        request.max_query_rows =
+            max_rows == 0U ? tinydbms::core::kMaxQueryRows : static_cast<std::size_t>(max_rows);
         request.cancel = std::move(cancel);
         *result = backend_->execute_script(request);
         payload.result = result;

@@ -46,6 +46,14 @@ bool FakeBackend::last_analyze_mode() const noexcept {
     return last_analyze_mode_;
 }
 
+bool FakeBackend::last_plan_only() const noexcept {
+    return last_plan_only_;
+}
+
+std::size_t FakeBackend::last_max_rows() const noexcept {
+    return last_max_rows_;
+}
+
 bool FakeBackend::last_cancel_requested() const noexcept {
     return last_cancel_requested_.load();
 }
@@ -67,6 +75,8 @@ tinydbms::core::ExecuteScriptResult FakeBackend::execute_script(
     ++execute_calls_;
     last_script_text_ = request.text;
     last_analyze_mode_ = request.error_policy == tinydbms::core::ScriptErrorPolicy::kAnalyzeRemaining;
+    last_plan_only_ = request.mode == tinydbms::core::ExecutionMode::kPlanOnly;
+    last_max_rows_ = request.max_query_rows;
     last_cancel_requested_.store(request.cancel.cancel_requested());
     if (script_gate_ != nullptr) {
         std::shared_ptr<ScriptGate> gate = std::move(script_gate_);

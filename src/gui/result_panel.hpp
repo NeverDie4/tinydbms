@@ -10,6 +10,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 class QTableView;
 
 namespace tinydbms::gui {
@@ -39,12 +40,24 @@ public:
     // 图表数据由当前展示的查询结果派生，规则见 chart_data.hpp。
     const ChartData& chart_data() const noexcept;
 
+    // 导出与复制都基于当前展示的最后一条查询结果；没有结果时返回空字符串。
+    QString export_csv_text() const;
+    QString clipboard_text() const;
+    // 写盘内容为 UTF-8 + BOM；路径不可写时返回 false。
+    bool export_csv_to(const QString& path) const;
+
 private:
+    void export_csv();
+    void copy_to_clipboard();
+    void update_export_buttons();
+
     std::shared_ptr<const tinydbms::core::ExecuteScriptResult> payload_;
     QLabel* banner_ = nullptr;
     QTableView* table_ = nullptr;
     ChartWidget* chart_ = nullptr;
     QPlainTextEdit* statements_ = nullptr;
+    QPushButton* export_button_ = nullptr;
+    QPushButton* copy_button_ = nullptr;
     ResultModel* model_ = nullptr;
 };
 

@@ -22,6 +22,7 @@ enum class SessionState {
 // 一条语句在结果区的归类，与 StatementStatus 一一对应且保留部分成功语义。
 enum class StatementDisplay {
     kQuery,
+    kPlan,  // 计划模式（kPlanOnly）：只编译并渲染计划文本，没有执行
     kCommand,
     kPartialCommand,
     kExecutionError,

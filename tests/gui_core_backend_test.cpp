@@ -18,6 +18,7 @@
 #include <variant>
 
 #include "backend.hpp"
+#include "schema_query.hpp"
 #include "tinydbms/core.hpp"
 
 namespace {
@@ -187,6 +188,48 @@ bool test_structured_diagnostics_reach_the_gui() {
     return true;
 }
 
+// 表结构面板的系统表脚本必须能被真实 compiler 编译：分句契约要求每条语句（含末条）
+// 都以 ';' 结束，缺分号会被报成 syntax error，面板退化成“无法读取系统表”。
+// 这里直接执行 GUI 使用的那份文本，锁住两条语句都能执行并返回 QueryResult。
+bool test_schema_query_reaches_real_compiler() {
+    TemporaryDirectory directory{"tinydbms-gui-core-backend-schema"};
+    std::unique_ptr<::gui::Backend> backend = ::gui::make_backend();
+    CHECK(backend != nullptr);
+    CHECK(open(*backend, directory.path()));
+
+    const ExecuteScriptRequest request{std::string{::gui::kSchemaQueryText}};
+
+    const ExecuteScriptResult empty_catalog = backend->execute_script(request);
+    CHECK(!empty_catalog.script_error.has_value());
+    CHECK(empty_catalog.statements.size() == 2);
+    CHECK(empty_catalog.statements[0].status() == StatementStatus::kExecuted);
+    CHECK(empty_catalog.statements[1].status() == StatementStatus::kExecuted);
+    const QueryResult* empty_tables = statement_query(empty_catalog, 0);
+    const QueryResult* empty_columns = statement_query(empty_catalog, 1);
+    CHECK(empty_tables != nullptr);
+    CHECK(empty_columns != nullptr);
+    // 空库也要给出系统表自己的列名，只是没有行；表结构面板据此渲染空表格。
+    CHECK(!empty_tables->columns.empty());
+    CHECK(!empty_columns->columns.empty());
+    CHECK(empty_tables->rows.empty());
+    CHECK(empty_columns->rows.empty());
+
+    CHECK(!backend->execute_script(
+               ExecuteScriptRequest{"CREATE TABLE students (id INT, name VARCHAR);"})
+               .script_error.has_value());
+
+    const ExecuteScriptResult with_catalog = backend->execute_script(request);
+    const QueryResult* tables = statement_query(with_catalog, 0);
+    const QueryResult* columns = statement_query(with_catalog, 1);
+    CHECK(tables != nullptr);
+    CHECK(columns != nullptr);
+    CHECK(tables->rows.size() == 1);
+    CHECK(columns->rows.size() == 2);
+
+    CHECK(!backend->close().error.has_value());
+    return true;
+}
+
 // open 失败路径：GUI 在 open 失败后会无条件先 close 再 open，
 // 这里锁住 close_policy 的判定——"没有需要清理的状态"不算失败。
 bool test_open_failure_then_cleanup_is_quiet() {
@@ -216,6 +259,7 @@ int main() {
     const bool passed =
         test_round_trip_and_persistence() &&
         test_structured_diagnostics_reach_the_gui() &&
+        test_schema_query_reaches_real_compiler() &&
         test_open_failure_then_cleanup_is_quiet();
 
     if (!passed) {

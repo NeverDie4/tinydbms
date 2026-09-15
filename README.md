@@ -9,7 +9,7 @@
 - `compiler` 提供分句、词法、语法、语义、优化和 Plan 生成。
 - `core` 提供 `Database` 生命周期、Catalog 恢复、TableId 分配和脚本顺序执行；源码按 database（生命周期）、script、executor、expression、plan_text（计划渲染）与 diagnostics/analysis_catalog（诊断与 analyze 策略）拆分。
 - `storage` 提供 typed heap storage、buffer pool、record/page 编解码、cursor，以及以 System Catalog 为 schema 权威的持久化元数据。
-- `gui`（可选，`TINYDBMS_BUILD_GUI=ON`）是 Qt6 前端：结果表格与图表视图、结构化诊断列表、运行中取消；与 CLI 一样只调用 core 公共 API。
+- `gui`（可选，`TINYDBMS_BUILD_GUI=ON`）是 Qt6 前端：结果表格与图表视图、结构化诊断列表、运行中取消、计划模式（只编译不执行）、结果上限档位与结果导出（CSV / 剪贴板）；与 CLI 一样只调用 core 公共 API。
 - 默认构建仍通过不可用 Session 适配器验证 CLI 边界；完整 SQL 链路需要启用 `TINYDBMS_ENABLE_REAL_MODULES=ON`。
 
 ## 当前架构

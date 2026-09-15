@@ -24,6 +24,8 @@ public slots:
     void execute_script(
         const QString& text,
         bool analyze_mode,
+        bool plan_only,
+        quint64 max_rows,
         quint64 snapshot_id,
         tinydbms::core::CancelToken cancel);
     void close_database();

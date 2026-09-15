@@ -1,9 +1,13 @@
 #include <QApplication>
+#include <QClipboard>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QPixmap>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QTableView>
 #include <QThread>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -12,6 +16,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,8 +30,10 @@
 #include "fakes/gui_backend_fake.hpp"
 #include "main_window.hpp"
 #include "result_model.hpp"
+#include "result_export.hpp"
 #include "result_panel.hpp"
 #include "schema_browser.hpp"
+#include "schema_query.hpp"
 #include "script_editor.hpp"
 #include "session_state.hpp"
 #include "source_mapping.hpp"
@@ -53,6 +60,7 @@ using tinydbms::core::StatementStatus;
 using tinydbms::gui::ChartData;
 using tinydbms::gui::ChartWidget;
 using tinydbms::gui::DiagnosticList;
+using tinydbms::gui::DiagnosticSpan;
 using tinydbms::gui::EditorRange;
 using tinydbms::gui::MainWindow;
 using tinydbms::gui::ResultModel;
@@ -177,6 +185,25 @@ ExecuteScriptResult schema_result() {
 ExecuteScriptResult query_result() {
     ExecuteScriptResult result;
     result.statements.push_back(executed_query(0, range_of(0, 20), make_query()));
+    return result;
+}
+
+ExecuteScriptResult plan_result() {
+    QueryResult plan;
+    plan.columns = std::vector<ColumnHeader>{ColumnHeader{"plan", Type::kVarchar}};
+    plan.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::string{"QueryPlan outputs=[id:INT, name:VARCHAR]"}}},
+        tinydbms::core::Row{Value{std::string{"  SeqScan t1"}}}};
+    ExecuteScriptResult result;
+    result.statements.push_back(
+        StatementResult::plan_only(0, range_of(0, 20), std::move(plan)));
+    return result;
+}
+
+ExecuteScriptResult plan_with_error_result() {
+    ExecuteScriptResult result = plan_result();
+    result.statements.push_back(
+        StatementResult::compile_error(1, range_of(21, 36), fix_it_error(range_of(21, 26))));
     return result;
 }
 
@@ -345,6 +372,214 @@ bool test_result_panel_chart_view() {
     return true;
 }
 
+// 多条语句只有最后一条查询结果上屏；模型重置次数必须与语句数无关。
+bool test_result_panel_single_model_reset() {
+    QueryResult tail;
+    tail.columns = std::vector<ColumnHeader>{ColumnHeader{"v", Type::kInt}};
+    tail.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::int32_t{7}}}};
+
+    ExecuteScriptResult result;
+    result.statements.push_back(executed_query(0, range_of(0, 5), make_query()));
+    result.statements.push_back(executed_command(1, range_of(6, 10), 2));
+    result.statements.push_back(executed_query(2, range_of(11, 15), std::move(tail)));
+    auto payload = std::make_shared<ExecuteScriptResult>(std::move(result));
+
+    ResultPanel panel;
+    int resets = 0;
+    QObject::connect(
+        panel.model(),
+        &QAbstractItemModel::modelReset,
+        panel.model(),
+        [&resets] { ++resets; });
+
+    panel.show_result(payload);
+    CHECK(resets == 1);
+    CHECK(panel.model()->rowCount() == 1);
+    const auto* expected = std::get_if<QueryResult>(
+        &payload->statements[2].outcome()->outcome);
+    CHECK(expected != nullptr);
+    CHECK(panel.model()->query() == expected);
+
+    // 没有查询结果的脚本同样只重置一次，并把模型清空。
+    ExecuteScriptResult command_only;
+    command_only.statements.push_back(executed_command(0, range_of(0, 4), 1));
+    auto command_payload = std::make_shared<ExecuteScriptResult>(std::move(command_only));
+    resets = 0;
+    panel.show_result(command_payload);
+    CHECK(resets == 1);
+    CHECK(panel.model()->query() == nullptr);
+    CHECK(panel.model()->rowCount() == 0);
+
+    resets = 0;
+    panel.show_notice(QStringLiteral("打开失败"));
+    CHECK(resets == 1);
+    CHECK(panel.model()->query() == nullptr);
+    return true;
+}
+
+// 小结果按内容自适应列宽，并夹在上下限之间；大结果不做测量，使用固定宽度。
+bool test_result_panel_column_widths() {
+    ResultPanel panel;
+    QTableView* table = panel.findChild<QTableView*>();
+    CHECK(table != nullptr);
+
+    QueryResult small;
+    small.columns = std::vector<ColumnHeader>{ColumnHeader{"name", Type::kVarchar}};
+    small.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::string(400, 'x')}}};
+    ExecuteScriptResult small_result;
+    small_result.statements.push_back(
+        executed_query(0, range_of(0, 5), std::move(small)));
+    panel.show_result(std::make_shared<ExecuteScriptResult>(std::move(small_result)));
+    // 超出上限的长值被钳制到最大列宽，不把结果区撑开。
+    CHECK(table->columnWidth(0) == 320);
+
+    QueryResult large;
+    large.columns = std::vector<ColumnHeader>{ColumnHeader{"name", Type::kVarchar}};
+    large.rows.reserve(300);
+    for (int row = 0; row < 300; ++row) {
+        large.rows.push_back(tinydbms::core::Row{Value{std::string{"value"}}});
+    }
+    ExecuteScriptResult large_result;
+    large_result.statements.push_back(
+        executed_query(0, range_of(0, 5), std::move(large)));
+    panel.show_result(std::make_shared<ExecuteScriptResult>(std::move(large_result)));
+    CHECK(table->columnWidth(0) == 100);
+    return true;
+}
+
+bool test_editor_executable_text_and_diagnostics() {
+    ScriptEditor editor;
+    // 缓存按需计算：空文本、纯空白都不是可执行内容，文本变化后必须失效。
+    CHECK(!editor.has_executable_text());
+    editor.setPlainText(QStringLiteral("   \t \n  "));
+    CHECK(!editor.has_executable_text());
+
+    const QString script = QString::fromUtf8("SELECT '中' FROM t;\nSELECT * FROM u;");
+    editor.setPlainText(script);
+    CHECK(editor.has_executable_text());
+
+    const std::size_t total = static_cast<std::size_t>(script.toUtf8().size());
+    const std::vector<DiagnosticSpan> spans{
+        DiagnosticSpan{range_of(0, 6), false},
+        DiagnosticSpan{range_of(7, 10), true},
+        // 越界范围被忽略，不影响其余高亮。
+        DiagnosticSpan{range_of(total + 5U, total + 9U), true}};
+    editor.apply_diagnostics(spans);
+    CHECK(editor.extraSelections().size() == 2);
+
+    editor.apply_diagnostics(std::vector<DiagnosticSpan>{});
+    CHECK(editor.extraSelections().isEmpty());
+
+    editor.clear();
+    CHECK(!editor.has_executable_text());
+    return true;
+}
+
+// 计划模式与结果上限必须原样到达请求；表结构刷新固定用执行模式与默认上限。
+bool test_execution_options_reach_core() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    backend.queue_script(schema_result());
+    backend.queue_script(plan_result());
+    backend.queue_script(query_result());
+
+    MainWindow window{backend};
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-options"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+    // 打开后的表结构刷新：执行模式 + 默认上限，不受工具栏档位影响。
+    CHECK(backend.execute_calls() == 1);
+    CHECK(!backend.last_plan_only());
+    CHECK(backend.last_max_rows() == tinydbms::core::kMaxQueryRows);
+
+    window.script_editor()->setPlainText(QStringLiteral("SELECT * FROM t1"));
+    window.set_plan_mode(true);
+    window.set_max_rows(1000);
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(backend.last_plan_only());
+    CHECK(backend.last_max_rows() == 1000U);
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("已生成计划")));
+
+    // 关掉计划模式：回到执行，上限档位保持不变。
+    window.set_plan_mode(false);
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(!backend.last_plan_only());
+    CHECK(backend.last_max_rows() == 1000U);
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("执行完成")));
+    return true;
+}
+
+// 导出口径：CSV 转义、CRLF 行尾、UTF-8 BOM；剪贴板用制表符分隔。
+bool test_result_export_and_clipboard() {
+    QueryResult query;
+    query.columns = std::vector<ColumnHeader>{
+        ColumnHeader{"name", Type::kVarchar},
+        ColumnHeader{"note", Type::kVarchar}};
+    query.rows = std::vector<tinydbms::core::Row>{
+        tinydbms::core::Row{Value{std::string{"a,b"}}, Value{std::string{"say \"hi\""}}},
+        tinydbms::core::Row{Value{std::string{"中文"}}, Value{std::monostate{}}},
+        tinydbms::core::Row{Value{std::string{"line1\nline2"}}, Value{std::string{"x"}}}};
+
+    const QString csv = tinydbms::gui::csv_text(query);
+    CHECK(csv == QStringLiteral(
+        "name,note\r\n"
+        "\"a,b\",\"say \"\"hi\"\"\"\r\n"
+        "中文,NULL\r\n"
+        "\"line1\nline2\",x\r\n"));
+    const QString tsv = tinydbms::gui::tsv_text(query);
+    CHECK(tsv.startsWith(QStringLiteral("name\tnote\n")));
+    CHECK(tsv.endsWith(QStringLiteral("\"line1\nline2\"\tx\n")));
+    CHECK(!tsv.contains(QLatin1Char('\r')));
+
+    const QByteArray bytes = tinydbms::gui::csv_bytes(query);
+    CHECK(bytes.startsWith(QByteArray{"\xEF\xBB\xBF"}));
+    CHECK(bytes.size() == 3 + csv.toUtf8().size());
+
+    ExecuteScriptResult result;
+    result.statements.push_back(executed_query(0, range_of(0, 5), std::move(query)));
+    auto payload = std::make_shared<ExecuteScriptResult>(std::move(result));
+
+    ResultPanel panel;
+    CHECK(panel.export_csv_text().isEmpty());
+    CHECK(panel.clipboard_text().isEmpty());
+    panel.show_result(payload);
+    CHECK(panel.export_csv_text() == csv);
+    CHECK(panel.clipboard_text() == tsv);
+
+    const QString path = QDir::tempPath() + QStringLiteral("/tinydbms-gui-export-test.csv");
+    CHECK(panel.export_csv_to(path));
+    QFile file{path};
+    CHECK(file.open(QIODevice::ReadOnly));
+    CHECK(file.readAll() == bytes);
+    file.close();
+    CHECK(QFile::remove(path));
+
+    // 「复制」按钮走同一条路径；离屏环境没有剪贴板时只跳过回读断言。
+    QApplication::clipboard()->setText(QStringLiteral("probe"));
+    const bool clipboard_available =
+        QApplication::clipboard()->text() == QStringLiteral("probe");
+    if (clipboard_available) {
+        QPushButton* copy_button = nullptr;
+        for (QPushButton* button : panel.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("复制")) {
+                copy_button = button;
+            }
+        }
+        CHECK(copy_button != nullptr);
+        copy_button->click();
+        CHECK(QApplication::clipboard()->text() == tsv);
+    }
+
+    panel.show_notice(QStringLiteral("打开失败"));
+    CHECK(panel.export_csv_text().isEmpty());
+    return true;
+}
+
 bool test_cancel_button_requests_cancellation() {
     FakeBackend backend;
     backend.queue_open(OpenDatabaseResult{std::nullopt});
@@ -437,6 +672,12 @@ ExecuteScriptResult compile_error_result() {
     return result;
 }
 
+ExecuteScriptResult command_result() {
+    ExecuteScriptResult result;
+    result.statements.push_back(executed_command(0, range_of(0, 12), 3));
+    return result;
+}
+
 ExecuteScriptResult internal_error_result() {
     ExecuteScriptResult result;
     result.script_error = Error{
@@ -514,6 +755,37 @@ bool test_utf8_offset_mapping() {
     CHECK(empty_range->end == 3);
     CHECK(!tinydbms::gui::editor_range(script, range_of(0, 100)).has_value());
     CHECK(!tinydbms::gui::editor_range(script, range_of(5, 2)).has_value());
+
+    // 批量换算必须与逐个换算逐项一致：覆盖字符内部、越界与反向区间。
+    const std::vector<QString> samples{
+        mixed,
+        emoji,
+        crlf,
+        tab,
+        empty,
+        QString::fromUtf8("SELECT '中' AS a, '😀' AS b")};
+    for (const QString& sample : samples) {
+        const std::size_t total = static_cast<std::size_t>(sample.toUtf8().size());
+        std::vector<SourceRange> ranges;
+        for (std::size_t begin = 0; begin <= total + 1U; ++begin) {
+            for (std::size_t end = 0; end <= total + 1U; ++end) {
+                ranges.push_back(range_of(begin, end));
+            }
+        }
+        const std::vector<std::optional<EditorRange>> batched =
+            tinydbms::gui::editor_ranges(sample, ranges);
+        CHECK(batched.size() == ranges.size());
+        for (std::size_t index = 0; index < ranges.size(); ++index) {
+            const std::optional<EditorRange> single =
+                tinydbms::gui::editor_range(sample, ranges[index]);
+            CHECK(batched[index].has_value() == single.has_value());
+            if (single.has_value()) {
+                CHECK(batched[index]->begin == single->begin);
+                CHECK(batched[index]->end == single->end);
+            }
+        }
+    }
+    CHECK(tinydbms::gui::editor_ranges(mixed, {}).empty());
     return true;
 }
 
@@ -575,10 +847,10 @@ bool test_plan_only_statement_view() {
 
     const std::vector<StatementView> views = tinydbms::gui::build_statement_views(result);
     CHECK(views.size() == 1);
-    CHECK(views[0].display == StatementDisplay::kQuery);
+    CHECK(views[0].display == StatementDisplay::kPlan);
     CHECK(views[0].query != nullptr);
     CHECK(views[0].query->rows.size() == 2);
-    CHECK(views[0].summary.contains(QStringLiteral("查询返回 2 行")));
+    CHECK(views[0].summary.contains(QStringLiteral("计划 2 行文本（未执行）")));
     CHECK(views[0].detail.isEmpty());
     return true;
 }
@@ -642,6 +914,7 @@ bool test_window_open_query_flow() {
     MainWindow window{backend};
     window.show();
     CHECK(!window.execute_enabled());
+    CHECK(!window.schema_browser()->refresh_enabled());
 
     window.script_editor()->setPlainText(QStringLiteral("SELECT * FROM t1"));
     window.open_directory(QStringLiteral("/tmp/tdb-gui-test-a"));
@@ -652,6 +925,7 @@ bool test_window_open_query_flow() {
     CHECK(window.session_state_text().contains(QStringLiteral("已打开")));
     CHECK(window.session_state_text().contains(QStringLiteral("/tmp/tdb-gui-test-a")));
     CHECK(window.schema_browser()->column_count() == 2);
+    CHECK(window.schema_browser()->refresh_enabled());
     CHECK(window.execute_enabled());
 
     window.execute_editor_text();
@@ -700,6 +974,13 @@ bool test_schema_browser_groups_columns_by_table_id() {
         return window.session_state() == SessionState::kOpen && !window.is_busy() &&
             window.schema_browser()->table_count() == 2;
     }));
+
+    // 分句契约要求每条语句（含末条）以 ';' 结束：真实 compiler 对缺少结尾分号的
+    // 语句报 syntax error，表结构面板会退化成“无法读取系统表”。这里锁住刷新文本，
+    // 真实 compiler 对这一文本的行为由 tests/gui_core_backend_test.cpp 覆盖。
+    const std::string schema_query = backend.last_script_text();
+    CHECK(schema_query == std::string{tinydbms::gui::kSchemaQueryText});
+    CHECK(schema_query.ends_with(';'));
 
     SchemaBrowser* schema = window.schema_browser();
     auto* tree = schema->findChild<QTreeWidget*>();
@@ -753,6 +1034,31 @@ bool test_compile_error_and_fix_it() {
     return true;
 }
 
+// 执行期间编辑器被修改后，旧结果到达时不得把旧范围重新高亮到新文本上。
+bool test_stale_result_does_not_rehighlight_editor() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    backend.queue_script(schema_result());
+    backend.queue_script(compile_error_result());
+
+    MainWindow window{backend};
+    window.script_editor()->setPlainText(QStringLiteral("SELCT id FROM t1"));
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-stale-diagnostics"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+
+    window.execute_editor_text();
+    CHECK(window.is_busy());
+    window.script_editor()->setPlainText(QStringLiteral("SELECT id FROM t2"));
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+
+    CHECK(window.diagnostic_list()->row_count() == 1);
+    CHECK(!window.diagnostic_list()->fix_button_enabled());
+    CHECK(window.script_editor()->extraSelections().isEmpty());
+    return true;
+}
+
 bool test_internal_error_requires_reopen() {
     FakeBackend backend;
     backend.queue_open(OpenDatabaseResult{std::nullopt});
@@ -770,6 +1076,7 @@ bool test_internal_error_requires_reopen() {
     CHECK(wait_until([&] { return !window.is_busy(); }));
     CHECK(window.session_state() == SessionState::kNeedsReopen);
     CHECK(!window.execute_enabled());
+    CHECK(!window.schema_browser()->refresh_enabled());
     // 会话失效后旧结构不再可信：表浏览器必须清空而不是继续展示
     CHECK(window.schema_browser()->table_count() == 0);
     CHECK(!window.schema_browser()->status_text().isEmpty());
@@ -786,6 +1093,102 @@ bool test_internal_error_requires_reopen() {
     }));
     CHECK(backend.close_calls() == 1);
     CHECK(backend.open_calls() == 2);
+    CHECK(window.schema_browser()->refresh_enabled());
+    return true;
+}
+
+// 状态栏文案必须区分「跑完且没问题」与「跑完但语句出错」：后者不能报「执行完成」。
+bool test_status_message_reports_failures() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    backend.queue_script(schema_result());
+    backend.queue_script(compile_error_result());
+    backend.queue_script(query_result());
+
+    MainWindow window{backend};
+    window.script_editor()->setPlainText(QStringLiteral("SELECT * FROM t1"));
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-status"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("1 条语句出错")));
+    CHECK(!window.statusBar()->currentMessage().contains(QStringLiteral("执行完成")));
+
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("执行完成")));
+    return true;
+}
+
+// 计划模式里只要有一条失败，状态栏必须报失败，不能被另一条成功的 plan 语句覆盖。
+bool test_plan_status_prioritizes_errors() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    backend.queue_script(schema_result());
+    backend.queue_script(plan_with_error_result());
+
+    MainWindow window{backend};
+    window.set_plan_mode(true);
+    window.script_editor()->setPlainText(
+        QStringLiteral("SELECT * FROM t1;\nSELCT * FROM t1;"));
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-plan-error"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("1 条语句出错")));
+    CHECK(!window.statusBar()->currentMessage().contains(QStringLiteral("已生成计划")));
+    return true;
+}
+
+// 成功的写语句可能改变 Catalog：执行后必须自动刷新表结构；纯查询脚本不额外刷新。
+bool test_write_statement_refreshes_schema() {
+    FakeBackend backend;
+    backend.queue_open(OpenDatabaseResult{std::nullopt});
+    backend.queue_script(schema_result());
+    backend.queue_script(command_result());
+    backend.queue_script(schema_result());
+    backend.queue_script(query_result());
+
+    MainWindow window{backend};
+    window.script_editor()->setPlainText(QStringLiteral("INSERT INTO t1 VALUES (1);"));
+    window.open_directory(QStringLiteral("/tmp/tdb-gui-test-refresh"));
+    CHECK(wait_until([&] {
+        return window.session_state() == SessionState::kOpen && !window.is_busy();
+    }));
+    // open 之后只刷新了一次表结构。
+    CHECK(backend.execute_calls() == 1);
+
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    // 写语句 + 自动刷新 = 多两次调用，且刷新结果真的进了面板。
+    CHECK(backend.execute_calls() == 3);
+    CHECK(window.schema_browser()->table_count() == 1);
+
+    window.execute_editor_text();
+    CHECK(wait_until([&] { return !window.is_busy(); }));
+    // 查询不改 Catalog：不触发刷新。
+    CHECK(backend.execute_calls() == 4);
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("执行完成")));
+    return true;
+}
+
+// y 轴刻度标签：小数位由步长决定，避免 101.588 / 76.1906 这类噪声。
+bool test_chart_axis_labels() {
+    using tinydbms::gui::axis_label_text;
+    CHECK(axis_label_text(101.588, 25.3969) == QStringLiteral("101.6"));
+    CHECK(axis_label_text(76.1906, 25.3969) == QStringLiteral("76.2"));
+    CHECK(axis_label_text(0.0, 25.3969) == QStringLiteral("0.0"));
+    CHECK(axis_label_text(2500.0, 250.0) == QStringLiteral("2500"));
+    CHECK(axis_label_text(0.25, 0.0125) == QStringLiteral("0.250"));
+    // 步长非法时退回通用格式，不产生空标签。
+    CHECK(axis_label_text(3.0, 0.0) == QStringLiteral("3"));
+    CHECK(axis_label_text(std::numeric_limits<double>::quiet_NaN(), 1.0).isEmpty());
     return true;
 }
 
@@ -807,8 +1210,12 @@ bool test_compile_script_error_keeps_session() {
     CHECK(window.session_state() == SessionState::kOpen);
     CHECK(window.execute_enabled());
     CHECK(!window.result_panel()->banner_text().isEmpty());
+    // 分句失败不产生语句结果：不能说「没有可执行语句」（那是输入为空时的提示），
+    // 只说脚本已经中止；状态栏同样不能报「执行完成」。
     CHECK(
-        window.result_panel()->statement_text().contains(QStringLiteral("没有可执行语句")));
+        window.result_panel()->statement_text().contains(
+            QStringLiteral("脚本已在执行前中止")));
+    CHECK(window.statusBar()->currentMessage().contains(QStringLiteral("执行中止")));
     return true;
 }
 
@@ -822,6 +1229,7 @@ bool test_open_failure_disables_editor() {
     CHECK(wait_until([&] { return !window.is_busy(); }));
     CHECK(window.session_state() == SessionState::kClosed);
     CHECK(!window.execute_enabled());
+    CHECK(!window.schema_browser()->refresh_enabled());
     CHECK(window.script_editor()->isReadOnly());
     CHECK(window.result_panel()->banner_text().contains(QStringLiteral("打开失败")));
     CHECK(backend.execute_calls() == 0);
@@ -1002,6 +1410,15 @@ int main(int argc, char* argv[]) {
     run("chart_data_selects_numeric_series", test_chart_data_selects_numeric_series);
     run("chart_data_axis_fallback_and_truncation", test_chart_data_axis_fallback_and_truncation);
     run("result_panel_chart_view", test_result_panel_chart_view);
+    run("result_panel_single_model_reset", test_result_panel_single_model_reset);
+    run("result_panel_column_widths", test_result_panel_column_widths);
+    run("editor_executable_text_and_diagnostics", test_editor_executable_text_and_diagnostics);
+    run("execution_options_reach_core", test_execution_options_reach_core);
+    run("result_export_and_clipboard", test_result_export_and_clipboard);
+    run("chart_axis_labels", test_chart_axis_labels);
+    run("status_message_reports_failures", test_status_message_reports_failures);
+    run("plan_status_prioritizes_errors", test_plan_status_prioritizes_errors);
+    run("write_statement_refreshes_schema", test_write_statement_refreshes_schema);
     run("cancel_button_requests_cancellation", test_cancel_button_requests_cancellation);
     run("session_state_transitions", test_session_state_transitions);
     run("close_policy_filters_not_open", test_close_policy_filters_not_open);
@@ -1009,6 +1426,8 @@ int main(int argc, char* argv[]) {
     run("schema_browser_groups_columns_by_table_id",
         test_schema_browser_groups_columns_by_table_id);
     run("compile_error_and_fix_it", test_compile_error_and_fix_it);
+    run("stale_result_does_not_rehighlight_editor",
+        test_stale_result_does_not_rehighlight_editor);
     run("internal_error_requires_reopen", test_internal_error_requires_reopen);
     run("compile_script_error_keeps_session", test_compile_script_error_keeps_session);
     run("open_failure_disables_editor", test_open_failure_disables_editor);

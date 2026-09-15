@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <vector>
 
 #include <QString>
 
@@ -24,6 +25,13 @@ std::optional<int> utf8_offset_to_index(const QString& text, std::size_t byte_of
 std::optional<EditorRange> editor_range(
     const QString& text,
     const tinydbms::SourceRange& range);
+
+// 批量换算：一次遍历文本解析所有范围，顺序与输入一致，结果与逐个调用 editor_range 相同。
+// 单个范围的换算需要从头扫描文本，诊断数多时会退化成 O(范围数 × 文本长度)；
+// 这里的复杂度是 O(文本长度 + 范围数 log 范围数)。
+std::vector<std::optional<EditorRange>> editor_ranges(
+    const QString& text,
+    const std::vector<tinydbms::SourceRange>& ranges);
 
 }  // namespace tinydbms::gui
 

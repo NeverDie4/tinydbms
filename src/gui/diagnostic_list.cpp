@@ -19,7 +19,13 @@ DiagnosticList::DiagnosticList(QWidget* parent) : QWidget{parent} {
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
-    table_->horizontalHeader()->setStretchLastSection(true);
+    // 前三列按内容自适应（否则「编译错误（语法）」会被默认列宽截断成「编译错误（语…」），
+    // 说明列吃掉剩余宽度；内容更长时由表格自己滚动，不挤压前三列。
+    QHeaderView* header = table_->horizontalHeader();
+    header->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(3, QHeaderView::Stretch);
     table_->verticalHeader()->setVisible(false);
 
     fix_button_ = new QPushButton{QStringLiteral("应用修复"), this};

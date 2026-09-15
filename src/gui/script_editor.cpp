@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QList>
 #include <QTextCharFormat>
+#include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 
@@ -47,7 +48,10 @@ QTextEdit::ExtraSelection make_selection(
 
 ScriptEditor::ScriptEditor(QWidget* parent) : QPlainTextEdit{parent} {
     setLineWrapMode(QPlainTextEdit::NoWrap);
-    connect(this, &QPlainTextEdit::textChanged, this, &ScriptEditor::text_edited);
+    connect(this, &QPlainTextEdit::textChanged, this, [this] {
+        has_executable_text_.reset();
+        emit text_edited();
+    });
 }
 
 void ScriptEditor::clear_diagnostics() {
@@ -56,13 +60,19 @@ void ScriptEditor::clear_diagnostics() {
 
 void ScriptEditor::apply_diagnostics(const std::vector<DiagnosticSpan>& spans) {
     const QString text = toPlainText();
-    QList<QTextEdit::ExtraSelection> selections;
+    std::vector<tinydbms::SourceRange> ranges;
+    ranges.reserve(spans.size());
     for (const DiagnosticSpan& span : spans) {
-        const std::optional<EditorRange> range = editor_range(text, span.range);
-        if (!range.has_value()) {
+        ranges.push_back(span.range);
+    }
+    const std::vector<std::optional<EditorRange>> mapped = editor_ranges(text, ranges);
+
+    QList<QTextEdit::ExtraSelection> selections;
+    for (std::size_t index = 0; index < spans.size(); ++index) {
+        if (!mapped[index].has_value()) {
             continue;
         }
-        selections.append(make_selection(document(), *range, span.error));
+        selections.append(make_selection(document(), *mapped[index], spans[index].error));
     }
     setExtraSelections(selections);
 }
@@ -77,6 +87,25 @@ bool ScriptEditor::apply_fix(const tinydbms::FixIt& fix) {
     cursor.setPosition(range->end, QTextCursor::KeepAnchor);
     cursor.insertText(QString::fromUtf8(fix.replacement));
     return true;
+}
+
+bool ScriptEditor::has_executable_text() const {
+    if (!has_executable_text_.has_value()) {
+        has_executable_text_ = compute_executable_text();
+    }
+    return *has_executable_text_;
+}
+
+bool ScriptEditor::compute_executable_text() const {
+    // 等价于 !toPlainText().trimmed().isEmpty()，但不复制整篇文档。
+    for (QTextBlock block = document()->begin(); block.isValid(); block = block.next()) {
+        for (const QChar character : block.text()) {
+            if (!character.isSpace()) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace tinydbms::gui

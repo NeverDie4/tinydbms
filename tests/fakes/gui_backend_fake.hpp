@@ -2,6 +2,7 @@
 #define TINYDBMS_TESTS_GUI_BACKEND_FAKE_HPP
 
 #include <atomic>
+#include <cstddef>
 #include <deque>
 #include <memory>
 #include <string>
@@ -33,6 +34,8 @@ public:
     const std::vector<std::string>& opened_dirs() const noexcept;
     const std::string& last_script_text() const noexcept;
     bool last_analyze_mode() const noexcept;
+    bool last_plan_only() const noexcept;
+    std::size_t last_max_rows() const noexcept;
     bool last_cancel_requested() const noexcept;
 
     tinydbms::core::OpenDatabaseResult open(
@@ -48,6 +51,8 @@ private:
     std::vector<std::string> opened_dirs_;
     std::string last_script_text_;
     bool last_analyze_mode_ = false;
+    bool last_plan_only_ = false;
+    std::size_t last_max_rows_ = 0;
     std::shared_ptr<ScriptGate> script_gate_;
     std::atomic<bool> last_cancel_requested_{false};
     int open_calls_ = 0;

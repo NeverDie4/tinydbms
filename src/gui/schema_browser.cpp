@@ -47,21 +47,22 @@ SchemaBrowser::SchemaBrowser(QWidget* parent) : QWidget{parent} {
     tree_->setHeaderLabels(QStringList{QStringLiteral("对象"), QStringLiteral("类型")});
     tree_->setRootIsDecorated(true);
 
-    auto* refresh_button = new QPushButton{QStringLiteral("刷新表结构"), this};
+    refresh_button_ = new QPushButton{QStringLiteral("刷新表结构"), this};
     status_ = new QLabel{this};
     status_->setWordWrap(true);
 
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(refresh_button);
+    layout->addWidget(refresh_button_);
     layout->addWidget(tree_, 1);
     layout->addWidget(status_);
 
-    connect(refresh_button, &QPushButton::clicked, this, &SchemaBrowser::refresh_requested);
+    connect(refresh_button_, &QPushButton::clicked, this, &SchemaBrowser::refresh_requested);
 }
 
 void SchemaBrowser::set_tables(const tinydbms::core::QueryResult& tables) {
     tree_->clear();
+    table_items_.clear();
     column_count_ = 0;
 
     const auto id_column = column_index(tables, "table_id");
@@ -77,6 +78,10 @@ void SchemaBrowser::set_tables(const tinydbms::core::QueryResult& tables) {
         item->setText(1, QStringLiteral("%1 列").arg(count));
         // 父子关系按 table_id 关联，不做文本匹配：表名本身可能以 "(数字)" 结尾。
         item->setData(0, Qt::UserRole, id);
+        // 同一 table_id 重复出现时保留第一个，与旧的线性查找语义一致。
+        if (!table_items_.contains(id)) {
+            table_items_.insert(id, item);
+        }
     }
 }
 
@@ -88,14 +93,7 @@ void SchemaBrowser::set_columns(const tinydbms::core::QueryResult& columns) {
 
     for (std::size_t row = 0; row < columns.rows.size(); ++row) {
         const QString id = cell_text(columns, row, id_column);
-        QTreeWidgetItem* parent = nullptr;
-        for (int index = 0; index < tree_->topLevelItemCount(); ++index) {
-            QTreeWidgetItem* candidate = tree_->topLevelItem(index);
-            if (candidate->data(0, Qt::UserRole).toString() == id) {
-                parent = candidate;
-                break;
-            }
-        }
+        QTreeWidgetItem* parent = table_items_.value(id, nullptr);
         if (parent == nullptr) {
             continue;
         }
@@ -115,8 +113,13 @@ void SchemaBrowser::set_status_text(const QString& text) {
     status_->setText(text);
 }
 
+void SchemaBrowser::set_refresh_enabled(bool enabled) {
+    refresh_button_->setEnabled(enabled);
+}
+
 void SchemaBrowser::clear() {
     tree_->clear();
+    table_items_.clear();
     status_->clear();
     column_count_ = 0;
 }
@@ -131,6 +134,10 @@ int SchemaBrowser::column_count() const {
 
 QString SchemaBrowser::status_text() const {
     return status_->text();
+}
+
+bool SchemaBrowser::refresh_enabled() const {
+    return refresh_button_->isEnabled();
 }
 
 }  // namespace tinydbms::gui

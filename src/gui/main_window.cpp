@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -24,6 +25,7 @@
 #include "diagnostic_list.hpp"
 #include "result_panel.hpp"
 #include "schema_browser.hpp"
+#include "schema_query.hpp"
 #include "script_editor.hpp"
 #include "worker.hpp"
 
@@ -34,12 +36,54 @@ namespace {
 // GUI 使用自己的常量，并由 tests/gui_ui_test.cpp 交叉断言两者一致。
 constexpr const char* kDefaultDataDir = "./tinydbms-data";
 
-constexpr const char* kSchemaQuery =
-    "SELECT * FROM tdb_sys_tables; SELECT * FROM tdb_sys_columns";
-
 bool contains_cancelled_statement(const tinydbms::core::ExecuteScriptResult& result) {
     for (const tinydbms::core::StatementResult& statement : result.statements) {
         if (statement.status() == tinydbms::core::StatementStatus::kCancelled) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool contains_plan_statement(const tinydbms::core::ExecuteScriptResult& result) {
+    for (const tinydbms::core::StatementResult& statement : result.statements) {
+        if (statement.status() == tinydbms::core::StatementStatus::kPlanOnly) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 有明确错误结论的语句数。已跳过、已取消、已分析是策略与用户动作的结果，
+// 不是错误本身，不计入这里——它们各自的语句行已经说明了情况。
+int count_failed_statements(const tinydbms::core::ExecuteScriptResult& result) {
+    int failed = 0;
+    for (const tinydbms::core::StatementResult& statement : result.statements) {
+        switch (statement.status()) {
+        case tinydbms::core::StatementStatus::kCompileError:
+        case tinydbms::core::StatementStatus::kExecutionError:
+        case tinydbms::core::StatementStatus::kAnalysisError:
+        case tinydbms::core::StatementStatus::kExecutionIndeterminate:
+            ++failed;
+            break;
+        default:
+            break;
+        }
+    }
+    return failed;
+}
+
+// 是否出现成功执行的非查询语句。CommandResult 不区分 DDL 与 DML，因此这里对所有
+// 成功写语句都返回 true：Catalog 可能已被改变，GUI 需要刷新表结构。
+bool has_successful_command(const tinydbms::core::ExecuteScriptResult& result) {
+    for (const tinydbms::core::StatementResult& statement : result.statements) {
+        if (statement.status() != tinydbms::core::StatementStatus::kExecuted ||
+            !statement.outcome().has_value()) {
+            continue;
+        }
+        const auto* command =
+            std::get_if<tinydbms::core::CommandResult>(&statement.outcome()->outcome);
+        if (command != nullptr && !command->error.has_value()) {
             return true;
         }
     }
@@ -83,6 +127,15 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
     cancel_button_ = new QPushButton{QStringLiteral("取消"), this};
     analyze_box_ = new QCheckBox{
         QStringLiteral("出错后继续分析剩余语句（首错后的语句只分析、不执行）"), this};
+    plan_box_ = new QCheckBox{QStringLiteral("只编译，不执行（查看计划）"), this};
+    rows_box_ = new QComboBox{this};
+    rows_box_->setToolTip(QStringLiteral("单条语句在内存中物化的最大行数"));
+    rows_box_->addItem(
+        QStringLiteral("上限：默认"),
+        static_cast<qulonglong>(tinydbms::core::kMaxQueryRows));
+    rows_box_->addItem(QStringLiteral("上限：1000"), static_cast<qulonglong>(1000));
+    rows_box_->addItem(QStringLiteral("上限：10000"), static_cast<qulonglong>(10000));
+    rows_box_->addItem(QStringLiteral("上限：100000"), static_cast<qulonglong>(100000));
     path_label_ = new QLabel{this};
     // 连接状态常驻状态栏右侧；状态栏左侧留给「没有可执行语句」「执行完成，用时 N ms」
     // 这类临时消息，两者互不覆盖。
@@ -93,6 +146,8 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
     toolbar->addWidget(execute_button_);
     toolbar->addWidget(cancel_button_);
     toolbar->addWidget(analyze_box_);
+    toolbar->addWidget(plan_box_);
+    toolbar->addWidget(rows_box_);
     toolbar->addWidget(path_label_);
 
     auto* execute_action = new QAction{this};
@@ -114,6 +169,7 @@ MainWindow::MainWindow(Backend& backend, QWidget* parent)
     connect(execute_button_, &QPushButton::clicked, this, &MainWindow::execute_editor_text);
     connect(cancel_button_, &QPushButton::clicked, this, &MainWindow::request_cancel);
     connect(analyze_box_, &QCheckBox::toggled, this, [this](bool) { update_controls(); });
+    connect(plan_box_, &QCheckBox::toggled, this, [this](bool) { update_controls(); });
     connect(editor_, &ScriptEditor::text_edited, this, &MainWindow::on_editor_text_edited);
     connect(diagnostics_, &DiagnosticList::fix_requested, this, &MainWindow::on_fix_requested);
     connect(schema_, &SchemaBrowser::refresh_requested, this, [this] { refresh_schema_browser(); });
@@ -167,12 +223,12 @@ void MainWindow::execute_editor_text() {
     if (state_ != SessionState::kOpen || busy_) {
         return;
     }
-    const QString text = editor_->toPlainText();
-    if (text.trimmed().isEmpty()) {
+    if (!editor_->has_executable_text()) {
         // 不覆盖上一次的结果，只在状态栏提示。
         statusBar()->showMessage(QStringLiteral("没有可执行语句"), 5000);
         return;
     }
+    const QString text = editor_->toPlainText();
 
     executed_snapshot_ = text;
     executed_snapshot_id_ = next_snapshot_id();
@@ -185,6 +241,8 @@ void MainWindow::execute_editor_text() {
     emit request_execute(
         text,
         analyze_box_->isChecked(),
+        plan_box_->isChecked(),
+        selected_max_rows(),
         executed_snapshot_id_,
         active_cancel_);
 }
@@ -212,14 +270,28 @@ void MainWindow::refresh_schema_browser() {
     cancel_pending_ = false;
     update_controls();
     emit request_execute(
-        QString::fromUtf8(kSchemaQuery),
+        QString::fromUtf8(
+            kSchemaQueryText.data(), static_cast<int>(kSchemaQueryText.size())),
         false,
+        false,
+        static_cast<quint64>(tinydbms::core::kMaxQueryRows),
         *schema_snapshot_,
         active_cancel_);
 }
 
 void MainWindow::set_analyze_mode(bool enabled) {
     analyze_box_->setChecked(enabled);
+}
+
+void MainWindow::set_plan_mode(bool enabled) {
+    plan_box_->setChecked(enabled);
+}
+
+void MainWindow::set_max_rows(quint64 rows) {
+    const int index = rows_box_->findData(static_cast<qulonglong>(rows));
+    if (index >= 0) {
+        rows_box_->setCurrentIndex(index);
+    }
 }
 
 ScriptEditor* MainWindow::script_editor() const noexcept {
@@ -398,8 +470,15 @@ void MainWindow::apply_script_result(const ExecutionPayload& payload) {
         }
         spans.push_back(DiagnosticSpan{*view.range, !view.detail.isEmpty()});
     }
-    editor_->apply_diagnostics(spans);
-    diagnostics_->set_fix_enabled(editor_->toPlainText() == executed_snapshot_);
+    const bool matches_snapshot = editor_->toPlainText() == executed_snapshot_;
+    if (matches_snapshot) {
+        editor_->apply_diagnostics(spans);
+    } else {
+        // 执行期间用户改过文本：旧范围不能再映射到新文档，保留诊断文字供参考，
+        // 但不下发可能指错位置的高亮与修复。
+        editor_->clear_diagnostics();
+    }
+    diagnostics_->set_fix_enabled(matches_snapshot);
 
     const SessionState next = next_session_state(state_, result);
     if (next == SessionState::kNeedsReopen) {
@@ -407,12 +486,27 @@ void MainWindow::apply_script_result(const ExecutionPayload& payload) {
         schema_->set_status_text(QStringLiteral("会话状态未知，重新打开数据库后再刷新表结构"));
     }
     set_session_state(next);
+    // 成功的写语句可能改变 Catalog（CREATE TABLE），立刻刷新表结构，避免面板停留在
+    // 旧状态。刷新是只读查询，失败只体现在面板底部的说明文字里，不影响本次结果展示。
+    if (has_successful_command(result)) {
+        refresh_schema_browser();
+    }
     const qint64 elapsed = timer_.isValid() ? timer_.elapsed() : 0;
-    statusBar()->showMessage(
-        contains_cancelled_statement(result)
-            ? QStringLiteral("已取消，用时 %1 ms").arg(elapsed)
-            : QStringLiteral("执行完成，用时 %1 ms").arg(elapsed),
-        5000);
+    const int failed = count_failed_statements(result);
+    QString message;
+    if (contains_cancelled_statement(result)) {
+        message = QStringLiteral("已取消，用时 %1 ms").arg(elapsed);
+    } else if (result.script_error.has_value()) {
+        // 脚本级错误（分句失败、内部错误等）已经写进结果区横幅，这里只报结局。
+        message = QStringLiteral("执行中止，用时 %1 ms").arg(elapsed);
+    } else if (failed > 0) {
+        message = QStringLiteral("执行结束：%1 条语句出错，用时 %2 ms").arg(failed).arg(elapsed);
+    } else if (contains_plan_statement(result)) {
+        message = QStringLiteral("已生成计划，未执行语句，用时 %1 ms").arg(elapsed);
+    } else {
+        message = QStringLiteral("执行完成，用时 %1 ms").arg(elapsed);
+    }
+    statusBar()->showMessage(message, 5000);
 }
 
 void MainWindow::on_editor_text_edited() {
@@ -447,10 +541,18 @@ void MainWindow::set_session_state(SessionState state) {
 void MainWindow::update_controls() {
     const bool open = state_ == SessionState::kOpen;
     open_button_->setEnabled(!busy_);
-    execute_button_->setEnabled(open && !busy_ && !editor_->toPlainText().trimmed().isEmpty());
+    execute_button_->setEnabled(open && !busy_ && editor_->has_executable_text());
+    // 计划模式只编译，按钮文案同步说明这一次点击不会执行语句。
+    execute_button_->setText(
+        plan_box_->isChecked()
+            ? QStringLiteral("查看计划 (Ctrl+Enter)")
+            : QStringLiteral("执行 (Ctrl+Enter)"));
     // 取消只在执行中可用；置位后立即禁用，避免重复请求与状态歧义。
     cancel_button_->setEnabled(open && busy_ && !closing_ && !cancel_pending_);
     analyze_box_->setEnabled(!busy_);
+    plan_box_->setEnabled(!busy_);
+    rows_box_->setEnabled(!busy_ && open);
+    schema_->set_refresh_enabled(open && !busy_);
     editor_->setReadOnly(!open);
 
     QString state_text;
@@ -480,6 +582,16 @@ void MainWindow::update_controls() {
     // 常驻标签承载连接状态，不会被 showMessage 的临时消息（「没有可执行语句」、
     // 「执行完成，用时 N ms」）覆盖，反之亦然。
     status_state_->setText(state_text);
+}
+
+quint64 MainWindow::selected_max_rows() const {
+    const QVariant value = rows_box_->currentData();
+    bool ok = false;
+    const qulonglong rows = value.toULongLong(&ok);
+    if (!ok || rows == 0U) {
+        return static_cast<quint64>(tinydbms::core::kMaxQueryRows);
+    }
+    return static_cast<quint64>(rows);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

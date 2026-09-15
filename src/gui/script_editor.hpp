@@ -1,6 +1,7 @@
 #ifndef TINYDBMS_GUI_SCRIPT_EDITOR_HPP
 #define TINYDBMS_GUI_SCRIPT_EDITOR_HPP
 
+#include <optional>
 #include <vector>
 
 #include <QPlainTextEdit>
@@ -27,8 +28,17 @@ public:
     // 用 QTextCursor 在换算后的位置替换文本；范围无效时返回 false。
     bool apply_fix(const tinydbms::FixIt& fix);
 
+    // 是否有可执行内容（至少一个非空白字符）。结果在文本变化时失效、按需重算：
+    // 调用方（按钮状态、执行入口）不必为每次判断复制整篇文档。
+    bool has_executable_text() const;
+
 signals:
     void text_edited();
+
+private:
+    bool compute_executable_text() const;
+
+    mutable std::optional<bool> has_executable_text_;
 };
 
 }  // namespace tinydbms::gui

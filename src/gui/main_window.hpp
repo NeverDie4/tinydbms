@@ -14,6 +14,7 @@
 
 class QCheckBox;
 class QCloseEvent;
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QThread;
@@ -45,6 +46,9 @@ public:
     // 请求取消当前执行：只置位令牌，core 在下一个检查点生效，不强制中断 storage 调用。
     void request_cancel();
     void set_analyze_mode(bool enabled);
+    void set_plan_mode(bool enabled);
+    // 选中与给定上限匹配的档位；入口只提供固定档位，无匹配项时忽略。
+    void set_max_rows(quint64 rows);
 
     ScriptEditor* script_editor() const noexcept;
     ResultPanel* result_panel() const noexcept;
@@ -63,6 +67,8 @@ signals:
     void request_execute(
         const QString& text,
         bool analyze_mode,
+        bool plan_only,
+        quint64 max_rows,
         quint64 snapshot_id,
         tinydbms::core::CancelToken cancel);
     void request_close();
@@ -84,6 +90,8 @@ private:
     // 唯一的会话状态入口：改状态后立即刷新控件可用性与状态栏文字。
     void set_session_state(SessionState state);
     std::uint64_t next_snapshot_id();
+    // 下拉框当前档位对应的单语句物化上限；始终是合法值（>= 1）。
+    quint64 selected_max_rows() const;
     static QString error_text(const std::shared_ptr<const tinydbms::core::Error>& error);
 
     Backend* backend_ = nullptr;
@@ -98,6 +106,8 @@ private:
     QPushButton* execute_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
     QCheckBox* analyze_box_ = nullptr;
+    QCheckBox* plan_box_ = nullptr;
+    QComboBox* rows_box_ = nullptr;
     QLabel* path_label_ = nullptr;
     QLabel* status_state_ = nullptr;
 

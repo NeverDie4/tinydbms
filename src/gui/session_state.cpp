@@ -55,11 +55,11 @@ StatementDisplay display_of(const StatementResult& statement) {
         }
         return StatementDisplay::kCommand;
     }
-    // 计划模式的结果也是查询结果形状（单列 VARCHAR），按查询展示。
+    // 计划模式的结果也是查询结果形状（单列 VARCHAR），但必须与真正执行过的查询区分开。
     case StatementStatus::kPlanOnly: {
         const auto& outcome = statement.outcome();
         if (outcome.has_value() && std::holds_alternative<QueryResult>(outcome->outcome)) {
-            return StatementDisplay::kQuery;
+            return StatementDisplay::kPlan;
         }
         return StatementDisplay::kExecutionError;
     }
@@ -163,6 +163,15 @@ std::vector<StatementView> build_statement_views(const ExecuteScriptResult& resu
             view.query = &query;
             view.summary = statement_prefix(view.index) +
                 QStringLiteral("查询返回 %1 行").arg(static_cast<qulonglong>(query.rows.size()));
+            break;
+        }
+        case StatementDisplay::kPlan: {
+            const auto& outcome = statement.outcome();
+            const QueryResult& plan = std::get<QueryResult>(outcome->outcome);
+            view.query = &plan;
+            view.summary = statement_prefix(view.index) +
+                QStringLiteral("计划 %1 行文本（未执行）")
+                    .arg(static_cast<qulonglong>(plan.rows.size()));
             break;
         }
         case StatementDisplay::kCommand: {

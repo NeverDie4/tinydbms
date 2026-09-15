@@ -128,7 +128,7 @@ Storage 是进程级单例，同一时刻最多一个 `Database` 实例处于 op
 ### 3.2 任务进行中的 UI 状态
 
 - 任务进行中禁用「执行」与「切换数据库」按钮；
-- **取消按钮（收尾阶段实现）**：core 自 U5 起提供 `CancelToken`（见
+- **取消按钮（已实现，见 §17）**：core 自 U5 起提供 `CancelToken`（见
   [运行中取消设计](../core-cli/运行中取消设计.md)）。每次执行生成独立令牌，经队列信号传入
   worker 线程；UI 线程点击「取消」只调用 `request_cancel()` 置位无锁标志，core 在下一个
   检查点结束当前语句。置位后按钮禁用、状态栏显示「正在取消」，结果按 `kCancelled` 正常渲染。
@@ -213,12 +213,14 @@ core 已把 storage/compiler 异常与结果聚合失败转换为结构化错误
 | `unavailable_backend.cpp` | `UnavailableBackend` 与 `make_backend()` 的兜底实现 | 未接入真实模块时明确报不可用，不伪造数据 |
 | `worker.{hpp,cpp}` | `Worker`（`QObject`） | 在工作线程串行调用 `Backend`，发出 payload 信号 |
 | `execution_payload.hpp` | GUI 私有 payload 与 metatype 声明 | 承载快照版本号与结果（§3.1） |
-| `script_editor.{hpp,cpp}` | `ScriptEditor`（`QPlainTextEdit` 子类） | 文本快照、诊断高亮、fix-it 应用 |
-| `source_mapping.{hpp,cpp}` | 自由函数 | UTF-8 字节偏移与 `QTextDocument` 位置的换算（§6） |
+| `script_editor.{hpp,cpp}` | `ScriptEditor`（`QPlainTextEdit` 子类） | 文本快照、诊断高亮、fix-it 应用、可执行文本缓存（§18） |
+| `source_mapping.{hpp,cpp}` | 自由函数 | UTF-8 字节偏移与 `QTextDocument` 位置的换算，单个与成批两种入口（§6、§18） |
 | `result_model.{hpp,cpp}` | `ResultModel`（`QAbstractTableModel`） | 按需把 `Value` 转成显示文本，不预生成整表字符串 |
-| `result_panel.{hpp,cpp}` | 结果区控件 | 结果表格、命令结果行、语句状态行、脚本级横幅 |
+| `result_panel.{hpp,cpp}` | 结果区控件 | 结果表格、命令结果行、语句状态行、脚本级横幅、导出与复制按钮（§19） |
+| `result_export.{hpp,cpp}` | 自由函数 | 把当前查询结果渲染成 CSV / TSV 文本与带 BOM 的 UTF-8 字节（§19） |
 | `diagnostic_list.{hpp,cpp}` | 诊断列表 | 按 `statement_index` 展示阶段、范围、message、suggestion 与「应用修复」 |
 | `schema_browser.{hpp,cpp}` | 表浏览器 | 通过只读 SELECT 刷新系统表视图（§8） |
+| `schema_query.hpp` | 系统表只读脚本常量（不依赖 Qt） | 界面与真实 compiler 联调测试引用同一份文本，避免两处各写一遍（§19） |
 | `session_state.{hpp,cpp}` | 会话状态枚举与判定 | 由结构化结果推断连接状态（§3.5） |
 
 类之间只由 `MainWindow` 组装：各面板不持有 `Backend`，也不直接投递请求。
@@ -245,7 +247,7 @@ GUI 的展示完全是结构化字段到控件的映射，不做文本推断：
 | `kExecuted` + `QueryResult` | 结果表格：表头取 `ColumnHeader::name`，单元格按 `ColumnHeader::type` 与 `Value` 变体渲染；空结果仍显示表头 | 不做列名推断，不重新格式化 SQL |
 | `kExecuted` + `QueryResult`（含数值列） | 「图表」标签页：数值列柱状图；没有数值列时显示空状态文案 | 展示层派生，不改变结果集；规则见 §16 |
 | `kExecuted` + `CommandResult`（无 error） | 状态行「OK，影响 N 行」 | `CREATE TABLE` 的 `affected_rows` 为 0 |
-| `kPlanOnly` | 与 `kExecuted` + QueryResult 一样按结果表格渲染（单列 `plan`） | U3 计划模式的状态；GUI 当前不暴露 `--plan`，但映射必须存在，避免穷举 switch 缺少分支 |
+| `kPlanOnly` | 结果表格渲染计划文本（单列 `plan`），语句摘要写「计划 N 行文本（未执行）」 | U3 计划模式的状态；GUI 由「只编译，不执行（查看计划）」开关触发（§19.1），永远不进入执行器 |
 | `kExecutionError` + `CommandResult{affected_rows, error}` | 「已成功影响 N 行后失败」+ 错误详情 | INSERT/DELETE/UPDATE 部分成功路径，必须同时显示已完成的 N |
 | `kExecutionError` + `Error` | 错误详情（stage 标签、范围、message） | 普通执行/存储错误 |
 | `kCompileError` | 编辑器范围高亮 + 诊断列表一条 + suggestion + 可用的「应用修复」 | 只读 `compile_stage`、`source`、`suggestion`、`fix_it` |
@@ -306,10 +308,21 @@ fix-it 应用的前置条件与行为：
 
 ## 8. 表浏览器
 
-- 通过只读 SELECT 读取系统表：`SELECT * FROM tdb_sys_tables`，
-  `SELECT * FROM tdb_sys_columns`（按需追加 `WHERE table_id = <N>`）；
+- 通过只读 SELECT 读取系统表，文本固定为
+  `SELECT * FROM tdb_sys_tables; SELECT * FROM tdb_sys_columns;`（按需追加
+  `WHERE table_id = <N>`）。分句契约要求每条语句（含末条）以 `;` 结束，末条省略会被
+  compiler 报成 syntax error，面板只会显示「无法读取系统表」。该文本放在不依赖 Qt 的
+  `schema_query.hpp`，由实现与真实 compiler 联调测试共同引用（§19.4）；
 - 每次刷新是一次独立的 `execute_script` 调用，遵循同一打开状态，不直接访问 storage；
-- 刷新时机：手动刷新按钮、`open` 成功之后、以及某次执行中出现成功 DDL 语句之后；
+  刷新请求固定使用 `kExecute` 模式与默认上限，不受「计划模式」「结果上限」开关影响，
+  否则面板会拿到一份计划文本；
+- 刷新时机：手动刷新按钮、`open` 成功之后、会话失效后的重新打开，以及**某次执行里出现
+  成功写语句之后**（`kExecuted` 且 outcome 为不带 error 的 `CommandResult`）；
+- 写语句后的自动刷新只能按「有无成功写语句」判断：`CommandResult` 只有 `affected_rows`
+  与可选 error，不携带语句种类，无法把 `CREATE TABLE` 与「影响 0 行的 DELETE/UPDATE」
+  区分开。因此这条规则是 DDL 的超集——DML 之后也会多一次只读查询，代价是两次系统表
+  SELECT，换来面板不会停留在旧结构。要精确区分需要在 `StatementResult` 上补语句种类，
+  属于跨模块契约改动，等有真实需求再提；
 - 刷新失败与普通语句错误一样展示，不额外吞掉错误；
 - 不缓存 schema 作为权威数据，系统表是唯一来源。
 
@@ -576,7 +589,7 @@ offline 运行与 README 说明均已落地；第 5 步（真实链路）等待 
 
 ## 14. 第一版不做的事
 
-SQL 语法高亮与补全、多标签或多连接、结果导出、结果分页、查询历史、
+SQL 语法高亮与补全、多标签或多连接、结果分页、查询历史、
 用户偏好持久化、国际化、皮肤主题、Windows 打包，以及编辑器内的「光标语句提示」
 （需要可靠的分句信息与光标位置联动，第一版不做）。
 
@@ -601,7 +614,7 @@ SQL 语法高亮与补全、多标签或多连接、结果导出、结果分页�
 - `chart_data.{hpp,cpp}` 负责把 `QueryResult` 提取成 `ChartData`，`chart_widget.{hpp,cpp}`
   负责自绘柱状图；不依赖 Qt Charts，`TINYDBMS_BUILD_GUI` 的依赖边界仍是 Qt6 Widgets；
 - 数据提取是可单测的纯函数，`ChartWidget` 只做绘制，两者与 `ResultPanel` 的接线解耦；
-- 查询计划视图、结果导出等仍在 §14 的未实现清单里，不属于本节范围。
+- 查询计划视图与结果导出在 §19 单独收尾，不属于本节范围。
 
 ### 16.2 提取与展示规则
 
@@ -647,3 +660,155 @@ SQL 语法高亮与补全、多标签或多连接、结果导出、结果分页�
   执行中，真实点击按钮，断言令牌在 worker 线程被观察到、按钮与状态栏进入取消态、结果区显示
   「已取消」；
 - `build/gui-debug` 全量 63/63 通过（`tinydbms.gui_ui` 内部 21 个用例）。
+
+## 18. 第二版收尾：渲染与诊断路径优化（2026-09-16）
+
+状态：**已实现并验收**。公共契约无变化，界面行为不变；本节只消除随语句数或文本长度增长的
+重复工作，并给 GUI 内部的复杂度留出与 core 上限匹配的余量。
+
+### 18.1 范围
+
+四项改动都属于「同样的输入，同样的输出，更少的重复计算」：
+
+| 位置 | 原实现 | 现实现 |
+| --- | --- | --- |
+| `result_panel.cpp` | 每条带查询结果的语句都调用一次 `ResultModel::set_query`，每条都触发一次模型重置 | 先确定「最后一条查询结果」，每次刷新只重置一次模型 |
+| `result_panel.cpp` | 表格沿用默认列宽，较长的值整列以省略号呈现 | 小结果（≤200 行、≤16 列）按内容自适应，列宽夹在 60–320 px；大结果保持 100 px 固定宽度 |
+| `schema_browser.cpp` | 每个列行线性扫描顶层表节点，复杂度 O(列行数 × 表数) | 表行建立 `table_id → 顶层节点` 的哈希索引，列行 O(1) 定位父节点 |
+| `source_mapping.cpp` | 每个诊断范围从头扫描文本，复杂度 O(范围数 × 文本长度) | 新增 `editor_ranges`：所有范围排序后一次遍历，O(文本长度 + 范围数 log 范围数) |
+| `script_editor.cpp` / `main_window.cpp` | 每次控件状态更新都 `toPlainText().trimmed()`，复制整篇文档 | `has_executable_text()` 按需计算并缓存，文本变化时才失效 |
+
+`--error-policy analyze` 会为脚本里每条语句各产生一个诊断范围，脚本上限 1 MiB / 语句数上限
+由 core 决定，因此前两项的线性扫描在极端输入下会被同时放大；`has_executable_text()` 则出现
+在每次编辑与每次控件状态更新上。
+
+### 18.2 正确性约束
+
+- `editor_ranges` 与逐个调用 `editor_range` 必须逐项一致：字符内部偏移归位到字符起点、
+  越界返回 `nullopt`、`end < begin` 返回 `nullopt`、空文本只有偏移 0 合法；
+- `has_executable_text()` 等价于 `!toPlainText().trimmed().isEmpty()`，缓存必须在
+  `textChanged` 时失效，高亮与「执行」按钮状态不得读到过期结果；
+- 模型重置次数不随语句数增长，且仍然展示最后一条查询结果；没有查询结果时模型必须清空。
+
+### 18.3 验证
+
+- `tinydbms.gui_ui` 新增 `result_panel_single_model_reset`：三条语句（含两条查询）只触发一次
+  `modelReset`，模型指向最后一条查询；纯命令脚本与 `show_notice` 同样各只重置一次；
+- `tinydbms.gui_ui` 新增 `editor_executable_text_and_diagnostics`：空文本、纯空白与非空文本的
+  缓存切换，越界诊断范围被忽略，清空高亮后选区数为 0；
+- `utf8_offset_mapping` 扩展为对 6 种文本逐一遍历所有起止字节偏移，断言批量换算与逐个换算
+  结果完全一致；
+- `result_panel_column_widths`：400 字符的长值被钳制到最大列宽 320 px，300 行的结果走固定
+  100 px 路径，保证 `resizeColumnsToContents` 的测量成本不会随结果规模无界增长；
+- 换算路径另用临时 Release 微基准测量（1 MiB 脚本、2000 个诊断范围、Release 构建）：
+  逐个 `editor_range` 1504 ms，`editor_ranges` 1.40 ms，两者结果逐项一致。该数字只说明
+  纯函数的复杂度差异，不代表界面实际耗时；
+- 另用离屏渲染核对了实际界面：编辑器高亮、诊断列表、结果表格、表浏览器与状态栏在
+  `QT_QPA_PLATFORM=offscreen` 下的截图与预期一致；
+- `build/gui-debug` 全量 63/63 通过（`tinydbms.gui_ui` 内部 25 个用例）。
+
+## 19. 第二版收尾：计划模式、结果上限与结果导出（2026-09-16）
+
+状态：**已实现并验收**。三项都复用公共契约里已有的字段（`ExecutionMode::kPlanOnly`、
+`ExecuteScriptRequest::max_query_rows`、`QueryResult`），`include/`、根 `CMakeLists.txt`
+与 `tests/CMakeLists.txt` 均无改动，不产生需要通知其他成员的事项；依赖边界仍是 Qt6 Widgets。
+
+### 19.1 计划模式开关
+
+- 工具栏新增复选框「只编译，不执行（查看计划）」；勾选后执行请求带
+  `ExecutionMode::kPlanOnly`，core 只编译并返回单列 `plan` 文本，不调用 storage、不修改 Catalog；
+- 「执行」按钮在该模式下改文案为「查看计划 (Ctrl+Enter)」，快捷键与启用条件不变；
+- 结果区按 §5 的 `kPlanOnly` 映射渲染计划文本，语句摘要写「计划 N 行文本（未执行）」，
+  状态栏临时消息为「已生成计划，未执行语句，用时 N ms」，与「执行完成」明确区分；
+- 表结构刷新固定走 `kExecute` + 默认上限，不受该开关影响，否则面板只会拿到一份计划文本；
+- `kPlanOnly` 不产生 `script_error`，也不改变 `next_session_state` 的判定，会话状态机不变。
+
+### 19.2 结果上限档位
+
+- 工具栏新增下拉框，档位为「默认（`kMaxQueryRows` = 262144）」「1000」「10000」「100000」；
+  默认档直接取 `core::kMaxQueryRows`，不写死数字，避免与契约漂移；
+- 选中值直接进 `ExecuteScriptRequest::max_query_rows`；取不到数据或为 `0` 时回退默认档，
+  请求里不出现非法值；
+- 语义与 CLI 的 `--max-rows` 完全一致：只约束单条语句在内存中物化的行数，超限是执行错误；
+- 未打开数据库时下拉框禁用，忙碌期间与执行按钮一起禁用。
+
+### 19.3 结果导出与复制
+
+- 结果区表格页改为「按钮行 + 表格」，新增「导出 CSV」与「复制」；没有查询结果时两者禁用；
+- 取值口径与表格一致（复用 `value_text`），缺失单元格按空字段导出，不中断整份导出；
+- CSV 按 RFC 4180：字段含分隔符、双引号或 CR/LF 时整体加引号，内部 `"` 写成 `""`，
+  行尾为 CRLF；写盘内容为 UTF-8 且带 BOM，Excel 双击打开中文不乱码；空结果导出为空字节；
+- 剪贴板用 TSV（制表符分隔、LF 行尾、不带 BOM），便于直接粘进表格软件；
+- 导出只写用户选择的路径，失败弹一次提示；不修改结果区内容，也不触碰数据库文件；
+- 写盘用 `QSaveFile`（先写临时文件，`commit` 成功才替换目标），失败不会留下半份结果；
+- 渲染是纯函数（`result_export.{hpp,cpp}`），不依赖窗口，可单独单测。
+
+### 19.4 表结构面板的系统表脚本修复
+
+验收过程中发现真实后端下一个此前被 fake 掩盖的缺陷：「表结构」面板始终显示
+「无法读取系统表」。根因是刷新脚本 `SELECT * FROM tdb_sys_tables; SELECT * FROM
+tdb_sys_columns` 缺少结尾分号——分句契约要求每条语句（含末条）以 `;` 结束，compiler 因此
+把第二条语句报成 syntax error，而 fake 后端按预置结果返回，测试看不到该行为。
+
+修复方式：
+
+- 脚本移入不依赖 Qt 的 `schema_query.hpp` 并补上结尾 `;`，界面与联调测试引用同一份文本；
+- `tests/gui_core_backend_test.cpp` 把该文本交给真实 compiler，断言两条语句都是 `kExecuted`
+  且都返回 `QueryResult`：空库 0 行、建表后 1 张表 2 列；
+- `tests/gui_ui_test.cpp` 断言刷新请求文本与常量逐字节一致且以 `;` 结尾。
+
+### 19.5 验证
+
+- `build/gui-debug`：全量 63/63 通过，`tinydbms.gui_ui` 在 §19 收尾时为 27 个用例
+  （含计划模式、结果上限、导出与剪贴板、系统表脚本文本），§20 增补后为 32 个用例；
+- `build/mergecheck`（真实 compiler + storage + GUI）：全量 66/66 通过，
+  `tinydbms.gui_core_backend` 覆盖 GUI 真实后端，含新增的系统表脚本用例；
+- `build/sanitize-gui`：`gui` 标签 1/1 通过，界面测试在 ASan/UBSan 下无报错；
+- 全量重编 GUI 相关源文件（`-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion`）
+  无新增告警；
+- 另用接真实 compiler/storage 的离屏 shell 程序跑通并截图核对：常规查询（3 行结果、
+  状态栏「执行完成，用时 N ms」）、计划模式（`Project → Sort → Filter → SeqScan` 计划文本、
+  状态栏「已生成计划，未执行语句」）、以及表结构面板读到系统表内容。
+
+## 20. 全面验收补强（2026-09-16）
+
+状态：**已实现并验收**。本节记录对 GUI 全部用户路径的离屏验收，以及验收中发现的三个
+交互缺陷。公共契约、构建依赖和界面结构不变。
+
+### 20.1 验收范围
+
+- 真实编译器与存储链路：打开空库、建表写入、查询表格、数值图表、无数值列空状态、NULL、
+  计划模式、计划无副作用、结果上限超限与恢复、编译诊断、fix-it、重新执行、analyze、
+  空编辑器、CSV 导出、重开库后的表结构、900×560 小窗口、关闭；
+- fake 后端补齐真实链路难以稳定制造的状态：执行中取消、正在取消、取消完成、内部错误、
+  会话重开、打开失败、关闭失败、命令与查询混合脚本；
+- 共保存并逐项核对 27 张 1440×900（小窗口为 900×560）离屏截图。截图工装只位于
+  `/tmp/gui-drive`，不进入仓库。
+
+### 20.2 验收中修复的缺陷
+
+1. **旧诊断可能重新高亮到新文本**：执行期间用户修改编辑器后，结果仍会按旧快照的字节范围
+   调用 `apply_diagnostics`。现在只有 `editor_->toPlainText()` 与执行快照完全一致时才应用
+   高亮与 fix-it，否则清空高亮，诊断文字仍保留供参考；
+2. **计划成功的文案掩盖语句失败**：脚本同时含成功 plan 与编译错误时，旧状态栏显示
+   「已生成计划」，与结果区里的失败诊断矛盾。现在优先级为脚本错误、语句失败、成功计划、
+   正常完成，计划成功文案不会覆盖失败；
+3. **表结构刷新按钮在不可用状态仍显示可用**：会话未打开、执行期间或 `kNeedsReopen` 时，
+   点击刷新会被状态机静默忽略，但按钮仍可点击。现在按钮随 `open && !busy` 精确启停，
+   与 §3.5 的「禁用执行与刷新」一致。
+
+### 20.3 回归与验证
+
+- `tinydbms.gui_ui` 新增 `stale_result_does_not_rehighlight_editor`、
+  `plan_status_prioritizes_errors`，并扩展打开、内部错误和打开失败用例的刷新按钮状态断言；
+- `build/gui-debug`：全量 63/63 通过，`tinydbms.gui_ui` 内部 32 个用例；
+- `build/mergecheck`：真实 compiler + storage + GUI 全量 66/66 通过；
+- `build/sanitize-gui`：`gui` 标签 1/1 通过，ASan/UBSan 无报错；
+- 另用 `/tmp/tinydbms-gui-warnings` 开启 `-Werror` 和
+  `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion` 全量构建 GUI 与测试目标，通过；
+- 重新运行 27 张截图场景，计划失败状态栏与刷新按钮禁用状态已在截图中确认。
+
+本机 GUI 与 TSan 的组合未能得到有效结论：Qt6 预编译库触发的跨线程事件队列报告与
+ThreadSanitizer 的 `sanitizer_thread_registry.cpp` 运行时断言同时出现，该问题在 Qt 事件
+队列之外不可复现。并发正确性仍以现有 `core_concurrency`、取消闸门用例和 ASan/UBSan 结果
+为准；后续如要补 GUI 竞态检测，需要可用的 Qt TSan 运行时或单独的最小复现工装。

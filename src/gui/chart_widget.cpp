@@ -29,11 +29,20 @@ const std::array<QColor, 6>& chart_palette() {
     return colors;
 }
 
-QString axis_text(double value) {
-    return QString::number(value, 'g', 6);
-}
-
 }  // namespace
+
+QString axis_label_text(double value, double step) {
+    if (!std::isfinite(value)) {
+        return QString();
+    }
+    if (!std::isfinite(step) || step <= 0.0) {
+        return QString::number(value, 'g', 6);
+    }
+    // 步长 25.4 → 1 位小数，2.54 → 2 位，0.254 → 3 位；上限 3 位避免排不下。
+    const int magnitude = static_cast<int>(std::floor(std::log10(step)));
+    const int decimals = std::clamp(2 - magnitude, 0, 3);
+    return QString::number(value, 'f', decimals);
+}
 
 ChartWidget::ChartWidget(QWidget* parent) : QWidget{parent} {
     setMinimumHeight(180);
@@ -125,6 +134,7 @@ void ChartWidget::paintEvent(QPaintEvent* event) {
     const QColor grid_color = QWidget::palette().color(QPalette::Midlight);
     const QColor axis_color = QWidget::palette().color(QPalette::Dark);
     const QFontMetrics metrics{painter.font()};
+    const double tick_step = (data_max - data_min) / kIntervalCount;
     for (int tick = 0; tick <= kIntervalCount; ++tick) {
         const double ratio = static_cast<double>(tick) / kIntervalCount;
         const double value = data_max - (data_max - data_min) * ratio;
@@ -140,7 +150,7 @@ void ChartWidget::paintEvent(QPaintEvent* event) {
         painter.drawText(
             label_rect,
             static_cast<int>(Qt::AlignRight | Qt::AlignVCenter),
-            axis_text(value));
+            axis_label_text(value, tick_step));
     }
     painter.setPen(axis_color);
     painter.drawLine(plot.bottomLeft(), plot.bottomRight());

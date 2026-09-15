@@ -9,6 +9,7 @@ add_library(tinydbms_gui_objects OBJECT
     chart_widget.cpp
     diagnostic_list.cpp
     main_window.cpp
+    result_export.cpp
     result_model.cpp
     result_panel.cpp
     schema_browser.cpp
