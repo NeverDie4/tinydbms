@@ -28,12 +28,15 @@ TableId → tables/table_<TableId>.dat → PageFile ownership/lifecycle
 - `FileManager::open(data_dir)`：建立 manager 并创建/验证 `tables/`。
 - `create_table_file(TableId)`：创建并持有新的 PageFile，拒绝覆盖已有文件。
 - `open_table_file(TableId)`：打开并持有已有 PageFile；同一 TableId 已打开时返回现有对象。
-- `find_table_file(TableId)`：非拥有观察指针，只在 manager 持有期间有效。
+- `acquire_file(TableId)`：返回 move-only `PageFileLease`；lease 存续期间 FileManager 不会关闭或释放该文件。生产并发路径必须使用它。
+- `find_table_file(TableId)`：仅供单线程测试/诊断使用的非拥有观察指针，不延长文件生命周期。
 - `close_table_file(TableId)`：关闭并释放一个 PageFile；重复关闭成功。
 - `close_all()`：关闭并释放全部 PageFile；重复调用成功。
 - `remove_table_file(TableId)`：仅供本轮 `create_table` 失败回滚使用，先关闭再删除精确文件。
 
 FileManager 复用 `PageFileErrorKind::{kIo,kCorrupt,kInvalidArgument}`。公共边界继续只暴露既有 `StorageErrorKind`。
+
+close 开始后，`create_table_file`、`open_table_file` 与 `acquire_file` 返回 `kInvalidArgument`；`close_table_file`/`close_all` 会等待既有 in-flight lease 归零，再调用 `PageFile::close`。调用者必须在完成 PageFile 操作后及时释放 lease；没有超时，泄漏 lease 属于调用方生命周期错误。
 
 ## 4. Storage lifecycle
 
@@ -86,7 +89,7 @@ close_storage
 
 ## 7. Legacy decision
 
-不实现 V1 自动迁移。旧 metadata 格式或与 V2 system catalog 不一致的目录均按 `kCorrupt` 处理，不自动改写磁盘。
+不实现 V1 自动迁移或自动重写。合法 V1 metadata 可读，V1/V2 表可共存，新建表写 V2；未知 metadata 格式或与 V2 system catalog 不一致的目录按 `kCorrupt` 处理。
 
 ## 8. MiniOB adaptation
 

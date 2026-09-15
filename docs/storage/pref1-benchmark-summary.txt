@@ -1,0 +1,7 @@
+pages=4096 capacity=64 distance=1 queue=2 worker=1 policy=FIFO rows/page=8 payload=384 warmup=2 measurements=20
+fresh BufferPool per scan; OS cache uncontrolled/warm; elapsed includes worker join; counters are means
+profile,prefetch,min_ms,p25_ms,median_ms,p75_ms,max_ms,pages/sec,physical_reads,requested,started,ready,hit,useful,wait,dropped,read_failure,unused,deduplicated
+light,OFF,43.883,44.779,45.517,46.840,48.772,89987.466,4096.000,4095.000,0.000,0.000,0.000,0.000,0.000,4095.000,0.000,0.000,0.000
+light,ON,73.485,79.471,80.804,81.995,88.684,50690.340,4096.000,4095.000,3776.550,3776.550,3774.450,3776.550,2.100,186.900,0.000,0.000,131.550
+medium,OFF,143.639,146.018,147.806,149.180,152.913,27711.991,4096.000,4095.000,0.000,0.000,0.000,0.000,0.000,4095.000,0.000,0.000,0.000
+medium,ON,174.426,175.069,175.971,178.324,180.870,23276.530,4096.000,4095.000,3936.800,3936.800,3935.250,3936.800,1.550,45.550,0.000,0.000,112.650

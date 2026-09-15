@@ -40,7 +40,8 @@ struct NewRecordPageIo {
 };
 
 // Resolved immutable schema copy. Owners outlive this object and all its calls.
-// Single-threaded; callers must not free/reopen files behind the BufferPool.
+// Each operation owns a PageFileLease, so FileManager close cannot invalidate
+// the file while HeapTable is using it.
 class HeapTable {
 public:
     HeapTable(
@@ -59,9 +60,9 @@ public:
 private:
     friend struct HeapTableTestAccess; // Exercise the post-prevalidation failure boundary.
     HeapTableResult<RecordId> create_record_page(PageFile& file, const std::vector<Value>& values);
+    HeapTableResult<PageFileLease> acquire_file() const;
     std::optional<HeapTableError> validate_update(const UpdateRow& row);
     std::optional<HeapTableError> update_record(const UpdateRow& row);
-    std::optional<HeapTableError> check_file() const;
     TableMeta meta_;
     RowFormat format_;
     FileManager& files_;

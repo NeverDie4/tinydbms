@@ -21,7 +21,7 @@ BufferPool、Frame、pin/unpin、dirty、LRU/FIFO、索引、事务、WAL、MVCC
 
 Record 是由 `TableMeta.columns` 驱动的变长编码。`Record.values[i]` 必须对应 `TableMeta.columns[i]`。
 
-Record payload 不保存 column count、Type tag、schema version、RecordId、NULL bitmap 或 total-length 字段。Slot Entry 保存 payload 长度；解码所需的列顺序和类型来自不可变的 TableMeta。
+V1 Record payload 不保存 column count、Type tag、schema version、RecordId、NULL bitmap 或 total-length 字段。Slot Entry 保存 payload 长度；解码所需的列顺序和类型来自不可变的 TableMeta。V2 仍由 TableMeta 决定列序与类型，但在 payload 起始处保存 NULL bitmap，以表达 nullable 列；读写必须按表的 RowFormat 选择对应 codec，不能以 V1 规则解释 V2 行。
 
 因此冻结以下前提：
 
@@ -30,7 +30,7 @@ Table schema is immutable after table creation.
 ALTER TABLE / schema evolution is out of scope.
 ```
 
-NULL 当前不支持。未来加入 NULL 或 schema evolution 必须升级格式版本，不能改变 version 1 的解释。
+V1 不支持 NULL。V2 已通过 NULL bitmap 支持 nullable 列；schema evolution 仍必须升级格式版本，不能改变既有版本的解释。
 
 ## 3. Logical and physical size limits
 

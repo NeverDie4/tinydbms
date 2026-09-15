@@ -14,7 +14,7 @@ FileManager、BufferPool 必须覆盖 HeapTable 的使用生命周期。
 每张表独立 PageFile；Page 0 是文件 Header。其余页 free 时跳过，allocated
 时必须是合法 TSP1 RecordPage，未知/零填充 allocated 页一律 corrupt，不静默初始化。
 普通 RecordPage 永不 free；free hole 只来自底层既有 free-list 或未发布新页的补偿。
-本阶段单线程，禁止在缓存仍驻留时绕过 BufferPool free/reopen 文件。
+HeapTable 每个操作取得并持有 `PageFileLease`，因此 FileManager 不会在操作中关闭该表文件；仍禁止在缓存仍驻留时绕过 BufferPool free/reopen 文件。UPDATE 先整批预检，再按行 in-place 应用；不支持 relocate。
 
 ## 2. 私有 API
 

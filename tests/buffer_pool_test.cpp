@@ -92,14 +92,14 @@ void failures() {
     auto pool=std::move(*made.value);
     error(pool->fetch_page({0,0}),BufferPoolErrorKind::kInvalidArgument);
     error(pool->fetch_page({99,1}),BufferPoolErrorKind::kInvalidArgument);
-    check(pool->stats().fetch_count==0);
+    check(pool->stats().fetch_count==1 && pool->stats().miss_count==1);
     error(pool->fetch_page({0,99}),BufferPoolErrorKind::kInvalidArgument);
     check(!fixture.files->find_table_file(0)->free_page(3));
     error(pool->fetch_page({0,3}),BufferPoolErrorKind::kInvalidArgument);
     for (auto key : {PageKey{0,1},PageKey{0,2},PageKey{1,1}}) {
         auto result=pool->fetch_page(key); check(result.value.has_value());
     }
-    check(pool->stats().miss_count==5); check(!pool->close());
+    check(pool->stats().miss_count==6); check(!pool->close());
 
     std::optional<PageFileErrorKind> fail=PageFileErrorKind::kIo;
     std::size_t reads=0;
