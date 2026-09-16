@@ -3,6 +3,7 @@
 #include "json_check.hpp"
 #include "tinydbms/core.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <iostream>
@@ -38,6 +39,8 @@ using tinydbms::core::OpenDatabaseResult;
 using tinydbms::core::QueryResult;
 using tinydbms::core::ScriptErrorPolicy;
 using tinydbms::core::StatementResult;
+using tinydbms::core::StorageStats;
+using tinydbms::core::StorageStatsResult;
 
 #define CHECK(condition)                                                                     \
     do {                                                                                     \
@@ -67,6 +70,15 @@ public:
     bool throw_on_execute = false;
     bool throw_bad_alloc_on_execute = false;
     bool throw_on_close = false;
+    bool throw_on_storage_stats = false;
+    StorageStatsResult storage_stats_result{
+        StorageStats{
+            .fetch_count = 8,
+            .hit_count = 6,
+            .miss_count = 2,
+            .eviction_count = 1,
+            .dirty_flush_count = 1},
+        std::nullopt};
 
     OpenDatabaseResult open(
         const tinydbms::core::OpenDatabaseRequest& request) override {
@@ -111,6 +123,14 @@ public:
             throw std::runtime_error("fake close failure");
         }
         return close_result;
+    }
+
+    StorageStatsResult storage_stats() override {
+        calls.emplace_back("storage_stats");
+        if (throw_on_storage_stats) {
+            throw std::runtime_error("fake storage stats failure");
+        }
+        return storage_stats_result;
     }
 };
 
@@ -1619,6 +1639,146 @@ bool test_time_flag_writes_stderr_only() {
     return true;
 }
 
+// BUFFER 行格式：`BUFFER fetch=… hit=… miss=… miss_rate=…% evictions=… flushes=…`。
+bool contains_buffer_line(const std::string& text) {
+    const std::string prefix = "BUFFER fetch=";
+    const std::size_t begin = text.find(prefix);
+    if (begin == std::string::npos) {
+        return false;
+    }
+    const std::size_t end = text.find('\n', begin);
+    if (end == std::string::npos) {
+        return false;
+    }
+    const std::string line = text.substr(begin, end - begin);
+    return line.find(" hit=") != std::string::npos &&
+        line.find(" miss=") != std::string::npos &&
+        line.find(" miss_rate=") != std::string::npos &&
+        line.find('%') != std::string::npos &&
+        line.find(" evictions=") != std::string::npos &&
+        line.find(" flushes=") != std::string::npos;
+}
+
+bool test_stats_flag_writes_stderr_only() {
+    // 批处理：stdout 与不加 --stats 时逐字节相同，stderr 只有一行 BUFFER 快照。
+    FakeSession plain_session = make_pretty_session();
+    std::string plain_output;
+    std::string plain_error;
+    CHECK(invoke(
+              plain_session, {"tinydbms", "--format", "json"}, "x", false, plain_output, plain_error) == 0);
+    CHECK(plain_error.empty());
+    CHECK(std::find(plain_session.calls.begin(), plain_session.calls.end(), "storage_stats") ==
+          plain_session.calls.end());
+
+    FakeSession stats_session = make_pretty_session();
+    std::string stats_output;
+    std::string stats_error;
+    CHECK(invoke(
+              stats_session,
+              {"tinydbms", "--format", "json", "--stats"},
+              "x",
+              false,
+              stats_output,
+              stats_error) == 0);
+    CHECK(stats_output == plain_output);
+    CHECK(stats_error == "BUFFER fetch=8 hit=6 miss=2 miss_rate=25.00% evictions=1 flushes=1\n");
+    // 观测调用在 close 之前发生，否则 storage 成功收尾后计数已归零。
+    const std::vector<std::string> expected_calls{"open", "execute", "storage_stats", "close"};
+    CHECK(stats_session.calls == expected_calls);
+
+    // 与 --time 组合：两行都在 stderr，耗时行在前，且仍然是各一行。
+    FakeSession combined_session = make_pretty_session();
+    std::string combined_output;
+    std::string combined_error;
+    CHECK(invoke(
+              combined_session,
+              {"tinydbms", "--format", "json", "--time", "--stats"},
+              "x",
+              false,
+              combined_output,
+              combined_error) == 0);
+    CHECK(combined_output == plain_output);
+    CHECK(combined_error.rfind("TIME script ", 0) == 0);
+    CHECK(contains_time_line(combined_error, "script"));
+    CHECK(contains_buffer_line(combined_error));
+    CHECK(count_occurrences(combined_error, "TIME ") == 1);
+    CHECK(count_occurrences(combined_error, "BUFFER fetch=") == 1);
+    CHECK(combined_error.find("TIME script ") < combined_error.find("BUFFER fetch="));
+
+    // REPL：每一行一条 BUFFER 行，提示符数量不变。
+    FakeSession repl_stats;
+    repl_stats.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{1, std::nullopt}}),
+    }));
+    repl_stats.execute_results.push_back(make_script({
+        StatementResult::executed(
+            0, range(1, 1, 1, 10), ExecuteResult{CommandResult{2, std::nullopt}}),
+    }));
+    std::string repl_output;
+    std::string repl_error;
+    CHECK(invoke(
+              repl_stats,
+              {"tinydbms", "--format", "pretty", "--stats"},
+              "a\nb\n",
+              true,
+              repl_output,
+              repl_error) == 0);
+    CHECK(repl_output == "OK, 1 row affected\nOK, 2 rows affected\n");
+    CHECK(count_occurrences(repl_error, "BUFFER fetch=") == 2);
+    CHECK(count_occurrences(repl_error, "tinydbms> ") == 3);
+
+    // 统计不可用只是观测失败：诊断写 stderr，退出码与 stdout 不变。
+    FakeSession failing_session = make_pretty_session();
+    failing_session.storage_stats_result = StorageStatsResult{
+        std::nullopt,
+        make_error(ErrorKind::kStorage, "statistics are unavailable")};
+    std::string failing_output;
+    std::string failing_error;
+    CHECK(invoke(
+              failing_session,
+              {"tinydbms", "--format", "json", "--stats"},
+              "x",
+              false,
+              failing_output,
+              failing_error) == 0);
+    CHECK(failing_output == plain_output);
+    CHECK(failing_error == "ERROR storage statistics are unavailable\n");
+
+    // 抛出异常同样不影响执行结果。
+    FakeSession throwing_session = make_pretty_session();
+    throwing_session.throw_on_storage_stats = true;
+    std::string throwing_output;
+    std::string throwing_error;
+    CHECK(invoke(
+              throwing_session,
+              {"tinydbms", "--format", "json", "--stats"},
+              "x",
+              false,
+              throwing_output,
+              throwing_error) == 0);
+    CHECK(throwing_output == plain_output);
+    CHECK(throwing_error.empty());
+    return true;
+}
+
+bool test_stats_argument_errors() {
+    const std::vector<std::vector<std::string>> invalid_arguments{
+        {"tinydbms", "--stats", "--stats"},
+        {"tinydbms", "--stats", "--help"},
+    };
+
+    for (const auto& arguments : invalid_arguments) {
+        FakeSession session;
+        std::string output;
+        std::string error;
+        CHECK(invoke(session, arguments, "x", false, output, error) == 2);
+        CHECK(session.calls.empty());
+        CHECK(error.find("argument error:") != std::string::npos);
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1659,6 +1819,8 @@ int main() {
         test_pretty_rejects_malformed_result() &&
         test_default_format_depends_on_terminal() &&
         test_pretty_argument_errors() &&
-        test_time_flag_writes_stderr_only();
+        test_time_flag_writes_stderr_only() &&
+        test_stats_flag_writes_stderr_only() &&
+        test_stats_argument_errors();
     return passed ? 0 : 1;
 }

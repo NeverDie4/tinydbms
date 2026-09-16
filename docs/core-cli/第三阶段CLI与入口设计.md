@@ -106,6 +106,9 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
   [展示格式与性能观测设计](CLI展示格式与性能观测设计.md)）；
 - --time：每次 `execute_script` 调用在 stderr 追加一行墙钟耗时，最多出现一次；默认关闭
   （见 [展示格式与性能观测设计](CLI展示格式与性能观测设计.md)）；
+- --stats：每次 `execute_script` 调用在 stderr 追加一行 buffer pool 统计快照，最多出现一次；
+  默认关闭；观测失败只写诊断，不改变 stdout 与退出码
+  （见 [展示格式与性能观测设计](CLI展示格式与性能观测设计.md) §5）；
 - --plan：整个调用进入计划模式，只编译并输出执行计划，最多出现一次（见 [Plan 整理输出设计](Plan整理输出设计.md)）；
 - --max-rows N：单条语句在内存中物化的最大行数，最多出现一次；N 为 `1..SIZE_MAX` 的十进制
   整数，缺省使用 core 的 `kMaxQueryRows`（见 [结果集上限与分页设计](结果集上限与分页设计.md)）；
@@ -126,6 +129,7 @@ FakeSession，避免测试目标同时出现 fake 与真实模块。占位构建
 - --error-policy 缺少值、值为空、未知值或重复出现；
 - --format 缺少值、值为空、未知值（非 table/pretty/json）或重复出现；
 - --time 重复出现；
+- --stats 重复出现；
 - --plan 重复出现；
 - --max-rows 缺少值、值为空、非十进制数字（含前导 `+`/`-`、十六进制）、尾随字符、
   数值为 `0` 或超出 `size_t` 范围，以及重复出现；
@@ -289,6 +293,10 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
   非终端用 table；测试与 GUI 不设置该字段，因此既有 golden 测试全部走 table。
 - `--time` 只写 stderr，stdout 字节流在开关前后完全一致；批处理 scope 为 `script`，
   REPL scope 为 `line <序号>`。
+- `--stats` 同样只写 stderr：批处理与 REPL 每次 `execute_script` 之后各一条
+  `BUFFER fetch=… hit=… miss=… miss_rate=…% evictions=… flushes=…`，取值在 close 之前完成；
+  与 `--time` 同时打开时耗时行在前。统计不可用时输出一行 `ERROR …` 诊断，
+  stdout 与退出码仍与关闭时一致。
 - `--plan` 的语句结果在 pretty 下关闭单元格截断与行数行：计划是缩进文本，
   `columns=[…]` 行按 48 列截断会丢列映射；table 与 json 的计划输出不变。
 
@@ -342,6 +350,8 @@ help 和 version 文本属于 CLI 自身输出，写入 stdout；参数错误和
   显式 `--format` 覆盖终端判定；
 - `--time`：打开后 stdout 与关闭时逐字节相同，stderr 多出 `TIME script|line …` 行，
   批处理与 REPL 各一条、不影响退出码；
+- `--stats`：打开后 stdout 与关闭时逐字节相同，stderr 多出 `BUFFER fetch=…` 快照行，
+  批处理一条、REPL 每行一条，统计报错或抛异常都只写诊断、不改变退出码；
 - SKIPPED（policy/aborted）、INDETERMINATE 与 script_error 的插入顺序和 stderr 归属；
 - 语句级 lex/syntax/semantic、执行/存储、analysis 标签与范围格式；脚本级 compile/internal
   标签与空插入点；suggestion、fix-it 与单行转义；

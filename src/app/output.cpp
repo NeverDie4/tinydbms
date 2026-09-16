@@ -202,6 +202,27 @@ bool write_time_line(
     return static_cast<bool>(output);
 }
 
+std::string format_miss_rate(std::uint64_t miss_count, std::uint64_t fetch_count) {
+    const double rate = fetch_count == 0
+        ? 0.0
+        : (static_cast<double>(miss_count) / static_cast<double>(fetch_count)) * 100.0;
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2) << rate;
+    return text.str();
+}
+
+bool write_storage_stats_line(
+    const tinydbms::core::StorageStats& stats,
+    std::ostream& output) {
+    output << "BUFFER fetch=" << stats.fetch_count
+           << " hit=" << stats.hit_count
+           << " miss=" << stats.miss_count
+           << " miss_rate=" << format_miss_rate(stats.miss_count, stats.fetch_count) << '%'
+           << " evictions=" << stats.eviction_count
+           << " flushes=" << stats.dirty_flush_count << '\n';
+    return static_cast<bool>(output);
+}
+
 bool write_statement_error(
     const tinydbms::core::Error& error,
     const tinydbms::SourceRange& fallback,

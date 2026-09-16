@@ -67,4 +67,13 @@ tinydbms::core::CloseDatabaseResult CoreSession::close() {
     return result;
 }
 
+tinydbms::core::StorageStatsResult CoreSession::storage_stats() {
+    if (database_ == nullptr) {
+        return tinydbms::core::StorageStatsResult{
+            std::nullopt,
+            std::optional<tinydbms::core::Error>{not_open_error()}};
+    }
+    return database_->storage_stats();
+}
+
 }  // namespace tinydbms::app

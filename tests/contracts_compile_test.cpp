@@ -79,6 +79,18 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(std::declval<core::Database&>().execute_script(std::declval<const core::ExecuteScriptRequest&>())),
     core::ExecuteScriptResult>);
+static_assert(std::is_same_v<
+    decltype(std::declval<core::Database&>().storage_stats()),
+    core::StorageStatsResult>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::StorageStats{}.fetch_count)>,
+    std::uint64_t>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::StorageStatsResult{}.stats)>,
+    std::optional<core::StorageStats>>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(core::StorageStatsResult{}.error)>,
+    std::optional<core::Error>>);
 // 诊断类型：半开范围与阶段枚举取代旧的 CompileErrorKind；偏移归属 SourceLocation 端点。
 static_assert(std::is_same_v<decltype(SourceLocation::byte_offset), std::size_t>);
 static_assert(std::is_same_v<decltype(SourceRange::begin), SourceLocation>);
@@ -179,6 +191,15 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(storage::update_rows(std::declval<const storage::UpdateRequest&>())),
     storage::UpdateResult>);
+static_assert(std::is_same_v<
+    decltype(storage::storage_stats(std::declval<const storage::StorageStatsRequest&>())),
+    storage::StorageStatsResult>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(storage::StorageStats{}.dirty_flush_count)>,
+    std::uint64_t>);
+static_assert(std::is_same_v<
+    std::remove_cvref_t<decltype(storage::StorageStatsResult{}.stats)>,
+    std::optional<storage::StorageStats>>);
 
 }  // namespace
 

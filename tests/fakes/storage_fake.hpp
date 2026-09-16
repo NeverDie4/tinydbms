@@ -25,6 +25,7 @@ struct State {
     std::size_t insert_calls = 0;
     std::size_t delete_calls = 0;
     std::size_t update_calls = 0;
+    std::size_t storage_stats_calls = 0;
 
     std::vector<std::string> call_order;
     std::vector<TableMeta> tables;
@@ -52,6 +53,9 @@ struct State {
     std::optional<storage::InsertResult> insert_result;
     std::optional<storage::DeleteResult> delete_result;
     std::optional<storage::UpdateResult> update_result;
+    // storage_stats 成功时的固定快照；未显式设置时返回全零且 hit_rate() 为 0。
+    storage::StorageStats stats_snapshot{};
+    std::optional<storage::StorageError> storage_stats_error;
     storage::CursorId active_cursor = 0;
     std::optional<TableId> active_table_id;
     storage::CursorId next_cursor_id = 1;
@@ -74,6 +78,7 @@ struct State {
     bool throw_after_insert = false;
     bool throw_on_delete = false;
     bool throw_after_delete = false;
+    bool throw_on_storage_stats = false;
     // 每次 scan_next 记录完之后调用；用于在扫描中途注入取消请求等外部事件。
     std::function<void()> on_scan_next;
     // 每次 insert 记录完之后调用（INSERT 首版不设取消检查点，用于验证该边界）。
@@ -102,6 +107,8 @@ void set_close_cursor_result(storage::CloseCursorResult result);
 void set_insert_result(storage::InsertResult result);
 void set_delete_result(storage::DeleteResult result);
 void set_update_result(storage::UpdateResult result);
+void set_storage_stats(storage::StorageStats stats);
+void set_storage_stats_error(storage::StorageError error);
 void set_throw_on_open(bool enabled);
 void set_throw_after_open(bool enabled);
 void set_throw_before_close(bool enabled);
@@ -117,6 +124,7 @@ void set_throw_on_insert(bool enabled);
 void set_throw_after_insert(bool enabled);
 void set_throw_on_delete(bool enabled);
 void set_throw_after_delete(bool enabled);
+void set_throw_on_storage_stats(bool enabled);
 void set_on_scan_next(std::function<void()> hook);
 void set_on_insert(std::function<void()> hook);
 void set_on_storage_call(std::function<void(const char* call)> hook);

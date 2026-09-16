@@ -73,6 +73,8 @@ struct ExecutionOptions {
     std::size_t max_query_rows = tinydbms::core::kMaxQueryRows;
     // --time：把每次 execute_script 的墙钟耗时写到 stderr；不影响 stdout 与退出码。
     bool show_time = false;
+    // --stats：把每次 execute_script 之后的 buffer pool 快照写到 stderr；同样不影响退出码。
+    bool show_stats = false;
 };
 
 // 计时范围只包含 execute_script 调用本身：open/close、输入读取与渲染都不计入，
@@ -88,6 +90,25 @@ void report_time_noexcept(
             environment.error);
     } catch (...) {
         // 计时输出失败不能改变本次调用的结果判定。
+    }
+}
+
+// 统计必须在 close 之前取：storage 成功收尾后计数随状态一起归零。
+// 观测失败只写 stderr，不改变执行结果与退出码。
+void report_storage_stats_noexcept(
+    Session& session,
+    const CliEnvironment& environment) noexcept {
+    try {
+        const tinydbms::core::StorageStatsResult result = session.storage_stats();
+        if (result.stats.has_value()) {
+            (void)write_storage_stats_line(*result.stats, environment.error);
+            return;
+        }
+        if (result.error.has_value()) {
+            (void)write_error(*result.error, environment.error);
+        }
+    } catch (...) {
+        // 统计是观测开关，任何失败都不能改变本次调用的结果判定。
     }
 }
 
@@ -270,6 +291,9 @@ bool run_batch(
     if (options.show_time) {
         report_time_noexcept(environment, "script", elapsed);
     }
+    if (options.show_stats) {
+        report_storage_stats_noexcept(session, environment);
+    }
     return rendered.output_ok;
 }
 
@@ -319,6 +343,9 @@ bool run_repl(
         failed = failed || rendered.had_error || !rendered.output_ok;
         if (options.show_time) {
             report_time_noexcept(environment, "line " + std::to_string(line_number), elapsed);
+        }
+        if (options.show_stats) {
+            report_storage_stats_noexcept(session, environment);
         }
         if (!rendered.output_ok) {
             return false;
@@ -385,6 +412,7 @@ int run_cli(
         options.max_query_rows =
             arguments.max_query_rows.value_or(tinydbms::core::kMaxQueryRows);
         options.show_time = arguments.show_time;
+        options.show_stats = arguments.show_stats;
 
         bool failed = false;
         if (environment.interactive) {

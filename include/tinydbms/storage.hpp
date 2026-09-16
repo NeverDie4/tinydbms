@@ -127,6 +127,25 @@ struct UpdateResult {
     std::optional<StorageError> error;
 };
 
+struct StorageStatsRequest {};
+
+// 只覆盖 demand 口径的 buffer pool 访问：预取 worker 的内部读写不计入，也不暴露
+// Page/Buffer 专用错误。计数从最近一次成功的 open_storage 起算，close_storage
+// 成功收尾后随状态一起归零。
+struct StorageStats {
+    std::uint64_t fetch_count = 0;
+    std::uint64_t hit_count = 0;
+    std::uint64_t miss_count = 0;
+    std::uint64_t eviction_count = 0;
+    std::uint64_t dirty_flush_count = 0;
+    double hit_rate() const noexcept;  // fetch_count == 0 时为 0
+};
+
+struct StorageStatsResult {
+    std::optional<StorageStats> stats;  // 成功时必有值；失败时为空
+    std::optional<StorageError> error;
+};
+
 OpenStorageResult open_storage(const OpenStorageRequest& request);
 CloseStorageResult close_storage(const CloseStorageRequest& request);
 ListTablesResult list_tables(const ListTablesRequest& request);
@@ -137,6 +156,7 @@ CloseCursorResult close_cursor(const CloseCursorRequest& request);
 InsertResult insert(const InsertRequest& request);
 DeleteResult delete_records(const DeleteRequest& request);  // 避开 C++ delete 关键字
 UpdateResult update_rows(const UpdateRequest& request);
+StorageStatsResult storage_stats(const StorageStatsRequest& request);
 
 }  // namespace tinydbms::storage
 

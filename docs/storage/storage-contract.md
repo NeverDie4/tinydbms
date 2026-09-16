@@ -16,11 +16,19 @@ Core 负责 catalog snapshot、Plan 调度、表达式、WHERE 与 projection。
 
 ## API 与结果
 
-`open_storage`、`close_storage`、`list_tables`、`create_table`、`open_table`、`scan_next`、`close_cursor`、`insert`、`delete_records`、`update_rows` 均采用 `.hpp` 中的 request/result 对象。
+`open_storage`、`close_storage`、`list_tables`、`create_table`、`open_table`、`scan_next`、`close_cursor`、`insert`、`delete_records`、`update_rows`、`storage_stats` 均采用 `.hpp` 中的 request/result 对象。
 
 `OpenTableResult.cursor` 是成功 cursor。`ScanNextResult` 的 `record` 空且 `error` 空表示 EOF。`InsertResult.rids`、`DeleteResult.deleted_count` 与 `UpdateResult.updated_count` 分别报告已成功的前缀；它们不提供事务回滚。UPDATE 会先对整批重复 RID、RID 有效性和编码做预检，再逐行应用；页内没有足够空间时返回 `kValueTooLarge`，当前不 relocate。
 
 `list_tables` 返回 system table 与用户表，使 Core 的 CatalogView 能用常规 SELECT 读取 system catalog。普通 public `insert` 和 `delete_records` 对 TableId 0/1 返回 `kInvalidRequest`；内部 catalog helper 不属于 public API。
+
+`storage_stats` 是只读快照，返回 demand 口径的 buffer pool 计数
+（`fetch_count`/`hit_count`/`miss_count`/`eviction_count`/`dirty_flush_count` 与
+`hit_rate()`），从最近一次成功的 `open_storage` 起算，`close_storage` 成功收尾后随状态归零；
+`fetch_count == 0` 时 `hit_rate()` 是 0。预取 worker 的内部读不计入这五个字段，
+也不承诺未来计入。未打开（含 Closing）时返回 `kInvalidRequest` 且 `stats` 为空，
+不返回空快照；该调用不抛异常、不改变存储状态。调用方必须在 `close_storage` 之前取数，
+否则得到的是错误而不是会话末尾的计数。
 
 ## 诊断事件日志
 

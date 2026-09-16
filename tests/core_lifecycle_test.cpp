@@ -366,6 +366,63 @@ bool test_invalid_open_and_unopened_plan_do_not_touch_storage() {
     return true;
 }
 
+bool test_storage_stats_snapshot_and_lifecycle_errors() {
+    fake::reset();
+    Database database;
+
+    // 未打开时不取快照，也不触碰 storage。
+    const auto unopened = database.storage_stats();
+    CHECK(!unopened.stats.has_value());
+    CHECK(unopened.error.has_value());
+    CHECK(unopened.error->kind == ErrorKind::kExecute);
+    CHECK(fake::state().storage_stats_calls == 0);
+
+    CHECK(open_database(database));
+    fake::set_storage_stats(tinydbms::storage::StorageStats{
+        .fetch_count = 8,
+        .hit_count = 6,
+        .miss_count = 2,
+        .eviction_count = 1,
+        .dirty_flush_count = 3});
+
+    const auto open_snapshot = database.storage_stats();
+    CHECK(open_snapshot.stats.has_value());
+    CHECK(!open_snapshot.error.has_value());
+    CHECK(open_snapshot.stats->fetch_count == 8);
+    CHECK(open_snapshot.stats->hit_count == 6);
+    CHECK(open_snapshot.stats->miss_count == 2);
+    CHECK(open_snapshot.stats->eviction_count == 1);
+    CHECK(open_snapshot.stats->dirty_flush_count == 3);
+    CHECK(open_snapshot.stats->hit_rate() == 0.75);
+    CHECK(fake::state().storage_stats_calls == 1);
+
+    // storage 报错时映射为 kStorage 且不返回半个快照。
+    fake::set_storage_stats_error(
+        tinydbms::storage::StorageError{
+            tinydbms::storage::StorageErrorKind::kIoError, "stats unavailable"});
+    const auto failed = database.storage_stats();
+    CHECK(!failed.stats.has_value());
+    CHECK(failed.error.has_value());
+    CHECK(failed.error->kind == ErrorKind::kStorage);
+
+    // storage 抛异常也被 core 收敛为 kInternal，不让观测路径穿透到入口。
+    fake::set_throw_on_storage_stats(true);
+    const auto thrown = database.storage_stats();
+    CHECK(!thrown.stats.has_value());
+    CHECK(thrown.error.has_value());
+    CHECK(thrown.error->kind == ErrorKind::kInternal);
+    fake::set_throw_on_storage_stats(false);
+
+    CHECK(!database.close().error.has_value());
+
+    // close 成功后 Database 回到未打开状态，统计不再可用。
+    const auto closed = database.storage_stats();
+    CHECK(!closed.stats.has_value());
+    CHECK(closed.error.has_value());
+    CHECK(closed.error->kind == ErrorKind::kExecute);
+    return true;
+}
+
 bool test_unexpected_storage_exceptions_are_contained() {
     fake::reset();
     Database database;
@@ -638,6 +695,7 @@ int main() {
         test_move_assignment_preserves_cleanup_handle_on_exception() &&
         test_destructor_releases_process_guard() &&
         test_invalid_open_and_unopened_plan_do_not_touch_storage() &&
+        test_storage_stats_snapshot_and_lifecycle_errors() &&
         test_unexpected_storage_exceptions_are_contained() &&
         test_storage_cleanup_is_retryable_after_pre_close_exception() &&
         test_cleanup_pending_execute_script_is_rejected_without_storage() &&

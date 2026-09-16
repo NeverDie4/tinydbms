@@ -41,6 +41,14 @@ bool write_time_line(
     std::chrono::nanoseconds elapsed,
     std::ostream& output);
 
+// 缺失率文本，固定两位小数；fetch 为 0 时是 0.00。
+std::string format_miss_rate(std::uint64_t miss_count, std::uint64_t fetch_count);
+
+// --stats 的一行：BUFFER fetch=… hit=… miss=… miss_rate=…% evictions=… flushes=…。
+bool write_storage_stats_line(
+    const tinydbms::core::StorageStats& stats,
+    std::ostream& output);
+
 // 语句级错误：编译错误使用诊断范围，其余错误由调用方给出语句范围兜底。
 bool write_statement_error(
     const tinydbms::core::Error& error,

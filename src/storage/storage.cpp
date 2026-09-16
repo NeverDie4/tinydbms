@@ -1217,6 +1217,31 @@ UpdateResult update_rows(const UpdateRequest& request) {
     }
 }
 
+double StorageStats::hit_rate() const noexcept {
+    if (fetch_count == 0) return 0.0;
+    return static_cast<double>(hit_count) / static_cast<double>(fetch_count);
+}
+
+StorageStatsResult storage_stats(const StorageStatsRequest&) {
+    try {
+        // Closing 期间不返回快照：pool 可能已被收尾，生命周期语义只承认 Open。
+        if (state.lifecycle != Lifecycle::kOpen || state.buffer_pool == nullptr) {
+            return {std::nullopt, error(StorageErrorKind::kInvalidRequest, "storage is not open")};
+        }
+        const internal::BufferPoolStats snapshot = state.buffer_pool->stats();
+        return {
+            StorageStats{
+                .fetch_count = snapshot.fetch_count,
+                .hit_count = snapshot.hit_count,
+                .miss_count = snapshot.miss_count,
+                .eviction_count = snapshot.eviction_count,
+                .dirty_flush_count = snapshot.dirty_flush_count},
+            std::nullopt};
+    } catch (...) {
+        return {std::nullopt, unexpected_exception_error()};
+    }
+}
+
 internal::BufferPool* internal::StorageTestAccess::buffer_pool() noexcept {
     return state.lifecycle == Lifecycle::kOpen ? state.buffer_pool.get() : nullptr;
 }

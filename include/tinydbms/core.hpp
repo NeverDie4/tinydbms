@@ -341,6 +341,22 @@ struct ExecuteScriptResult {
     std::vector<StatementResult> statements;
 };
 
+// 对入口只读暴露的存储观测快照：数值口径与 storage 的 demand buffer pool 计数一致，
+// 从最近一次成功 open 起算，close 成功收尾后随存储状态一起归零。
+struct StorageStats {
+    std::uint64_t fetch_count = 0;
+    std::uint64_t hit_count = 0;
+    std::uint64_t miss_count = 0;
+    std::uint64_t eviction_count = 0;
+    std::uint64_t dirty_flush_count = 0;
+    double hit_rate() const noexcept;  // fetch_count == 0 时为 0
+};
+
+struct StorageStatsResult {
+    std::optional<StorageStats> stats;  // 成功时必有值；失败时为空
+    std::optional<Error> error;
+};
+
 // core 对入口与测试暴露的有状态对象；每个实例持有自己的 Catalog 与生命周期状态。
 //
 // 线程语义：同一个实例的 open/close/execute_script 可以被多个执行流并发调用，
@@ -361,6 +377,9 @@ public:
     OpenDatabaseResult open(const OpenDatabaseRequest& request);
     CloseDatabaseResult close();
     ExecuteScriptResult execute_script(const ExecuteScriptRequest& request);
+    // 只读观测：不改变 catalog 与存储状态，也不参与执行结果判定。
+    // 未打开、cleanup-pending 或 moved-from 时返回错误，不返回空统计。
+    StorageStatsResult storage_stats();
 
 private:
     struct Impl;

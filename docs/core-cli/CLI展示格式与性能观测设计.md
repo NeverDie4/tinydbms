@@ -1,10 +1,13 @@
 # CLI 升级设计：展示格式与性能观测
 
-状态：**P1/P2 已实现，P3 待 storage 提供接口**（2026-09-16）。
-实现位置：`src/app/arguments.{hpp,cpp}`（`--format pretty`、`--time`）、
+状态：**P1/P2/P3 已实现**（2026-09-16，P3 位于 `feat/p3-buffer-stats` 分支）。
+实现位置：`src/app/arguments.{hpp,cpp}`（`--format pretty`、`--time`、`--stats`）、
 `src/app/output.{hpp,cpp}`（格式分派与计时行）、`src/app/pretty_output.{hpp,cpp}`
 （pretty 渲染器）、`src/app/value_text.{hpp,cpp}`（值文本化）、`src/app/runner.cpp`
-（默认格式选择与计时）、`src/app/terminal.{hpp,cpp}`（stdout 终端判定）。
+（默认格式选择、计时与统计输出）、`src/app/terminal.{hpp,cpp}`（stdout 终端判定）、
+`include/tinydbms/storage.hpp` + `src/storage/storage.cpp`（`storage_stats()`）、
+`include/tinydbms/core.hpp` + `src/core/database.cpp`（`Database::storage_stats()`）、
+`src/app/session*.cpp`（`Session::storage_stats()` 转发）。
 
 ## 1. 背景与范围
 
@@ -18,7 +21,7 @@
 
 - P1 `--format pretty`：人读的等宽表格；
 - P2 `--time`：每次 `execute_script` 调用的墙钟耗时；
-- P3 缓存命中/缺页统计（**跨模块**，本轮只出提案与通知，不实现）。
+- P3 `--stats`：每次执行的 buffer pool 命中/缺失汇总（**跨模块**：storage + core + CLI）。
 
 不包含：
 
@@ -135,7 +138,7 @@ TIME line 3 0.412 ms
   当前粒度是调用级，REPL 下等价于语句级。
 - 不提供累计统计（总耗时、平均耗时）：入口层不值得为此维护会话级状态。
 
-## 5. P3：buffer pool 统计（缺页率）——待 storage 落地
+## 5. P3：buffer pool 统计（缺页率）——已落地
 
 ### 5.1 术语
 
@@ -143,19 +146,19 @@ TIME line 3 0.412 ms
 需要读盘的比率，等价于 `miss_count / fetch_count`。它不是操作系统的 minor/major page fault，
 CLI 无法从 `/proc` 侧拿到对教学有意义的口径。
 
-### 5.2 现状与阻塞
+### 5.2 原有阻塞
 
-- 数据已经存在：`src/storage/buffer_pool.h` 的 `BufferPoolStats` 有
+- 数据一直存在：`src/storage/buffer_pool.h` 的 `BufferPoolStats` 有
   `fetch_count`/`hit_count`/`miss_count`/`dirty_flush_count`/`eviction_count`/`free_frame_miss_count`
   与 `hit_rate()`；
-- 但 `BufferPool::stats()` 位于 `src/` 内部头，`include/tinydbms/storage.hpp` 没有任何统计出口；
-- core 因此无法取到统计值，CLI/GUI 也不可能显示；
+- 阻塞点是它只位于 `src/` 内部头，`include/tinydbms/storage.hpp` 没有统计出口，
+  core 取不到值，CLI/GUI 也无法显示；
 - CLI 只依赖 `app::Session`（core），不能绕过 core 直接调 storage：占位构建（不可用 Session）、
   fake 测试与 GUI 后端都建立在这条边界上。
 
-**结论：缺页率当前不可实现，阻塞点是 storage 公共 API。**
+阻塞已通过下述公共契约解除。
 
-### 5.3 提案（提交给 storage 成员）
+### 5.3 落地形态（storage → core → CLI）
 
 在 `include/tinydbms/storage.hpp` 增加一组请求/结果类型，风格与现有 API 一致：
 
@@ -179,21 +182,29 @@ struct StorageStatsResult {
 StorageStatsResult storage_stats(const StorageStatsRequest& request);
 ```
 
-语义要求（需要 storage 明确确认）：
+语义：
 
 1. 计数器是**进程级累计值**，从最近一次成功的 `open_storage` 起算，`close_storage` 后归零；
 2. 未打开时返回 `StorageErrorKind::kInvalidRequest`，不是空 stats；
 3. 只有 buffer pool 的命中口径，不承诺包含预取 worker 的内部读；
 4. 该调用不得抛异常，也不得改变任何存储状态（只读快照）。
 
-落地后 core 侧再加 `Database` 的查询接口（`core.hpp` 变更），CLI/GUI 才能显示。
-入口的展示形态预留为：
+core 侧对应 `core::StorageStats` / `core::StorageStatsResult` 与
+`Database::storage_stats()`：同一把 `Impl::mutex` 下取快照，未打开（含 cleanup-pending）
+返回 `kExecute`，storage 错误映射为 `kStorage`，异常收敛为 `kInternal`；
+统计失败只影响观测，不影响执行结果。入口层经
+`Session::storage_stats()`（`CoreSession` 转发、占位构建返回不可用错误）取数。
+
+展示形态：
 
 ```text
 BUFFER fetch=128 hit=120 miss=8 miss_rate=6.25% evictions=3 flushes=2
 ```
 
-由 `--stats` 触发，通道与 `--time` 一致（stderr），两者可同时使用。
+由 `--stats` 触发，通道与 `--time` 一致（stderr），两者可同时使用（`--time` 行在前）。
+批处理每次调用一条 `BUFFER script` 快照、REPL 每行一条，取值都在 close 之前完成；
+`miss_rate` 固定两位小数，`fetch_count == 0` 时是 `0.00%`。统计失败写成一行
+`ERROR …` 诊断，不改变 stdout 与退出码。
 
 ### 5.4 逐页事件日志（storage 侧已落地）
 
@@ -228,14 +239,14 @@ demand/prefetch 边界已登记到 [storage 契约](../storage/storage-contract.
 ## 6. 需要通知其他模块
 
 - **storage**：
-  1. 请评估 §5.3 的 `StorageStatsRequest/StorageStats/StorageStatsResult` 与 `storage_stats()`；
-  2. 请确认 §5.3 的四条语义（累计与清零、未打开的错误、统计口径、只读无异常）；
-  3. PR #7 已合入，§5.5 的四项日志口径与契约同步已完成；P3 仍等待
-     `storage_stats()` 汇总接口；
-  4. 本轮 core/cli 不改 `include/tinydbms/storage.hpp`，等 storage 落地 `storage_stats()`
-     之后再动。
+  1. `include/tinydbms/storage.hpp` 与 `src/storage/storage.cpp` 已按 §5.3 落地
+     `StorageStatsRequest/StorageStats/StorageStatsResult` 与 `storage_stats()`，
+     请评审这组新增契约与四条语义（累计与清零、未打开的错误、统计口径、只读无异常）；
+  2. PR #7 的日志口径与契约同步已在 §5.5 记录完成；
+  3. 该变更在 `feat/p3-buffer-stats` 分支上，合入 main 前需要 storage 侧确认。
 - **compiler**：无。本轮不涉及 SQL 语法、Plan 结构或 `compiler.hpp`。
-- **GUI**：无。`--format pretty` 与 `--time` 只作用于 CLI；GUI 有自己的表格控件与耗时显示。
+- **GUI**：无。`--format pretty`、`--time` 与 `--stats` 只作用于 CLI；GUI 有自己的表格控件
+  与耗时显示，本轮不接入 buffer pool 统计（需要时可直接调用 `Database::storage_stats()`）。
 
 ## 7. 验收
 
@@ -246,3 +257,7 @@ demand/prefetch 边界已登记到 [storage 契约](../storage/storage-contract.
 5. `--format` 出现 `yaml` 等未知值、重复出现仍是退出码 2；`--format pretty` 被接受；
 6. 真实链路（`TINYDBMS_ENABLE_REAL_MODULES=ON`）下 pretty + `--time` 的 CREATE/INSERT/SELECT
    批处理可运行，退出码 0。
+7. `--stats` 打开后 stdout 与未打开时逐字节相同，stderr 每次执行多出一行
+   `BUFFER fetch=… hit=… miss=… miss_rate=…% evictions=… flushes=…`；
+   真实链路上 REPL 的第二次相同查询只增加命中、不增加缺失，统计失败（storage 报错或抛异常）
+   不改变退出码。

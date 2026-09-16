@@ -299,4 +299,57 @@ CloseDatabaseResult Database::close() {
     return CloseDatabaseResult{std::nullopt};
 }
 
+double StorageStats::hit_rate() const noexcept {
+    if (fetch_count == 0) return 0.0;
+    return static_cast<double>(hit_count) / static_cast<double>(fetch_count);
+}
+
+StorageStatsResult Database::storage_stats() {
+    if (impl_ == nullptr) {
+        return StorageStatsResult{
+            std::nullopt,
+            internal::make_error(ErrorKind::kExecute, "database object is moved-from")};
+    }
+    // 与 open/close/execute_script 同一把锁：快照要么在在途调用之前、要么在其之后取得，
+    // 不会读到执行中途的存储状态。
+    std::lock_guard<std::mutex> lock{impl_->mutex};
+    if (!impl_->open) {
+        return StorageStatsResult{
+            std::nullopt,
+            internal::make_error(ErrorKind::kExecute, "database is not open")};
+    }
+
+    try {
+        const storage::StorageStatsResult snapshot =
+            storage::storage_stats(storage::StorageStatsRequest{});
+        if (snapshot.error.has_value()) {
+            return StorageStatsResult{std::nullopt, internal::map_storage_error(*snapshot.error)};
+        }
+        if (!snapshot.stats.has_value()) {
+            return StorageStatsResult{
+                std::nullopt,
+                internal::make_error(ErrorKind::kInternal, "storage returned no statistics")};
+        }
+        const storage::StorageStats& source = *snapshot.stats;
+        return StorageStatsResult{
+            StorageStats{
+                .fetch_count = source.fetch_count,
+                .hit_count = source.hit_count,
+                .miss_count = source.miss_count,
+                .eviction_count = source.eviction_count,
+                .dirty_flush_count = source.dirty_flush_count},
+            std::nullopt};
+    } catch (const std::exception& exception) {
+        return StorageStatsResult{
+            std::nullopt,
+            internal::make_error(ErrorKind::kInternal, exception.what())};
+    } catch (...) {
+        return StorageStatsResult{
+            std::nullopt,
+            internal::make_error(
+                ErrorKind::kInternal,
+                "unknown exception while reading storage statistics")};
+    }
+}
+
 }  // namespace tinydbms::core

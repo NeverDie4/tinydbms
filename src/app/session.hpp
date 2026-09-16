@@ -18,6 +18,8 @@ public:
         const tinydbms::core::ExecuteScriptRequest& request) = 0;
 
     virtual tinydbms::core::CloseDatabaseResult close() = 0;
+
+    virtual tinydbms::core::StorageStatsResult storage_stats() = 0;
 };
 
 class CoreSession final : public Session {
@@ -29,6 +31,8 @@ public:
         const tinydbms::core::ExecuteScriptRequest& request) override;
 
     tinydbms::core::CloseDatabaseResult close() override;
+
+    tinydbms::core::StorageStatsResult storage_stats() override;
 
 private:
     // Delay construction until runner has accepted the command-line action.
@@ -44,6 +48,8 @@ public:
         const tinydbms::core::ExecuteScriptRequest& request) override;
 
     tinydbms::core::CloseDatabaseResult close() override;
+
+    tinydbms::core::StorageStatsResult storage_stats() override;
 };
 
 }  // namespace tinydbms::app

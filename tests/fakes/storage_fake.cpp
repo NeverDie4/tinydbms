@@ -123,6 +123,14 @@ void set_update_result(storage::UpdateResult result) {
     fake_state.update_result = std::move(result);
 }
 
+void set_storage_stats(storage::StorageStats stats) {
+    fake_state.stats_snapshot = stats;
+}
+
+void set_storage_stats_error(storage::StorageError error) {
+    fake_state.storage_stats_error = std::move(error);
+}
+
 void set_throw_on_open(bool enabled) {
     fake_state.throw_on_open = enabled;
 }
@@ -181,6 +189,10 @@ void set_throw_on_delete(bool enabled) {
 
 void set_throw_after_delete(bool enabled) {
     fake_state.throw_after_delete = enabled;
+}
+
+void set_throw_on_storage_stats(bool enabled) {
+    fake_state.throw_on_storage_stats = enabled;
 }
 
 void set_on_scan_next(std::function<void()> hook) {
@@ -597,6 +609,22 @@ UpdateResult update_rows(const UpdateRequest& request) {
     }
     sync_records_view();
     return {count,std::nullopt};
+}
+
+StorageStatsResult storage_stats(const StorageStatsRequest&) {
+    const CallScope scope{"storage_stats"};
+    ++testing::fake_storage::state().storage_stats_calls;
+    testing::fake_storage::State& fake = testing::fake_storage::state();
+    if (fake.throw_on_storage_stats) {
+        throw std::runtime_error("injected storage_stats exception");
+    }
+    if (!fake.opened) {
+        return {std::nullopt, invalid_request("storage is not open")};
+    }
+    if (fake.storage_stats_error.has_value()) {
+        return {std::nullopt, fake.storage_stats_error};
+    }
+    return {fake.stats_snapshot, std::nullopt};
 }
 
 }  // namespace tinydbms::storage

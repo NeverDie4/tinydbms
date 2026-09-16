@@ -35,6 +35,7 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
     bool error_policy_seen = false;
     bool format_seen = false;
     bool time_seen = false;
+    bool stats_seen = false;
     bool plan_seen = false;
     bool max_rows_seen = false;
 
@@ -122,6 +123,14 @@ ParseArgumentsResult parse_arguments(int argc, char* const argv[]) {
             result.show_time = true;
             continue;
         }
+        if (argument == "--stats") {
+            if (stats_seen) {
+                return make_error("--stats may appear only once");
+            }
+            stats_seen = true;
+            result.show_stats = true;
+            continue;
+        }
         if (argument == "--plan") {
             if (plan_seen) {
                 return make_error("--plan may appear only once");
@@ -183,6 +192,8 @@ bool write_help(std::ostream& output) {
            << "                         one JSON object per line\n"
            << "  --time                 print the wall-clock time of each executed script or\n"
            << "                         REPL line to stderr\n"
+           << "  --stats                print buffer pool statistics of each executed script\n"
+           << "                         or REPL line to stderr\n"
            << "  --plan                 compile only and print the execution plan; nothing is\n"
            << "                         executed and no data is modified\n"
            << "  --max-rows N           maximum rows materialized for one statement\n"

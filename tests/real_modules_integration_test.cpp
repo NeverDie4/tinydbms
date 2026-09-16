@@ -9,12 +9,14 @@
 #include "tinydbms/core.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -78,6 +80,128 @@ struct InvocationResult {
     std::string output;
     std::string error;
 };
+
+// --stats 的一行快照；字段缺一不可，任何一项解析失败都返回 nullopt。
+struct BufferSnapshot {
+    std::uint64_t fetch_count = 0;
+    std::uint64_t hit_count = 0;
+    std::uint64_t miss_count = 0;
+    std::uint64_t eviction_count = 0;
+    std::uint64_t dirty_flush_count = 0;
+    double miss_rate = 0.0;
+};
+
+std::optional<std::uint64_t> parse_count_field(
+    std::string_view token,
+    std::string_view name) {
+    if (!token.starts_with(name)) {
+        return std::nullopt;
+    }
+    token.remove_prefix(name.size());
+    std::uint64_t value = 0;
+    const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<double> parse_miss_rate_field(std::string_view token) {
+    constexpr std::string_view kName = "miss_rate=";
+    if (!token.starts_with(kName) || token.size() < kName.size() + 2U ||
+        !token.ends_with('%')) {
+        return std::nullopt;
+    }
+    token.remove_prefix(kName.size());
+    token.remove_suffix(1);  // 百分号
+    const std::size_t dot = token.find('.');
+    if (dot == std::string_view::npos || token.size() - dot != 3U) {
+        return std::nullopt;
+    }
+    std::uint64_t whole = 0;
+    std::uint64_t fraction = 0;
+    const std::string_view whole_text = token.substr(0, dot);
+    const std::string_view fraction_text = token.substr(dot + 1);
+    const auto whole_parsed = std::from_chars(
+        whole_text.data(), whole_text.data() + whole_text.size(), whole);
+    const auto fraction_parsed = std::from_chars(
+        fraction_text.data(), fraction_text.data() + fraction_text.size(), fraction);
+    if (whole_parsed.ec != std::errc{} ||
+        whole_parsed.ptr != whole_text.data() + whole_text.size() ||
+        fraction_parsed.ec != std::errc{} ||
+        fraction_parsed.ptr != fraction_text.data() + fraction_text.size()) {
+        return std::nullopt;
+    }
+    return static_cast<double>(whole) + static_cast<double>(fraction) / 100.0;
+}
+
+// 解析单行快照（不含换行符）；字段缺一不可，顺序与数量都固定。
+std::optional<BufferSnapshot> parse_buffer_snapshot_line(std::string_view line) {
+    std::vector<std::string_view> tokens;
+    std::size_t position = 0;
+    while (position <= line.size()) {
+        const std::size_t space = line.find(' ', position);
+        const std::size_t stop = space == std::string_view::npos ? line.size() : space;
+        tokens.push_back(line.substr(position, stop - position));
+        if (space == std::string_view::npos) {
+            break;
+        }
+        position = space + 1;
+    }
+    if (tokens.size() != 7U || tokens[0] != "BUFFER") {
+        return std::nullopt;
+    }
+
+    BufferSnapshot snapshot;
+    const auto fetch = parse_count_field(tokens[1], "fetch=");
+    const auto hit = parse_count_field(tokens[2], "hit=");
+    const auto miss = parse_count_field(tokens[3], "miss=");
+    const auto rate = parse_miss_rate_field(tokens[4]);
+    const auto evictions = parse_count_field(tokens[5], "evictions=");
+    const auto flushes = parse_count_field(tokens[6], "flushes=");
+    if (!fetch.has_value() || !hit.has_value() || !miss.has_value() ||
+        !rate.has_value() || !evictions.has_value() || !flushes.has_value()) {
+        return std::nullopt;
+    }
+    snapshot.fetch_count = *fetch;
+    snapshot.hit_count = *hit;
+    snapshot.miss_count = *miss;
+    snapshot.miss_rate = *rate;
+    snapshot.eviction_count = *evictions;
+    snapshot.dirty_flush_count = *flushes;
+    return snapshot;
+}
+
+// 取整段文本里的第一条 BUFFER 快照。
+std::optional<BufferSnapshot> parse_buffer_line(const std::string& text) {
+    const std::size_t begin = text.find("BUFFER ");
+    if (begin == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t end = text.find('\n', begin);
+    return parse_buffer_snapshot_line(
+        end == std::string::npos
+            ? std::string_view{text}.substr(begin)
+            : std::string_view{text}.substr(begin, end - begin));
+}
+
+std::vector<BufferSnapshot> parse_buffer_lines(const std::string& text) {
+    std::vector<BufferSnapshot> snapshots;
+    std::size_t position = 0;
+    while ((position = text.find("BUFFER ", position)) != std::string::npos) {
+        const std::size_t end = text.find('\n', position);
+        const std::string_view line = end == std::string::npos
+            ? std::string_view{text}.substr(position)
+            : std::string_view{text}.substr(position, end - position);
+        const auto snapshot = parse_buffer_snapshot_line(line);
+        if (!snapshot.has_value()) {
+            return {};
+        }
+        snapshots.push_back(*snapshot);
+        position = end == std::string::npos ? text.size() : end;
+    }
+    return snapshots;
+}
 
 InvocationResult invoke_cli(
     const std::filesystem::path& data_dir,
@@ -788,6 +912,66 @@ bool test_real_chain_row_limit_is_reported_and_recoverable() {
     return true;
 }
 
+// P3：--stats 走真实 compiler/storage 链路。stdout 与关闭时逐字节相同，
+// stderr 每次 execute_script 追加一条 BUFFER 快照；快照在 close 之前取，
+// 所以会话内计数只增不减，重复查询至少能观察到新的命中。
+bool test_real_chain_stats_reporting() {
+    TemporaryDirectory data_dir{"tinydbms-integration-stats"};
+    const InvocationResult setup = invoke_cli(
+        data_dir.path(),
+        "CREATE TABLE emp (id INT, amount BIGINT);\n"
+        "INSERT INTO emp VALUES (1, 10), (2, 20), (3, 30);\n",
+        false);
+    CHECK(setup.exit_code == 0);
+    CHECK(setup.output == "OK 0\nOK 3\n");
+
+    const std::vector<std::string> before = list_data_files(data_dir.path());
+    const InvocationResult plain = invoke_cli(
+        data_dir.path(), "SELECT * FROM emp;\n", false);
+    CHECK(plain.exit_code == 0);
+    CHECK(plain.error.empty());
+
+    // 批处理：一次调用一条快照，stdout 不受观测开关影响。
+    const InvocationResult stats = invoke_cli(
+        data_dir.path(), "SELECT * FROM emp;\n", false, {"--stats"});
+    CHECK(stats.exit_code == 0);
+    CHECK(stats.output == plain.output);
+    const auto batch_snapshot = parse_buffer_line(stats.error);
+    CHECK(batch_snapshot.has_value());
+    CHECK(batch_snapshot->fetch_count > 0);
+    CHECK(batch_snapshot->hit_count + batch_snapshot->miss_count ==
+          batch_snapshot->fetch_count);
+    CHECK(batch_snapshot->miss_rate >= 0.0 && batch_snapshot->miss_rate <= 100.0);
+    CHECK(stats.error.find("BUFFER fetch=") == stats.error.rfind("BUFFER fetch="));
+    CHECK(list_data_files(data_dir.path()) == before);
+
+    // REPL：每行一条快照，计数在同一会话内单调累加，重复查询新增命中。
+    const InvocationResult repl = invoke_cli(
+        data_dir.path(),
+        "SELECT * FROM emp;\nSELECT * FROM emp;\n",
+        true,
+        {"--stats"});
+    CHECK(repl.exit_code == 0);
+    CHECK(repl.output == "id\tamount\n1\t10\n2\t20\n3\t30\nid\tamount\n1\t10\n2\t20\n3\t30\n");
+    const std::vector<BufferSnapshot> snapshots = parse_buffer_lines(repl.error);
+    CHECK(snapshots.size() == 2);
+    CHECK(snapshots[1].fetch_count > snapshots[0].fetch_count);
+    CHECK(snapshots[1].hit_count > snapshots[0].hit_count);
+    CHECK(snapshots[1].hit_count + snapshots[1].miss_count == snapshots[1].fetch_count);
+
+    // 语句失败时仍然给出快照，且不改变退出码与 stdout。
+    const InvocationResult failing_plain = invoke_cli(
+        data_dir.path(), "SELECT * FROM missing;\n", false);
+    const InvocationResult failing_stats = invoke_cli(
+        data_dir.path(), "SELECT * FROM missing;\n", false, {"--stats"});
+    CHECK(failing_plain.exit_code == 1);
+    CHECK(failing_stats.exit_code == failing_plain.exit_code);
+    CHECK(failing_stats.output == failing_plain.output);
+    CHECK(parse_buffer_line(failing_stats.error).has_value());
+    CHECK(list_data_files(data_dir.path()) == before);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -805,7 +989,8 @@ int main() {
                 test_real_chain_cancellation_leaves_data_unchanged() &&
                 test_real_chain_concurrent_scripts_are_serialized() &&
                 test_real_chain_concurrent_close_is_clean() &&
-                test_real_chain_row_limit_is_reported_and_recoverable()
+                test_real_chain_row_limit_is_reported_and_recoverable() &&
+                test_real_chain_stats_reporting()
             ? 0
             : 1;
     } catch (const std::exception& exception) {

@@ -38,4 +38,10 @@ tinydbms::core::CloseDatabaseResult UnavailableSession::close() {
     return tinydbms::core::CloseDatabaseResult{std::nullopt};
 }
 
+tinydbms::core::StorageStatsResult UnavailableSession::storage_stats() {
+    return tinydbms::core::StorageStatsResult{
+        std::nullopt,
+        std::optional<tinydbms::core::Error>{unavailable_error()}};
+}
+
 }  // namespace tinydbms::app

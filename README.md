@@ -76,7 +76,10 @@ CLI 入口选项：`--data-dir DIR`、`--error-policy stop|analyze`、`--format 
 给人看的等宽表格，输出不是终端时默认仍是 `table` 的制表符文本）、`--plan`
 （只编译并打印执行计划，零副作用）、`--max-rows N`（单条语句在内存中物化的最大行数，
 缺省为 `kMaxQueryRows` = 262144，`0` 与非法值按参数错误处理）、`--time`
-（每次执行在 stderr 追加一行墙钟耗时，如 `TIME script 12.345 ms`，stdout 不受影响）。
+（每次执行在 stderr 追加一行墙钟耗时，如 `TIME script 12.345 ms`，stdout 不受影响）、
+`--stats`（每次执行在 stderr 追加一行 buffer pool 快照，如
+`BUFFER fetch=8 hit=5 miss=3 miss_rate=37.50% evictions=0 flushes=1`，快照在 close
+之前取，观测失败只写诊断、不影响退出码）。
 `--format`、`--plan` 与 `--max-rows` 可组合，行为契约见
 [docs/core-cli/第三阶段CLI与入口设计.md](docs/core-cli/第三阶段CLI与入口设计.md)。
 展示格式与性能观测的完整规则（边框、CJK 显示宽度、数值列右对齐、超宽单元格截断到
