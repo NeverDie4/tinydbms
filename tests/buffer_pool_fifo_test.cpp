@@ -115,17 +115,21 @@ void failures(ReplacementPolicy policy=ReplacementPolicy::kFifo) {
     auto w=f.pool->fetch_page(D); check(w.error && w.error->kind==BufferPoolErrorKind::kIo);
     check(f.events=="RW" && f.pool->stats().dirty_flush_count==0); unchanged();
     check(f.logs.find("[BUFFER][EVICT]")==std::string::npos);
-    check(f.logs.find("[BUFFER][FLUSH] table=0 page=1 frame=0 reason=eviction status=failure")
+    check(f.logs.find(policy==ReplacementPolicy::kFifo
+                          ? "[BUFFER][FLUSH] table=0 page=1 frame=0 policy=FIFO reason=eviction status=failure"
+                          : "[BUFFER][FLUSH] table=0 page=1 frame=0 policy=LRU reason=eviction status=failure")
           !=std::string::npos);
     f.fail_write.reset(); f.events.clear(); { auto d=f.fetch(D); }
     check(f.events=="RW" && !f.has(A) && f.has(D));
     check(f.pool->stats().dirty_flush_count==1);
     check(f.pool->stats().eviction_count==1);
     check(f.logs.find(policy==ReplacementPolicy::kFifo
-                          ? "[BUFFER][EVICT] policy=FIFO table=0 page=1 frame=0 dirty=true"
-                          : "[BUFFER][EVICT] policy=LRU table=0 page=1 frame=0 dirty=true")
+                          ? "[BUFFER][EVICT] table=0 page=1 frame=0 policy=FIFO dirty=true"
+                          : "[BUFFER][EVICT] table=0 page=1 frame=0 policy=LRU dirty=true")
           !=std::string::npos);
-    check(f.logs.find("[BUFFER][FLUSH] table=0 page=1 frame=0 reason=eviction status=success")
+    check(f.logs.find(policy==ReplacementPolicy::kFifo
+                          ? "[BUFFER][FLUSH] table=0 page=1 frame=0 policy=FIFO reason=eviction status=success"
+                          : "[BUFFER][FLUSH] table=0 page=1 frame=0 policy=LRU reason=eviction status=success")
           !=std::string::npos);
     auto disk=f.files->find_table_file(0)->read_page(1); check(disk.value && disk.value->bytes[0]==std::byte{77});
     check(f.pool->stats().fetch_count==f.pool->stats().hit_count+f.pool->stats().miss_count);
@@ -157,12 +161,16 @@ void lru_and_logs() {
         auto stats=f.pool->stats();
         check(stats.fetch_count==5 && stats.hit_count==1 && stats.miss_count==4 &&
               stats.eviction_count==1 && stats.dirty_flush_count==0 && stats.hit_rate()==0.2);
+        const std::string policy_text=policy==ReplacementPolicy::kFifo ? "policy=FIFO" : "policy=LRU";
         check(f.logs.find("[BUFFER][MISS] table=0 page=1")!=std::string::npos);
+        check(f.logs.find("[BUFFER][MISS] table=0 page=1 "+policy_text)!=std::string::npos);
         check(f.logs.find("[BUFFER][LOAD] table=0 page=1 frame=0")!=std::string::npos);
+        check(f.logs.find("[BUFFER][LOAD] table=0 page=1 frame=0 "+policy_text)!=std::string::npos);
         check(f.logs.find("[BUFFER][HIT] table=0 page=1 frame=")!=std::string::npos);
+        check(f.logs.find("[BUFFER][HIT] table=0 page=1 frame=0 "+policy_text)!=std::string::npos);
         check(f.logs.find(policy==ReplacementPolicy::kFifo
-                              ? "[BUFFER][EVICT] policy=FIFO table=0 page=1 frame=0 dirty=false"
-                              : "[BUFFER][EVICT] policy=LRU table=0 page=2 frame=1 dirty=false")
+                              ? "[BUFFER][EVICT] table=0 page=1 frame=0 policy=FIFO dirty=false"
+                              : "[BUFFER][EVICT] table=0 page=2 frame=1 policy=LRU dirty=false")
               !=std::string::npos);
     }
     Fixture f(ReplacementPolicy::kLru);

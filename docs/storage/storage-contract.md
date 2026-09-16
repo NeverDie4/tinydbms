@@ -22,6 +22,16 @@ Core 负责 catalog snapshot、Plan 调度、表达式、WHERE 与 projection。
 
 `list_tables` 返回 system table 与用户表，使 Core 的 CatalogView 能用常规 SELECT 读取 system catalog。普通 public `insert` 和 `delete_records` 对 TableId 0/1 返回 `kInvalidRequest`；内部 catalog helper 不属于 public API。
 
+## 诊断事件日志
+
+`TINYDBMS_BUFFER_EVENT_LOG=1` 在 `open_storage` 时为 BufferPool 装配诊断 sink，逐行写 stderr；变量缺省或不是精确值 `1` 时关闭。事件文本不是 CLI 的机器解析接口：
+
+```text
+[BUFFER][HIT|MISS|LOAD|EVICT|FLUSH] table=<id> page=<id> [frame=<id>] policy=FIFO|LRU [dirty=true|false] [reason=<reason>] [status=success|failure]
+```
+
+事件为 `HIT`、`MISS`、`LOAD`、`EVICT`、`FLUSH`。HIT/MISS/LOAD/EVICT 只记录 demand 请求，预取 worker 的内部事件不写日志；FLUSH 的 reason 为 `eviction`、`explicit`、`flush_all`、`release_table`、`shutdown` 或 `experiment`，status 表示该次 dirty write 的成功或失败。日志不包含 Page payload，`string_view` 只在 sink 回调期间有效；sink 不得重入或修改 BufferPool，sink 异常必须被隔离且不能改变操作结果。
+
 ## 生命周期与 cursor
 
 Storage 是 singleton：正常数据操作仅在 open 状态可用。BufferPool 关闭失败会恢复 Open 并保留 cursor；文件或 metadata 收尾失败会保持 Closing。两类失败都必须由当前 owner 重试 `close_storage`，完整成功后才释放状态并允许 reopen。已 Closed 的重复 close 是成功 no-op。

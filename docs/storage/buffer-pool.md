@@ -41,7 +41,7 @@
 
 private errors：kInvalidArgument、kNoVictim、kIo、kCorrupt。PageFile 三类错误按含义直接映射，不新增公共 StorageErrorKind。invalid/free/out-of-range page 不缓存。
 
-fetch_count = hit_count + miss_count；基础检查失败不计数，read failure/no empty 仍计 miss。hit_rate 在零 fetch 时为 0，否则使用浮点除法。pin/count 都在递增前检查溢出，unpin 在递减前检查零值。
+fetch_count = hit_count + miss_count；基础检查失败不计数，read failure/no empty 仍计 miss。hit_count/miss_count 是 demand 口径；预取内部的命中/缺失只计入 prefetch_* 计数。eviction_count 与 dirty_flush_count 继续按实际提交的 replacement/write 计数。hit_rate 在零 fetch 时为 0，否则使用浮点除法。pin/count 都在递增前检查溢出，unpin 在递减前检查零值。
 
 `PageFileStats` 在 `read_raw_page_locked`/`write_raw_page_locked` 统计物理 stream read/write 的尝试、成功、失败、字节数与耗时；它不是 BufferPool miss 计数。另记录 flush 次数/耗时以及成功逻辑 read/write 的顺序局部性距离。
 
@@ -83,8 +83,10 @@ release_table 只有在全部目标 flush 成功后才移除对应 FIFO 条目�
 
 LRU 复用已有 FrameId 顺序容器和唯一 fetch/eviction 流程：成功 HIT 在 pin 成功后移动到队尾；成功 MISS/replace 在 commit 后进入队尾。FIFO 的 HIT 不重排。unpin、mark_dirty、flush 均不算 access。跳过 pinned Frame 不改变其年龄。实现无需第二套 eviction、虚基类或工厂。
 
-Stats 保持 fetch_count、hit_count、miss_count、eviction_count、dirty_flush_count 和原 hit_rate 口径。
-可选 LogSink 接收轻量文本事件 Buffer HIT、Buffer MISS、Evict、Flush dirty，包含 table/page、相关 frame、policy 与写回 result，不含 payload。空 sink 不构建/输出日志；日志异常被隔离，不影响操作结果。sink 不得重入或修改 BufferPool，string_view 只能在回调期间使用。
+Stats 保持 fetch_count、hit_count、miss_count、eviction_count、dirty_flush_count 和原 hit_rate 口径，其中 HIT/MISS 为 demand 口径。
+可选 LogSink 接收结构化诊断事件 HIT、MISS、LOAD、EVICT、FLUSH。格式为
+`[BUFFER][HIT|MISS|LOAD|EVICT|FLUSH] table=<id> page=<id> [frame=<id>] policy=FIFO|LRU [dirty=true|false] [reason=<FlushReason>] [status=success|failure]`，
+包含 table/page 与相关 frame，不含 payload。事件日志记录 demand 发起的 HIT/MISS/LOAD/EVICT；预取 worker 的内部事件不写日志，另由 prefetch_* 计数观察。FLUSH 记录显式 flush、flush_all、release_table、shutdown、实验刷新和 demand 淘汰写回。空 sink 不构建/输出日志；日志异常被隔离，不影响操作结果。sink 不得重入或修改 BufferPool，string_view 只能在回调期间使用。
 
 StorageState 先拥有 FileManager，后拥有 BufferPool；销毁及 reset 显式先销毁池。生产默认 64 Frames、FIFO、日志关闭，不扩公共配置 API。storage_test_access.h 仅供私有测试访问池/文件、配置小容量与注入失败，core 不使用。
 

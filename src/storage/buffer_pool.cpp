@@ -28,7 +28,7 @@ std::string_view event_name(BufferEvent event) noexcept {
         case BufferEvent::kEvict: return "EVICT";
         case BufferEvent::kFlush: return "FLUSH";
     }
-    std::terminate();
+    return "UNKNOWN";
 }
 std::string_view flush_reason_name(FlushReason reason) noexcept {
     switch (reason) {
@@ -39,7 +39,7 @@ std::string_view flush_reason_name(FlushReason reason) noexcept {
         case FlushReason::kShutdown: return "shutdown";
         case FlushReason::kExperiment: return "experiment";
     }
-    std::terminate();
+    return "UNKNOWN";
 }
 }
 
@@ -124,11 +124,10 @@ void BufferPool::log_event(BufferEvent event, PageKey key, std::optional<FrameId
     if (!log_) return;
     try {
         std::string message = "[BUFFER][" + std::string(event_name(event)) + "]";
-        if (event == BufferEvent::kEvict)
-            message += policy_ == ReplacementPolicy::kFifo ? " policy=FIFO" : " policy=LRU";
         message += " table=" + std::to_string(key.table_id) +
             " page=" + std::to_string(key.page_id);
         if (frame) message += " frame=" + std::to_string(*frame);
+        message += policy_ == ReplacementPolicy::kFifo ? " policy=FIFO" : " policy=LRU";
         if (dirty) message += *dirty ? " dirty=true" : " dirty=false";
         if (reason) message += " reason=" + std::string(flush_reason_name(*reason));
         if (!status.empty()) message += " status=" + std::string(status);
@@ -428,7 +427,10 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
         }
         if (found != page_table_.end() && frames_[found->second].state == FrameState::kReady) {
             Frame& frame = frames_[found->second];
-            if (!classified) ++stats_.hit_count;
+            if (!classified && !prefetch) {
+                ++stats_.hit_count;
+                if (log_) log_event(BufferEvent::kHit, key, found->second);
+            }
             if (frame.replacement_reserved) {
                 if (frame.access_generation == std::numeric_limits<std::uint64_t>::max())
                     return {std::nullopt, invalid("BufferPool Frame access generation exhausted")};
@@ -437,10 +439,13 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             if (!frame.try_pin()) return {std::nullopt, invalid("Frame pin count overflow")};
             consume_prefetch_locked(frame, !classified);
             if (policy_ == ReplacementPolicy::kLru) fifo_.record_load(found->second);
-            if (!prefetch && log_) log_event(BufferEvent::kHit, key, found->second);
             return {PageGuard(*this, found->second), std::nullopt};
         }
-        if (!prefetch && !classified) { ++stats_.miss_count; classified = true; }
+        if (!prefetch && !classified) {
+            ++stats_.miss_count;
+            classified = true;
+            if (log_) log_event(BufferEvent::kMiss, key);
+        }
         std::shared_ptr<LoadCompletion> completion;
         if (found != page_table_.end()) {
             Frame& frame = frames_[found->second];
@@ -483,7 +488,6 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             if (policy_ == ReplacementPolicy::kLru) fifo_.record_load(ready->second);
             return {PageGuard(*this, ready->second), std::nullopt};
         }
-        if (!prefetch && log_) log_event(BufferEvent::kMiss, key);
         const auto empty = std::find_if(frames_.begin(), frames_.end(),
                                        [](const Frame& frame) { return frame.state == FrameState::kFree; });
         if (empty != frames_.end()) {
@@ -580,11 +584,12 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
                                                 "all resident Frames are pinned"}};
         Frame& target = frames_[*candidate];
         const auto old_key = target.key;
+        const bool old_dirty = old_key && target.dirty;
         if (target.ticket == std::numeric_limits<std::uint64_t>::max())
             return {std::nullopt, invalid("BufferPool Frame ticket exhausted")};
         if (old_key && stats_.eviction_count == std::numeric_limits<std::uint64_t>::max())
             return {std::nullopt, invalid("BufferPool eviction counter exhausted")};
-        if (old_key && !target.dirty) {
+        if (old_key && !old_dirty) {
             ++stats_.clean_victim_selection_count;
             if (target.replacement_ticket == std::numeric_limits<std::uint64_t>::max())
                 return {std::nullopt, invalid("BufferPool replacement ticket exhausted")};
@@ -688,7 +693,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
             if (prefetch) return {};
             return {PageGuard(*this, *candidate), std::nullopt};
         }
-        if (old_key && target.dirty) {
+        if (old_key && old_dirty) {
             ++stats_.dirty_victim_selection_count;
             if (target.replacement_ticket == std::numeric_limits<std::uint64_t>::max())
                 return {std::nullopt, invalid("BufferPool replacement ticket exhausted")};
@@ -882,7 +887,7 @@ BufferPoolResult<PageGuard> BufferPool::load_page(PageKey key, LoadOrigin origin
         if (old_key) {
             ++stats_.eviction_count;
             if (!prefetch && log_) {
-                log_event(BufferEvent::kEvict, *old_key, *candidate, target.dirty);
+                log_event(BufferEvent::kEvict, *old_key, *candidate, old_dirty);
                 log_event(BufferEvent::kLoad, key, *candidate);
             }
         } else if (!prefetch && log_) {

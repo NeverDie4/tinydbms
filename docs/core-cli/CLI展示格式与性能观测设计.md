@@ -195,57 +195,43 @@ BUFFER fetch=128 hit=120 miss=8 miss_rate=6.25% evictions=3 flushes=2
 
 由 `--stats` 触发，通道与 `--time` 一致（stderr），两者可同时使用。
 
-### 5.4 逐页事件日志（storage 侧已有实现，未并入 main）
+### 5.4 逐页事件日志（storage 侧已落地）
 
 `origin/codex/log` 分支的 `73cbf5a`（PR #7）把 buffer pool 的事件日志改成结构化枚举
 （`kHit/kMiss/kLoad/kEvict/kFlush` + `FlushReason`），并在 `storage.cpp` 里用
 `TINYDBMS_BUFFER_EVENT_LOG=1` 装配 `LogSink`，输出 `[BUFFER][HIT] table=… page=… frame=… policy=…`
 到 `std::clog`（stderr），默认关闭。
 
-现状：main 里已有 `LogSink` 与 `log_event` 机制，但 `storage.cpp` 的
-`BufferPool::create` 调用**没有传 sink**，所以默认构建下不会输出任何日志；PR #7 尚未合并，
-`docs/storage/storage-contract.md` 也没有登记这个开关。
+PR #7 已合入 main；`TINYDBMS_BUFFER_EVENT_LOG`、事件字段、reason 取值和
+demand/prefetch 边界已登记到 [storage 契约](../storage/storage-contract.md)。
+默认构建仍然不输出事件日志。
 
-它与 `--stats` 是同一批数据的两种出口：`--stats` 给汇总计数，事件日志给逐页轨迹。
-两者都归 storage 契约，需要 storage 成员确认后再改入口。
+它与计划中的 `--stats` 是两种观察出口：`--stats` 给汇总计数，事件日志给 demand
+逐页轨迹。事件日志明确不记录预取 worker 内部事件；后者由 prefetch_* 计数观察。
 
-### 5.5 PR #7（`codex/log`）审查结论
+### 5.5 PR #7（`codex/log`）审查与处理结果
 
-审查时间 2026-09-16，实测记录：
+审查时间 2026-09-16；PR #7 已合入，以下 4 项已按最保守口径处理：
 
-- base 是旧 main（`4e66b97`，落后当前 main 7 个提交），但合入当前 main 无冲突；
-- `-DTINYDBMS_ENABLE_REAL_MODULES=ON` 构建成功，`ctest` **65/65 通过**；
-- 严格警告（`-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion`）零警告；
-- 开关在真实链路生效，实测输出包含
-  `[BUFFER][MISS] table=1 page=1`、`[BUFFER][LOAD] table=1 page=1 frame=0`、
-  `[BUFFER][FLUSH] table=0 page=1 frame=1 reason=explicit status=success`。
-
-以下 4 项需 storage 处理，都不影响当前正确性，属口径与健壮性：
-
-1. **日志口径 ≠ 统计口径**。main 的 HIT/MISS/Evict 是无条件记录的，PR #7 改成
-   `if (!prefetch && log_)`；而 `stats_.hit_count` 仍计入预取 worker 的命中
-   （`miss_count` 却排除预取 worker 的缺失，`fetch_count` 只统计 demand 调用）。
-   于是"数日志行数"与 `--stats` 的 `hit_rate` 会对不上，需要 storage 明确两者口径，
-   或让两者一致。
-2. **`event_name` / `flush_reason_name` 用 `std::terminate()` 兜底**。给枚举新增取值
-   却忘记改映射会直接终止进程；这两处是格式化辅助函数而非不变量断言，建议
-   `return "UNKNOWN";`。
-3. **EVICT 的 `dirty=` 是死值**。干净 victim 的提交路径在记录事件之前已把
-   `target.dirty` 置为 `false`，随后 `log_event(…, target.dirty)` 读到的恒为 `false`。
-   当前该路径只接受干净 victim（`can_commit` 要求 `!target.dirty`），结果正确，
-   但建议改成显式常量或提前快照，避免路径扩展后误报。
-4. **契约文档未同步**。`TINYDBMS_BUFFER_EVENT_LOG`、`[BUFFER][…]` 文本格式与
-   `FlushReason` 取值均未写进 `docs/storage/storage-contract.md`；
-   `docs/storage/buffer-pool.md` 第 87 行仍写着旧的 `Buffer HIT / Buffer MISS / Evict /
-   Flush dirty` 命名，合并前应一并更新。
+1. **日志口径 ≠ 统计口径**。HIT/MISS 日志与 `stats_.hit_count`/`miss_count` 已统一为
+   demand 口径；`fetch_count` 仍只统计 demand 调用，预取 worker 的内部事件继续只由
+   `prefetch_*` 与 `useful_prefetch` 计数观察。于是日志中的 demand HIT/MISS 可与
+   `--stats` 的数值互相印证。
+2. **枚举兜底会终止进程**。`event_name` / `flush_reason_name` 已改为对未知取值返回
+   `UNKNOWN`，格式化辅助函数不再因新增枚举而直接终止进程。
+3. **EVICT 的 `dirty=` 是死值**。淘汰路径已在提交前快照 `old_dirty`，事件现在报告
+   victim 被替换时的真实脏页状态。
+4. **契约文档未同步**。`TINYDBMS_BUFFER_EVENT_LOG`、事件字段、`FlushReason` 取值与
+   demand/prefetch 边界已写入 [storage 契约](../storage/storage-contract.md)，
+   `docs/storage/buffer-pool.md` 也改用新的结构化事件名称。
 
 ## 6. 需要通知其他模块
 
 - **storage**：
   1. 请评估 §5.3 的 `StorageStatsRequest/StorageStats/StorageStatsResult` 与 `storage_stats()`；
   2. 请确认 §5.3 的四条语义（累计与清零、未打开的错误、统计口径、只读无异常）；
-  3. 请合并 `codex/log`（PR #7），处理 §5.5 的四项，并把 `TINYDBMS_BUFFER_EVENT_LOG`
-     与 `[BUFFER][…]` 格式写进 `docs/storage/storage-contract.md`；
+  3. PR #7 已合入，§5.5 的四项日志口径与契约同步已完成；P3 仍等待
+     `storage_stats()` 汇总接口；
   4. 本轮 core/cli 不改 `include/tinydbms/storage.hpp`，等 storage 落地 `storage_stats()`
      之后再动。
 - **compiler**：无。本轮不涉及 SQL 语法、Plan 结构或 `compiler.hpp`。

@@ -188,7 +188,8 @@ void physical_read_gate_and_retry(bool clean_victim, bool fail) {
 void ready_hit_and_unused_eviction() {
     Fixture f; f.make(1);
     f.submit(1); f.idle();
-    check(f.pool->stats().fetch_count == 0 && f.pool->stats().prefetch_ready == 1);
+    check(f.pool->stats().fetch_count == 0 && f.pool->stats().hit_count == 0 &&
+          f.pool->stats().miss_count == 0 && f.pool->stats().prefetch_ready == 1);
     f.warm(1); f.warm(1);
     check(f.pool->stats().prefetch_hit == 1 && f.pool->stats().useful_prefetch == 1);
     f.submit(2); f.idle();
@@ -376,4 +377,3 @@ int main() {
         std::cout << "PREF-1 deterministic contracts passed\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
-

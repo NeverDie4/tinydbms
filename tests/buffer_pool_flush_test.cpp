@@ -212,10 +212,10 @@ void flush_reasons_are_reported() {
     check(!f.pool->release_table(1));
     f.dirty({0,3});
     check(!f.pool->close());
-    check(f.logs.find("[BUFFER][FLUSH] table=0 page=1 frame=0 reason=explicit")!=std::string::npos);
-    check(f.logs.find("[BUFFER][FLUSH] table=0 page=2 frame=1 reason=flush_all")!=std::string::npos);
-    check(f.logs.find("[BUFFER][FLUSH] table=1 page=1 frame=2 reason=release_table")!=std::string::npos);
-    check(f.logs.find("[BUFFER][FLUSH] table=0 page=3 frame=2 reason=shutdown")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=1 frame=0 policy=FIFO reason=explicit")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=2 frame=1 policy=FIFO reason=flush_all")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=1 page=1 frame=2 policy=FIFO reason=release_table")!=std::string::npos);
+    check(f.logs.find("[BUFFER][FLUSH] table=0 page=3 frame=2 policy=FIFO reason=shutdown")!=std::string::npos);
 }
 }
 int main() {
