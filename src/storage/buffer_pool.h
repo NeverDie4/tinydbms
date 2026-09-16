@@ -29,6 +29,8 @@ struct PageKeyHash {
 };
 using FrameId = std::size_t;
 enum class ReplacementPolicy { kFifo, kLru };
+enum class BufferEvent { kHit, kMiss, kLoad, kEvict, kFlush };
+enum class FlushReason { kEviction, kExplicit, kFlushAll, kReleaseTable, kShutdown, kExperiment };
 enum class LifecycleState { kOpen, kClosing, kClosed };
 enum class FrameState { kFree, kLoading, kReady };
 
@@ -201,12 +203,13 @@ private:
     void stop_prefetch_worker(); // never called with metadata_mutex_ held
     void prefetch_worker_loop() noexcept;
     void consume_prefetch_locked(Frame& frame, bool ready_hit) noexcept;
-    void log_event(std::string_view event, PageKey key, std::optional<FrameId> frame = {},
-                   std::string_view result = {}) const noexcept;
+    void log_event(BufferEvent event, PageKey key, std::optional<FrameId> frame = {},
+                   std::optional<bool> dirty = {}, std::optional<FlushReason> reason = {},
+                   std::string_view status = {}) const noexcept;
     bool is_open_locked() const noexcept;
     static void reset_to_free(Frame& frame) noexcept;
-    std::optional<BufferPoolError> flush_frame_locked(Frame& frame);
-    std::optional<BufferPoolError> flush_all_locked();
+    std::optional<BufferPoolError> flush_frame_locked(FrameId frame, FlushReason reason);
+    std::optional<BufferPoolError> flush_all_locked(FlushReason reason);
     void mark_dirty(FrameId frame) noexcept;
     void unpin(FrameId frame) noexcept;
     void unpin_locked(FrameId frame) noexcept;
