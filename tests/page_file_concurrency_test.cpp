@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -63,19 +64,16 @@ private:
 
 template <typename Work>
 void concurrently(unsigned count, Work work) {
-    std::atomic<unsigned> ready = 0;
-    std::atomic<bool> start = false;
+    std::barrier start(static_cast<std::ptrdiff_t>(count) + 1);
     std::vector<std::thread> threads;
     threads.reserve(count);
     for (unsigned index = 0; index < count; ++index) {
         threads.emplace_back([&, index] {
-            ready.fetch_add(1, std::memory_order_release);
-            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            start.arrive_and_wait();
             work(index);
         });
     }
-    while (ready.load(std::memory_order_acquire) != count) std::this_thread::yield();
-    start.store(true, std::memory_order_release);
+    start.arrive_and_wait();
     for (auto& thread : threads) thread.join();
 }
 
