@@ -1203,22 +1203,41 @@ struct AggregateGroup {
         lhs.begin(), lhs.end(), rhs.begin(), grouping_value_equal);
 }
 
+// NaN 与自身用 operator== 比较也为假，不能满足 unordered_map 对键等价关系
+// 的自反要求。含 NaN 的键不能进入哈希索引，由调用方保留原有的逐项语义。
+[[nodiscard]] bool key_contains_nan(const std::vector<Value>& key) noexcept {
+    for (const Value& value : key) {
+        const auto* number = std::get_if<double>(&value.data);
+        if (number != nullptr && std::isnan(*number)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 单值哈希必须与 grouping_value_equal / 精确键相等完全一致：变体下标参与区分，
 // -0.0 归一成 0.0（比较语义认为两者相等），其余按值哈希。哈希只用于分桶，
 // 相等判定仍由 grouping_value_equal 决定，所以允许碰撞但不允许"相等却不同桶"。
 [[nodiscard]] std::size_t value_hash(const Value& value) noexcept {
-    return std::visit(
-        [](const auto& item) -> std::size_t {
-            using Item = std::decay_t<decltype(item)>;
-            if constexpr (std::is_same_v<Item, std::monostate>) {
-                return 0U;
-            } else if constexpr (std::is_same_v<Item, double>) {
-                return std::hash<double>{}(item == 0.0 ? 0.0 : item);
-            } else {
-                return std::hash<Item>{}(item);
-            }
-        },
-        value.data);
+    if (std::holds_alternative<std::monostate>(value.data)) {
+        return 0U;
+    }
+    if (const auto* item = std::get_if<std::int32_t>(&value.data)) {
+        return std::hash<std::int32_t>{}(*item);
+    }
+    if (const auto* item = std::get_if<std::int64_t>(&value.data)) {
+        return std::hash<std::int64_t>{}(*item);
+    }
+    if (const auto* item = std::get_if<double>(&value.data)) {
+        return std::hash<double>{}(*item == 0.0 ? 0.0 : *item);
+    }
+    if (const auto* item = std::get_if<bool>(&value.data)) {
+        return std::hash<bool>{}(*item);
+    }
+    if (const auto* item = std::get_if<std::string>(&value.data)) {
+        return std::hash<std::string>{}(*item);
+    }
+    return 0U;
 }
 
 struct ValueKeyHash {
@@ -1782,8 +1801,9 @@ ExecuteResult Database::Impl::execute_query(
                         }
                         key.push_back(found);
                     }
-                    // NULL 键与任何值的比较都是 UNKNOWN，不可能成为结果，直接跳过。
-                    if (!has_null) {
+                    // NULL 键与任何值的比较都是 UNKNOWN；NaN 与自身也不等，
+                    // 两者都不可能成为等值连接结果，直接跳过。
+                    if (!has_null && !key_contains_nan(key)) {
                         right_index[std::move(key)].push_back(index);
                     }
                 }
@@ -1805,7 +1825,7 @@ ExecuteResult Database::Impl::execute_query(
                         }
                         key.push_back(found);
                     }
-                    if (has_null) {
+                    if (has_null || key_contains_nan(key)) {
                         continue;
                     }
                     const auto candidates = right_index.find(key);
@@ -1863,13 +1883,19 @@ ExecuteResult Database::Impl::execute_query(
                         if (const Error* error = std::get_if<Error>(&value)) return *error;
                         keys.push_back(**std::get_if<const Value*>(&value));
                     }
-                    const auto found = group_index.find(keys);
+                    // NaN 不满足哈希键的自反性，每个含 NaN 的行单独成组。
+                    const bool isolated_nan_group = key_contains_nan(keys);
+                    const auto found = isolated_nan_group
+                        ? group_index.end()
+                        : group_index.find(keys);
                     if (found == group_index.end()) {
                         groups.push_back(AggregateGroup{
                             std::move(keys),
                             std::vector<AggregateState>(aggregate->aggregates.size())});
                         group_position = groups.size() - 1U;
-                        group_index.emplace(groups.back().keys, group_position);
+                        if (!isolated_nan_group) {
+                            group_index.emplace(groups.back().keys, group_position);
+                        }
                     } else {
                         group_position = found->second;
                     }

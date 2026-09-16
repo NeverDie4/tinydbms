@@ -4,6 +4,7 @@
 #include "tinydbms/core.hpp"
 #include "../src/core/expression.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -1288,6 +1289,77 @@ bool test_hash_join_and_group_paths_preserve_semantics() {
     CHECK(std::get<std::int32_t>(group_rows_over_join->rows[1][0].data) == 2);
     CHECK(std::get<std::int64_t>(group_rows_over_join->rows[1][1].data) == 1);
     CHECK(close_database(aggregated));
+    return true;
+}
+
+bool test_nan_keys_are_isolated_in_hash_paths() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    Database grouped;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({measurements_table()});
+    fake::set_records_for_table(3, {
+        record(1, {Value{nan}}),
+        record(2, {Value{nan}}),
+        record(3, {Value{1.0}}),
+        record(4, {Value{nan}})});
+    CHECK(open_database(grouped));
+
+    auto aggregate = std::make_unique<PlanNode>(AggregateNode{
+        {7},
+        {{AggregateKind::kCount, std::nullopt, 20, Type::kBigInt, false}},
+        scan(3, {{0, 7}})});
+    auto aggregate_project =
+        std::make_unique<PlanNode>(ProjectNode{{7, 20}, std::move(aggregate)});
+    const auto grouped_result = execute_plan(
+        grouped,
+        query(
+            std::move(aggregate_project),
+            {{7, "value", Type::kDouble, false},
+             {20, "COUNT(*)", Type::kBigInt, false}}));
+    const QueryResult* grouped_rows = query_of(grouped_result.statements.front());
+    CHECK(grouped_rows != nullptr && grouped_rows->rows.size() == 4);
+    CHECK(std::isnan(std::get<double>(grouped_rows->rows[0][0].data)));
+    CHECK(std::get<std::int64_t>(grouped_rows->rows[0][1].data) == 1);
+    CHECK(std::isnan(std::get<double>(grouped_rows->rows[1][0].data)));
+    CHECK(std::get<std::int64_t>(grouped_rows->rows[1][1].data) == 1);
+    CHECK(std::get<double>(grouped_rows->rows[2][0].data) == 1.0);
+    CHECK(std::get<std::int64_t>(grouped_rows->rows[2][1].data) == 1);
+    CHECK(std::isnan(std::get<double>(grouped_rows->rows[3][0].data)));
+    CHECK(std::get<std::int64_t>(grouped_rows->rows[3][1].data) == 1);
+    CHECK(close_database(grouped));
+
+    Database joined;
+    fake::reset();
+    fake_compiler::reset();
+    fake::set_tables({measurements_table(), nullable_measurements_table()});
+    fake::set_records_for_table(3, {
+        record(1, {Value{nan}}),
+        record(2, {Value{1.0}}),
+        record(3, {Value{2.0}})});
+    fake::set_records_for_table(7, {
+        record(1, {Value{nan}}),
+        record(2, {Value{1.0}}),
+        record(3, {Value{1.0}}),
+        record(4, {Value{2.0}})});
+    CHECK(open_database(joined));
+
+    auto join = std::make_unique<PlanNode>(JoinNode{
+        JoinKind::kInner,
+        compare(CmpOp::kEq, column(3), column(7)),
+        scan(3, {{0, 3}}),
+        scan(7, {{0, 7}})});
+    auto join_project = std::make_unique<PlanNode>(ProjectNode{{3}, std::move(join)});
+    const auto joined_result = execute_plan(
+        joined,
+        query(std::move(join_project), {{3, "value", Type::kDouble, false}}));
+    const QueryResult* joined_rows = query_of(joined_result.statements.front());
+    CHECK(joined_rows != nullptr && joined_rows->rows.size() == 3);
+    CHECK(std::get<double>(joined_rows->rows[0][0].data) == 1.0);
+    CHECK(std::get<double>(joined_rows->rows[1][0].data) == 1.0);
+    CHECK(std::get<double>(joined_rows->rows[2][0].data) == 2.0);
+    CHECK(close_database(joined));
     return true;
 }
 
@@ -2905,6 +2977,7 @@ int main() {
         test_query_output_metadata_must_match_project_positions() &&
         test_inner_join_uses_non_positional_slots() &&
         test_hash_join_and_group_paths_preserve_semantics() &&
+        test_nan_keys_are_isolated_in_hash_paths() &&
         test_sort_uses_slot_bindings_and_rejects_invalid_plans() &&
         test_aggregate_uses_derived_slots_and_validates_plans() &&
         test_delete_collects_ids_and_allows_empty_delete() &&
